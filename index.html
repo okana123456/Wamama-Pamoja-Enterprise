@@ -960,11 +960,13 @@ function renderShell(){
           <div class="user">
             <button class="btn-ghost" onclick="toggleTheme()" title="Toggle dark mode">${themeIcon()}</button>
             <button class="btn-ghost" onclick="openSwitchUser()" title="Switch user (PIN)">${switchIcon()}</button>
-            <div style="text-align:right">
-              <div class="name">${state.staff.full_name}</div>
-              <div class="role">${state.staff.role}</div>
-            </div>
-            <div class="av">${initials(state.staff.full_name)}</div>
+            <button class="btn-ghost" onclick="openEditProfile()" title="Edit your profile" style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:var(--radius-sm)">
+              <div style="text-align:right">
+                <div class="name">${state.staff.full_name}</div>
+                <div class="role" style="display:flex;align-items:center;gap:4px">${state.staff.role} <span style="font-size:9px;opacity:.6">✎</span></div>
+              </div>
+              <div class="av">${initials(state.staff.full_name)}</div>
+            </button>
             <button class="btn-ghost" onclick="signOut()" title="Sign out">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
             </button>
@@ -4078,6 +4080,63 @@ async function ensurePin(){
     ]
   });
 }
+function openEditProfile(){
+  const s = state.staff;
+  modal({
+    title: 'Edit your profile',
+    body: `
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--text-muted)">
+        Editing your own display name and phone number. Your email and role can only be changed by a system administrator.
+      </div>
+      <div class="field">
+        <label>Full name *</label>
+        <input id="ep-name" type="text" value="${s.full_name||''}" placeholder="Your full name" required />
+      </div>
+      <div class="field">
+        <label>Phone</label>
+        <input id="ep-phone" type="tel" value="${s.phone||''}" placeholder="e.g. 0712345678" />
+      </div>
+      <div class="field">
+        <label>Email (read-only)</label>
+        <input type="email" value="${s.email||''}" disabled />
+      </div>
+      <div class="field">
+        <label>Role (read-only)</label>
+        <input value="${s.role||''}" disabled />
+      </div>
+    `,
+    actions: [
+      { label: 'Cancel', cls: 'btn-outline', onClick: closeModal },
+      { label: 'Save changes', cls: 'btn-primary', onClick: async () => {
+        if(!(await ensureFreshToken())) return;
+        const newName  = ($('ep-name')?.value || '').trim();
+        const newPhone = ($('ep-phone')?.value || '').trim();
+        if(!newName) return toast('Full name cannot be empty.', 'error');
+
+        const oldName = s.full_name;
+        const { error } = await sb.from('pb_staff')
+          .update({ full_name: newName, phone: newPhone || null })
+          .eq('id', s.id);
+
+        if(error) return toast('Save failed: ' + error.message, 'error');
+
+        // Update in-memory state so topbar and all references reflect the new name immediately
+        state.staff.full_name = newName;
+        state.staff.phone     = newPhone || null;
+
+        // Also update the copy in state.data.staff array (used in reports/tables)
+        const staffEntry = state.data.staff.find(x => x.id === s.id);
+        if(staffEntry){ staffEntry.full_name = newName; staffEntry.phone = newPhone || null; }
+
+        audit('edit_own_profile', 'pb_staff', s.id, { full_name: oldName }, { full_name: newName });
+        closeModal();
+        render(); // re-renders topbar with new name immediately
+        toast('Profile updated successfully.', 'success');
+      }}
+    ]
+  });
+}
+
 function openSwitchUser(){
   const pins = lsGet('pins', {});
   const ids = Object.keys(pins).filter(id => id !== state.staff.id);
