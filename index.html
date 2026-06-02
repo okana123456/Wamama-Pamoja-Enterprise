@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <meta name="theme-color" content="#e65c00" />
 <title>Wamama Pamoja Enterprise</title>
-<link rel="manifest" href='data:application/manifest+json;base64,eyJuYW1lIjogIlByaW1lIEJyYWlkb3ggRW50ZXJwcmlzZSIsICJzaG9ydF9uYW1lIjogIkJyYWlkb3giLCAic3RhcnRfdXJsIjogIi4iLCAic2NvcGUiOiAiLiIsICJkaXNwbGF5IjogInN0YW5kYWxvbmUiLCAiYmFja2dyb3VuZF9jb2xvciI6ICIjZmFmYmZkIiwgInRoZW1lX2NvbG9yIjogIiMwYjFmM2EiLCAiaWNvbnMiOiBbeyJzcmMiOiAiZGF0YTppbWFnZS9zdmcreG1sO3V0ZjgsPHN2ZyUyMHhtbG5zPSdodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyclMjB2aWV3Qm94PScwJTIwMCUyMDUxMiUyMDUxMic+PHJlY3QlMjB3aWR0aD0nMTAwJTI1JyUyMGhlaWdodD0nMTAwJTI1JyUyMGZpbGw9JyUyMzBiMWYzYScvPjx0ZXh0JTIweD0nNTAlMjUnJTIweT0nNjIlMjUnJTIwZm9udC1zaXplPScyMjAnJTIwdGV4dC1hbmNob3I9J21pZGRsZSclMjBmaWxsPSclMjNmZmYnJTIwZm9udC1mYW1pbHk9J3NhbnMtc2VyaWYnJTIwZm9udC13ZWlnaHQ9JzcwMCc+UEI8L3RleHQ+PC9zdmc+IiwgInNpemVzIjogIjUxMng1MTIiLCAidHlwZSI6ICJpbWFnZS9zdmcreG1sIiwgInB1cnBvc2UiOiAiYW55IG1hc2thYmxlIn1dfQ==' />
+<link rel="manifest" href='data:application/manifest+json;base64,eyJuYW1lIjogIldhbWFtYSBQYW1vamEgRW50ZXJwcmlzZSIsICJzaG9ydF9uYW1lIjogIldhbWFtYSBQYW1vamEiLCAic3RhcnRfdXJsIjogIi4iLCAic2NvcGUiOiAiLiIsICJkaXNwbGF5IjogInN0YW5kYWxvbmUiLCAiYmFja2dyb3VuZF9jb2xvciI6ICIjZmZmYWY1IiwgInRoZW1lX2NvbG9yIjogIiNlNjVjMDAiLCAiaWNvbnMiOiBbeyJzcmMiOiAiZGF0YTppbWFnZS9zdmcreG1sO3V0ZjgsPHN2ZyUyMHhtbG5zPSdodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyclMjB2aWV3Qm94PScwJTIwMCUyMDUxMiUyMDUxMic+PHJlY3QlMjB3aWR0aD0nMTAwJTI1JyUyMGhlaWdodD0nMTAwJTI1JyUyMGZpbGw9JyUyM2U2NWMwMCcvPjx0ZXh0JTIweD0nNTAlMjUnJTIweT0nNjIlMjUnJTIwZm9udC1zaXplPScyMjAnJTIwdGV4dC1hbmNob3I9J21pZGRsZSclMjBmaWxsPSclMjNmZmYnJTIwZm9udC1mYW1pbHk9J3NhbnMtc2VyaWYnJTIwZm9udC13ZWlnaHQ9JzcwMCc+V1A8L3RleHQ+PC9zdmc+IiwgInNpemVzIjogIjUxMng1MTIiLCAidHlwZSI6ICJpbWFnZS9zdmcreG1sIiwgInB1cnBvc2UiOiAiYW55IG1hc2thYmxlIn1dfQ==' />
 <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='100%25' height='100%25' rx='12' fill='%23e65c00'/><text x='50%25' y='62%25' font-size='30' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>WP</text></svg>" />
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -517,11 +517,81 @@ async function signIn(email, password){
   return { ok:true };
 }
 
+/* Map any of the 7 organisation roles to the legacy 'admin' | 'officer' bucket
+   the rest of the app already uses for visibility/permission gates.
+   This keeps Phase A backwards-compatible while real per-role gating comes later. */
+const ROLE_TO_LEGACY = {
+  ceo: 'admin',
+  branch_manager: 'admin',
+  admin: 'admin',
+  supervisor: 'admin',     // read-heavy oversight; treat as admin-view for now
+  loan_officer: 'officer',
+  officer: 'officer',      // legacy alias
+  inventory_officer: 'officer',
+  storekeeper: 'officer'
+};
+const ROLE_LABELS = {
+  ceo:'Chief Executive Officer', branch_manager:'Branch Manager', admin:'Administrator',
+  supervisor:'Supervisor', loan_officer:'Loan Officer', officer:'Loan Officer (legacy)',
+  inventory_officer:'Inventory Officer', storekeeper:'Storekeeper / Procurement'
+};
+/* Central permission helper. Use can('action') going forward instead of
+   role==='admin'. Falls back gracefully for legacy code paths. */
+function can(action){
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const matrix = {
+    ceo:               ['*'],
+    admin:             ['*'],
+    branch_manager:    ['approve_loan','approve_group','approve_savings','approve_repayment','approve_order','view_reports','view_inventory','view_payroll','manage_branch_staff','view_audit'],
+    supervisor:        ['view_reports','view_field_activity','view_portfolio','audit','view_audit'],
+    loan_officer:      ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
+    officer:           ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
+    inventory_officer: ['view_suppliers','create_purchase_order','approve_order','view_procurement_reports','request_stock','view_inventory'],
+    storekeeper:       ['receive_stock','issue_stock','stock_count','view_inventory_reports','view_inventory','request_stock']
+  };
+  const allowed = matrix[r] || [];
+  return allowed.includes('*') || allowed.includes(action);
+}
+
+/* Phase B — page-level visibility map. 'admin' and 'ceo' implicitly see all. */
+const PAGE_ACCESS = {
+  dashboard:'ALL',
+  groups:['branch_manager','supervisor','loan_officer','officer'],
+  members:['branch_manager','supervisor','loan_officer','officer'],
+  meeting:['branch_manager','loan_officer','officer'],
+  savings:['branch_manager','supervisor','loan_officer','officer'],
+  repayments:['branch_manager','supervisor','loan_officer','officer'],
+  loans:['branch_manager','supervisor','loan_officer','officer'],
+  arrears:['branch_manager','supervisor','loan_officer','officer'],
+  calculator:'ALL',
+  approvals:['branch_manager','inventory_officer'],
+  inventory:['branch_manager','supervisor','inventory_officer','storekeeper'],
+  suppliers:['branch_manager','inventory_officer'],
+  purchases:['branch_manager','inventory_officer'],
+  orders:['branch_manager','inventory_officer','storekeeper'],
+  reconciliation:['branch_manager','supervisor','loan_officer','officer'],
+  expenses:['branch_manager','supervisor'],
+  accounting:[],
+  reports:['branch_manager','supervisor','inventory_officer'],
+  staff:[], settings:[], audit:['branch_manager','supervisor'],
+  memberProfile:'ALL'
+};
+function canView(page){
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  if(r === 'ceo' || r === 'admin') return true;
+  const acl = PAGE_ACCESS[page];
+  if(acl === 'ALL') return true;
+  if(!acl) return false;
+  return acl.includes(r);
+}
 async function loadStaff(){
   const uid = state.session.user.id;
   const { data, error } = await sb.from('pb_staff').select('*').eq('auth_user_id', uid).maybeSingle();
   if(error || !data) return false;
   if(data.status !== 'active') return false;
+  // Preserve the organisation role and derive the legacy bucket the rest of the app reads.
+  data.app_role = data.role;
+  data.role = ROLE_TO_LEGACY[data.role] || 'officer';
   state.staff = data;
   if(data.business_id){ BIZ_ID = 'biz_' + data.business_id; }
   const { data: perms } = await sb.from('pb_permissions').select('*').eq('staff_id', data.id).maybeSingle();
@@ -897,33 +967,46 @@ function renderAuth(){
  * SHELL (sidebar + topbar + content)
  * ===================================================================== */
 function navItems(){
-  const isAdmin = state.staff.role === 'admin';
+  // Phase B — sidebar items are gated by canView(page). Legacy per-staff
+  // permissions (state.perms) still narrow visibility within the role's allow-list.
   const p = state.perms || {};
+  const isLegacyAdmin = state.staff.role === 'admin';
+  const pendApprovals = pendingApprovalsCount();
   const items = [
-    { k:'dashboard', label:'Dashboard', show:true, icon:dashIcon() },
-    { k:'groups', label:'Groups', show:true, icon:groupsIcon() },
-    { k:'members', label:'Members', show:true, icon:memberIcon() },
-    { k:'meeting', label:'Meeting Recorder', show:isAdmin || p.can_record_savings || p.can_record_repayments, icon:meetingIcon() },
-    { k:'savings', label:'Savings', show:true, icon:savingsIcon() },
-    { k:'repayments', label:'Repayments', show:true, icon:repaymentsIcon() },
-    { k:'loans', label:'Active Loans', show:true, icon:loanIcon() },
-    { k:'arrears', label:'Due & Arrears', show:true, icon: ic('<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>') },
-    { k:'calculator', label:'Loan Calculator', show:true, icon:calcIcon() },
-    { k:'inventory', label:'Inventory', show:true, icon:invIcon() },
-    { k:'suppliers', label:'Suppliers', show:isAdmin || p.can_manage_suppliers, icon:supplierIcon() },
-    { k:'purchases', label:'Purchases', show:isAdmin || p.can_manage_suppliers, icon:purchaseIcon() },
-    { k:'orders', label:'Orders', show:isAdmin || p.can_submit_orders || p.can_approve_orders, icon:orderIcon() },
-    { k:'reconciliation', label:'Remittances', show:true, icon:recIcon() },
-    { k:'expenses', label:'Expenses', show:isAdmin || p.can_view_reports, icon:expensesIcon() },
-    { k:'accounting', label:'Accounting', show:isAdmin, icon:accountingIcon() },
-    { k:'reports', label:'Reports', show:isAdmin || p.can_view_reports, icon:reportIcon() },
-  ];
+    { k:'dashboard',      label:'Dashboard',        icon:dashIcon() },
+    { k:'approvals',      label:`Approvals${pendApprovals?` <span class="badge b-yellow" style="margin-left:6px">${pendApprovals}</span>`:''}`, icon: ic('<path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>') },
+    { k:'groups',         label:'Groups',           icon:groupsIcon() },
+    { k:'members',        label:'Members',          icon:memberIcon() },
+    { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: isLegacyAdmin || p.can_record_savings || p.can_record_repayments },
+    { k:'savings',        label:'Savings',          icon:savingsIcon() },
+    { k:'repayments',     label:'Repayments',       icon:repaymentsIcon() },
+    { k:'loans',          label:'Active Loans',     icon:loanIcon() },
+    { k:'arrears',        label:'Due & Arrears',    icon: ic('<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>') },
+    { k:'calculator',     label:'Loan Calculator',  icon:calcIcon() },
+    { k:'inventory',      label:'Inventory',        icon:invIcon() },
+    { k:'suppliers',      label:'Suppliers',        icon:supplierIcon() },
+    { k:'purchases',      label:'Purchases',        icon:purchaseIcon() },
+    { k:'orders',         label:'Orders',           icon:orderIcon() },
+    { k:'reconciliation', label:'Remittances',      icon:recIcon() },
+    { k:'expenses',       label:'Expenses',         icon:expensesIcon() },
+    { k:'accounting',     label:'Accounting',       icon:accountingIcon() },
+    { k:'reports',        label:'Reports',          icon:reportIcon() },
+  ].filter(i => canView(i.k) && (i.extra === undefined || i.extra));
   const adminItems = [
-    { k:'staff', label:'Staff & Permissions', show:isAdmin, icon:staffIcon() },
-    { k:'settings', label:'Settings', show:isAdmin, icon:settingsIcon() },
-    { k:'audit', label:'Audit Log', show:isAdmin, icon:auditIcon() },
-  ];
-  return { primary: items.filter(x=>x.show), admin: adminItems.filter(x=>x.show) };
+    { k:'staff',    label:'Staff & Permissions', icon:staffIcon() },
+    { k:'settings', label:'Settings',            icon:settingsIcon() },
+    { k:'audit',    label:'Audit Log',           icon:auditIcon() },
+  ].filter(i => canView(i.k));
+  return { primary: items, admin: adminItems };
+}
+function pendingApprovalsCount(){
+  const d = state.data || {};
+  let n = 0;
+  if(can('approve_group'))     n += (d.groups||[]).filter(g=>g.status==='pending').length;
+  if(can('approve_savings'))   n += (d.savings||[]).filter(s=>s.status==='pending').length;
+  if(can('approve_repayment')) n += (d.repayments||[]).filter(r=>r.status==='pending').length;
+  if(can('approve_order'))     n += (d.orders||[]).filter(o=>o.status==='pending').length;
+  return n;
 }
 
 function renderShell(){
@@ -963,7 +1046,7 @@ function renderShell(){
             <button class="btn-ghost" onclick="openEditProfile()" title="Edit your profile" style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:var(--radius-sm)">
               <div style="text-align:right">
                 <div class="name">${state.staff.full_name}</div>
-                <div class="role" style="display:flex;align-items:center;gap:4px">${state.staff.role} <span style="font-size:9px;opacity:.6">✎</span></div>
+                <div class="role" style="display:flex;align-items:center;gap:4px">${ROLE_LABELS[state.staff.app_role]||state.staff.app_role||state.staff.role} <span style="font-size:9px;opacity:.6">✎</span></div>
               </div>
               <div class="av">${initials(state.staff.full_name)}</div>
             </button>
@@ -985,7 +1068,7 @@ function renderShell(){
 }
 function pageTitle(){
   return ({
-    dashboard:'Dashboard', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
+    dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
     savings:'Savings', repayments:'Repayments',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders',
@@ -994,7 +1077,14 @@ function pageTitle(){
     memberProfile:'Member Profile'
   })[state.view] || '—';
 }
-function go(view, ctx=null){ state.view = view; state.viewCtx = ctx; toggleSidebar(false); renderShell(); }
+function go(view, ctx=null){
+  // Phase B — block navigation to pages the role can't see.
+  if(!canView(view)){
+    toast('You do not have access to that section.','error');
+    return;
+  }
+  state.view = view; state.viewCtx = ctx; toggleSidebar(false); renderShell();
+}
 function toggleSidebar(force){
   const s = $('sidebar'), sc = $('scrim');
   const open = force === undefined ? !s.classList.contains('open') : force;
@@ -1004,7 +1094,7 @@ function toggleSidebar(force){
 
 function renderPage(){
   const fns = {
-    dashboard: pageDashboard, groups: pageGroups, members: pageMembers,
+    dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
     meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
@@ -1012,8 +1102,69 @@ function renderPage(){
     staff: pageStaff, settings: pageSettings, audit: pageAudit,
     memberProfile: pageMemberProfile
   };
+  // Phase B — page-level guard. If the role lost access (e.g. after role switch), fall back to dashboard.
+  if(!canView(state.view)){
+    $('page').innerHTML = `<div class="card" style="padding:40px;text-align:center">
+      <h3 style="margin:0 0 8px">Access restricted</h3>
+      <p class="muted" style="margin:0 0 16px">Your role (${ROLE_LABELS[state.staff.app_role]||state.staff.role}) does not have access to this section.</p>
+      <button class="btn btn-primary" onclick="go('dashboard')">Go to Dashboard</button>
+    </div>`;
+    return;
+  }
   const fn = fns[state.view] || pageDashboard;
   fn();
+}
+
+/* Phase B — Approvals queue: groups, savings, repayments, orders awaiting sign-off. */
+function pageApprovals(){
+  const d = state.data || {};
+  const sections = [];
+  if(can('approve_group')){
+    const list = (d.groups||[]).filter(g=>g.status==='pending');
+    sections.push({title:'Pending groups', count:list.length, rows: list.map(g=>{
+      const officer = (d.staff||[]).find(s=>s.id===g.created_by);
+      return `<tr><td><strong>${g.name||'—'}</strong></td><td>${officer?officer.full_name:'—'}</td><td>${(g.created_at||'').slice(0,10)}</td>
+        <td style="text-align:right">
+          <button class="btn btn-sm btn-primary" onclick="approveGroup('${g.id}')">Approve</button>
+          <button class="btn btn-sm btn-outline" onclick="rejectGroup('${g.id}')">Reject</button>
+        </td></tr>`;
+    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending groups</td></tr>`, head:'<th>Group</th><th>Submitted by</th><th>Date</th><th></th>'});
+  }
+  if(can('approve_savings')){
+    const list = (d.savings||[]).filter(s=>s.status==='pending');
+    sections.push({title:'Pending savings entries', count:list.length, rows: list.slice(0,50).map(s=>{
+      const m = (d.members||[]).find(x=>x.id===s.member_id);
+      return `<tr><td>${m?m.full_name:'—'}</td><td>${KES(s.amount||0)}</td><td>${(s.meeting_date||s.created_at||'').slice(0,10)}</td>
+        <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="go('savings')">Review in Savings →</button></td></tr>`;
+    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending savings</td></tr>`, head:'<th>Member</th><th>Amount</th><th>Date</th><th></th>'});
+  }
+  if(can('approve_repayment')){
+    const list = (d.repayments||[]).filter(r=>r.status==='pending');
+    sections.push({title:'Pending repayments', count:list.length, rows: list.slice(0,50).map(r=>{
+      const m = (d.members||[]).find(x=>x.id===r.member_id);
+      return `<tr><td>${m?m.full_name:'—'}</td><td>${KES(r.amount||0)}</td><td>${(r.meeting_date||r.created_at||'').slice(0,10)}</td>
+        <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="go('repayments')">Review in Repayments →</button></td></tr>`;
+    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending repayments</td></tr>`, head:'<th>Member</th><th>Amount</th><th>Date</th><th></th>'});
+  }
+  if(can('approve_order')){
+    const list = (d.orders||[]).filter(o=>o.status==='pending');
+    sections.push({title:'Pending purchase orders', count:list.length, rows: list.slice(0,50).map(o=>{
+      return `<tr><td>${o.item_name||o.description||'—'}</td><td>${o.quantity||'—'}</td><td>${(o.ordered_on||o.created_at||'').slice(0,10)}</td>
+        <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="go('orders')">Review in Orders →</button></td></tr>`;
+    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending orders</td></tr>`, head:'<th>Item</th><th>Qty</th><th>Date</th><th></th>'});
+  }
+  $('page').innerHTML = `
+    <div class="card" style="padding:18px;margin-bottom:16px">
+      <h2 style="margin:0 0 4px">Approvals Queue</h2>
+      <div class="muted">Items submitted by your team that need your sign-off.</div>
+    </div>
+    ${sections.map(s=>`
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><h3>${s.title} ${s.count?`<span class="badge b-yellow" style="margin-left:6px">${s.count}</span>`:''}</h3></div>
+        <div style="overflow-x:auto"><table class="table"><thead><tr>${s.head}</tr></thead><tbody>${s.rows}</tbody></table></div>
+      </div>`).join('')}
+    ${sections.length===0?`<div class="card" style="padding:24px;text-align:center" class="muted">Your role has no approval queues assigned.</div>`:''}
+  `;
 }
 
 /* ----- Inline SVG icons ----- */
@@ -1529,7 +1680,7 @@ function pageGroups(){
               <td>${off?.full_name||'—'}</td>
               <td class="num">${mc}</td>
               <td class="num">${KES(groupSavingsTotal(g.id))}</td>
-              <td><span class="badge ${g.status==='active'?'b-green':'b-grey'}">${g.status}</span></td>
+              <td><span class="badge ${g.status==='active'?'b-green':(g.status==='pending'?'b-yellow':'b-grey')}">${g.status}</span></td>
               <td><button class="act-btn" onclick="groupActions(event,'${g.id}')">···</button></td>
             </tr>`;
           }).join('') || `<tr><td colspan="9"><div class="empty"><h4>No groups found</h4><p>${q ? 'No groups match your search.' : 'Create your first chama group to start onboarding members.'}</p></div></td></tr>`}
@@ -1551,15 +1702,40 @@ function pageGroups(){
 }
 function groupActions(ev, id){
   const g = state.data.groups.find(x=>x.id===id);
-  showActMenu(ev, [
+  const isAdmin = state.staff.role === 'admin';
+  const items = [
     { label:'View members', onClick: ()=>{ state.viewCtx = { groupId: id }; go('members'); } },
     { label:'Edit group', onClick: ()=>openGroupForm(g) },
-    'sep',
-    { label:'Delete group', danger:true, onClick: ()=>confirmDialog(`Delete group "${g.name}"? Members and history will be retained but the group record will be removed.`, async()=>{
-      const { error } = await sb.from('pb_groups').delete().eq('id', id);
-      if(error) toast(error.message,'error'); else { state.data.groups = state.data.groups.filter(x=>x.id!==id); audit('delete','pb_groups',id,g); render(); toast('Group deleted','success'); }
-    }, { title:'Delete group', danger:true }) }
-  ]);
+  ];
+  if(isAdmin && g.status==='pending'){
+    items.push('sep');
+    items.push({ label:'✓ Approve group', onClick: ()=>approveGroup(id) });
+    items.push({ label:'✗ Reject group', danger:true, onClick: ()=>rejectGroup(id) });
+  }
+  items.push('sep');
+  items.push({ label:'Delete group', danger:true, onClick: ()=>confirmDialog(`Delete group "${g.name}"? Members and history will be retained but the group record will be removed.`, async()=>{
+    const { error } = await sb.from('pb_groups').delete().eq('id', id);
+    if(error) toast(error.message,'error'); else { state.data.groups = state.data.groups.filter(x=>x.id!==id); audit('delete','pb_groups',id,g); render(); toast('Group deleted','success'); }
+  }, { title:'Delete group', danger:true }) });
+  showActMenu(ev, items);
+}
+async function approveGroup(id){
+  if(!(await ensureFreshToken())) return;
+  const { error } = await sb.from('pb_groups').update({status:'active'}).eq('id',id);
+  if(error) return toast(error.message,'error');
+  const g = state.data.groups.find(x=>x.id===id); if(g) g.status='active';
+  audit('approve','pb_groups',id);
+  render(); toast('Group approved & activated','success');
+}
+async function rejectGroup(id){
+  confirmDialog('Reject this pending group? It will be marked inactive.', async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_groups').update({status:'inactive'}).eq('id',id);
+    if(error) return toast(error.message,'error');
+    const g = state.data.groups.find(x=>x.id===id); if(g) g.status='inactive';
+    audit('reject','pb_groups',id);
+    render(); toast('Group rejected','warn');
+  },{ title:'Reject group', danger:true });
 }
 function openGroupForm(g=null){
   const officers = state.data.staff.filter(s=>s.role==='officer' && s.status==='active');
@@ -1594,10 +1770,12 @@ function openGroupForm(g=null){
         </select>
       </div>
       <div class="field"><label>Status</label>
-        <select name="status">
-          <option value="active" ${(!g||g.status==='active')?'selected':''}>Active</option>
+        <select name="status" ${state.staff.role==='admin'?'':'disabled'}>
+          <option value="pending" ${(!g && state.staff.role!=='admin')||g?.status==='pending'?'selected':''}>Pending approval</option>
+          <option value="active" ${(g && g.status==='active') || (!g && state.staff.role==='admin')?'selected':''}>Active</option>
           <option value="inactive" ${g?.status==='inactive'?'selected':''}>Inactive</option>
         </select>
+        ${state.staff.role!=='admin'?'<div class="muted" style="font-size:11px;margin-top:4px">New groups require admin approval before becoming active.</div>':''}
       </div>
     </form>`,
     actions:[
@@ -1608,6 +1786,8 @@ function openGroupForm(g=null){
         const row = Object.fromEntries(fd.entries());
         row.group_number = parseInt(row.group_number);
         row.officer_id = row.officer_id || null;
+        // Force pending for non-admin creators
+        if(!g && state.staff.role !== 'admin'){ row.status = 'pending'; }
         if(g){
           const { error } = await sb.from('pb_groups').update(row).eq('id', g.id);
           if(error) return toast(error.message,'error');
@@ -1617,7 +1797,7 @@ function openGroupForm(g=null){
           if(error) return toast(error.message,'error');
           state.data.groups.unshift(data); audit('create','pb_groups',data.id,null,data);
         }
-        closeModal(); render(); toast(g?'Group updated':'Group registered','success');
+        closeModal(); render(); toast(g?'Group updated': (row.status==='pending'?'Group submitted for approval':'Group registered'),'success');
       }}
     ]
   });
@@ -3072,7 +3252,7 @@ function downloadInventoryTemplate(){
     {wch:30},{wch:16},{wch:10},{wch:16},{wch:16},{wch:14}
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
-  XLSX.writeFile(wb, 'PrimeBraidox_Inventory_Template.xlsx');
+  XLSX.writeFile(wb, 'WamamaPamoja_Inventory_Template.xlsx');
   toast('Template downloaded. Fill in your assets then re-upload.','info');
 }
 
@@ -3876,9 +4056,9 @@ function pageStaff(){
         ${state.data.staff.map(s => `<tr>
           <td><b>${s.full_name}</b></td>
           <td>${s.email}</td>
-          <td><span class="badge ${s.role==='admin'?'b-blue':'b-grey'}">${s.role}</span></td>
+          <td><span class="badge ${(ROLE_TO_LEGACY[s.role]||s.role)==='admin'?'b-blue':'b-grey'}">${ROLE_LABELS[s.role]||s.role}</span></td>
           <td><span class="badge ${s.status==='active'?'b-green':'b-red'}">${s.status}</span></td>
-          <td>${s.role==='admin'?'<span class="muted">Full access</span>':'<button class="btn btn-sm btn-outline" onclick="editPerms(\''+s.id+'\')">Manage</button>'}</td>
+          <td>${(ROLE_TO_LEGACY[s.role]||s.role)==='admin'?'<span class="muted">Full access</span>':'<button class="btn btn-sm btn-outline" onclick="editPerms(\''+s.id+'\')">Manage</button>'}</td>
           <td><button class="act-btn" onclick="staffActions(event,'${s.id}')">···</button></td>
         </tr>`).join('') || `<tr><td colspan="6"><div class="empty"><h4>No staff yet</h4><p>Add loan officers to enable field operations.</p></div></td></tr>`}
       </tbody>
@@ -3922,9 +4102,15 @@ function openStaffForm(s=null){
       ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The officer can change this after first sign-in.</div></div>`:''}
       <div class="field"><label>Role</label>
         <select name="role" ${s?'disabled':''}>
-          <option value="officer" ${s?.role==='officer'?'selected':''}>Loan Officer</option>
+          <option value="ceo" ${s?.role==='ceo'?'selected':''}>Chief Executive Officer</option>
+          <option value="branch_manager" ${s?.role==='branch_manager'?'selected':''}>Branch Manager</option>
           <option value="admin" ${s?.role==='admin'?'selected':''}>Administrator</option>
+          <option value="supervisor" ${s?.role==='supervisor'?'selected':''}>Supervisor</option>
+          <option value="loan_officer" ${(s?.role==='loan_officer'||s?.role==='officer')?'selected':''}>Loan Officer</option>
+          <option value="inventory_officer" ${s?.role==='inventory_officer'?'selected':''}>Inventory Officer</option>
+          <option value="storekeeper" ${s?.role==='storekeeper'?'selected':''}>Storekeeper / Procurement</option>
         </select>
+        <div class="helper">Role drives sidebar visibility and approval rights. See deployment notes for the full access matrix.</div>
       </div>
     </form>`,
     actions:[
