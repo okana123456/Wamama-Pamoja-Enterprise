@@ -569,6 +569,7 @@ const PAGE_ACCESS = {
   suppliers:['branch_manager','inventory_officer'],
   purchases:['branch_manager','inventory_officer'],
   orders:['branch_manager','inventory_officer','storekeeper'],
+  sold_items:['branch_manager','storekeeper'],
   reconciliation:['branch_manager','supervisor','loan_officer','officer'],
   expenses:['branch_manager','supervisor'],
   accounting:['branch_manager'],
@@ -987,6 +988,7 @@ function navItems(){
     { k:'suppliers',      label:'Suppliers',        icon:supplierIcon() },
     { k:'purchases',      label:'Purchases',        icon:purchaseIcon() },
     { k:'orders',         label:'Orders',           icon:orderIcon() },
+    { k:'sold_items',     label:'Sold Items Form',  icon: ic('<path d="M9 11V6a3 3 0 0 1 6 0v5"/><rect x="4" y="11" width="16" height="10" rx="1"/><line x1="9" y1="16" x2="15" y2="16"/>') },
     { k:'reconciliation', label:'Remittances',      icon:recIcon() },
     { k:'expenses',       label:'Expenses',         icon:expensesIcon() },
     { k:'accounting',     label:'Accounting',       icon:accountingIcon() },
@@ -1002,10 +1004,12 @@ function navItems(){
 function pendingApprovalsCount(){
   const d = state.data || {};
   let n = 0;
-  if(can('approve_group'))     n += (d.groups||[]).filter(g=>g.status==='pending').length;
-  if(can('approve_savings'))   n += (d.savings||[]).filter(s=>s.status==='pending').length;
-  if(can('approve_repayment')) n += (d.repayments||[]).filter(r=>r.status==='pending').length;
-  if(can('approve_order'))     n += (d.orders||[]).filter(o=>o.status==='pending').length;
+  if(can('approve_group') || state.staff.role === 'admin')
+                              n += (d.members||[]).filter(m=>m.status==='pending').length;
+  if(can('approve_group'))    n += (d.groups||[]).filter(g=>g.status==='pending').length;
+  if(can('approve_savings'))  n += (d.savings||[]).filter(s=>s.status==='pending').length;
+  if(can('approve_repayment'))n += (d.repayments||[]).filter(r=>r.status==='pending').length;
+  if(can('approve_order'))    n += (d.orders||[]).filter(o=>o.status==='pending').length;
   return n;
 }
 
@@ -1071,7 +1075,7 @@ function pageTitle(){
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
     savings:'Savings', repayments:'Repayments',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
-    suppliers:'Suppliers', purchases:'Purchases', orders:'Orders',
+    suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
     staff:'Staff & Permissions', settings:'Settings', audit:'Audit Log',
     memberProfile:'Member Profile'
@@ -1098,7 +1102,7 @@ function renderPage(){
     meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
-    orders: pageOrders, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
+    orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
     staff: pageStaff, settings: pageSettings, audit: pageAudit,
     memberProfile: pageMemberProfile
   };
@@ -1115,10 +1119,30 @@ function renderPage(){
   fn();
 }
 
-/* Phase B — Approvals queue: groups, savings, repayments, orders awaiting sign-off. */
+/* Phase B — Approvals queue: groups, savings, repayments, orders, members awaiting sign-off. */
 function pageApprovals(){
   const d = state.data || {};
   const sections = [];
+
+  // Registered (pending) clients
+  if(can('approve_group') || state.staff.role === 'admin'){
+    const list = (d.members||[]).filter(m=>m.status==='pending');
+    sections.push({title:'Registered clients awaiting approval', count:list.length, rows: list.map(m=>{
+      const g = (d.groups||[]).find(x=>x.id===m.group_id);
+      const off = (d.staff||[]).find(s=>s.id===m.officer_id);
+      return `<tr>
+        <td><b>${m.full_name}</b><div class="muted" style="font-size:11px">${m.national_id||''}</div></td>
+        <td>${g?.name||'—'}</td>
+        <td>${off?.full_name||'—'}</td>
+        <td>${(m.registered_on||m.created_at||'').slice(0,10)}</td>
+        <td style="text-align:right">
+          <button class="btn btn-sm btn-primary" onclick="approveMemberReg('${m.id}')">Approve</button>
+          <button class="btn btn-sm btn-outline" style="margin-left:4px" onclick="rejectMemberReg('${m.id}')">Reject</button>
+        </td></tr>`;
+    }).join('') || `<tr><td colspan="5" class="muted" style="padding:16px;text-align:center">No pending client registrations</td></tr>`,
+    head:'<th>Client name</th><th>Group</th><th>Officer</th><th>Registered</th><th></th>'});
+  }
+
   if(can('approve_group')){
     const list = (d.groups||[]).filter(g=>g.status==='pending');
     sections.push({title:'Pending groups', count:list.length, rows: list.map(g=>{
@@ -1161,10 +1185,28 @@ function pageApprovals(){
     ${sections.map(s=>`
       <div class="card" style="margin-bottom:16px">
         <div class="card-head"><h3>${s.title} ${s.count?`<span class="badge b-yellow" style="margin-left:6px">${s.count}</span>`:''}</h3></div>
-        <div style="overflow-x:auto"><table class="table"><thead><tr>${s.head}</tr></thead><tbody>${s.rows}</tbody></table></div>
+        <div style="overflow-x:auto"><table class="tbl"><thead><tr>${s.head}</tr></thead><tbody>${s.rows}</tbody></table></div>
       </div>`).join('')}
-    ${sections.length===0?`<div class="card" style="padding:24px;text-align:center" class="muted">Your role has no approval queues assigned.</div>`:''}
+    ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
   `;
+}
+async function approveMemberReg(id){
+  if(!(await ensureFreshToken())) return;
+  const { error } = await sb.from('pb_members').update({ status:'active' }).eq('id', id);
+  if(error) return toast(error.message,'error');
+  const m = state.data.members.find(x=>x.id===id); if(m) m.status='active';
+  audit('approve_member','pb_members',id);
+  render(); toast('Client approved and activated','success');
+}
+async function rejectMemberReg(id){
+  confirmDialog('Reject this client registration? They will be marked inactive.', async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_members').update({ status:'inactive' }).eq('id', id);
+    if(error) return toast(error.message,'error');
+    const m = state.data.members.find(x=>x.id===id); if(m) m.status='inactive';
+    audit('reject_member','pb_members',id);
+    render(); toast('Client registration rejected','warn');
+  },{ title:'Reject client', danger:true });
 }
 
 /* ----- Inline SVG icons ----- */
@@ -1902,7 +1944,7 @@ function openMemberWizard(){
 function renderWizard(){
   const s = state._wizardStep;
   const d = state._wizardData;
-  const stepLabels = ['Personal details','Group assignment','Guarantor details','Review & confirm'];
+  const stepLabels = ['Personal details','Group assignment','Next of Kin details','Review & confirm'];
   modal({
     title: 'Register member',
     size:'lg',
@@ -1965,11 +2007,11 @@ function renderWizardStep(){
   }
   if(s===3){
     return `
-      <p class="muted" style="margin-top:0">At least one guarantor is required. A second guarantor is recommended for higher loan amounts.</p>
+      <p class="muted" style="margin-top:0">At least one next of kin is required. A second next of kin is recommended for higher loan amounts.</p>
       ${d.guarantors.map((gn,i) => `
         <div class="card card-pad" style="margin-bottom:12px">
           <div class="card-head" style="padding:0 0 12px;border:none">
-            <h3>Guarantor ${i+1}</h3>
+            <h3>Next of Kin ${i+1}</h3>
             ${i>0 ? `<button class="btn btn-sm btn-outline" onclick="removeGuarantor(${i})">Remove</button>` : ''}
           </div>
           <div class="grid-2">
@@ -1985,7 +2027,7 @@ function renderWizardStep(){
           </div>
         </div>
       `).join('')}
-      ${d.guarantors.length<2 ? `<button class="btn btn-outline" onclick="addGuarantor()">Add second guarantor</button>` : ''}
+      ${d.guarantors.length<2 ? `<button class="btn btn-outline" onclick="addGuarantor()">Add second next of kin</button>` : ''}
     `;
   }
   // Step 4: Review
@@ -2009,8 +2051,8 @@ function renderWizardStep(){
       <tr><td>Meeting day</td><td>${g?.meeting_day||'—'}</td></tr>
       <tr><td>Loan officer</td><td>${off?.full_name||'—'}</td></tr>
       <tr><td>Date of registration</td><td>${fmtDate(d.registered_on)}</td></tr>
-      <tr><td colspan="2"><h5>Guarantors</h5></td></tr>
-      ${d.guarantors.map((gn,i)=>`<tr><td>Guarantor ${i+1}</td><td>${gn.full_name} · ${gn.national_id} · ${gn.phone}${gn.relationship?' · '+gn.relationship:''}</td></tr>`).join('')}
+      <tr><td colspan="2"><h5>Next of Kin</h5></td></tr>
+      ${d.guarantors.map((gn,i)=>`<tr><td>Next of Kin ${i+1}</td><td>${gn.full_name} · ${gn.national_id} · ${gn.phone}${gn.relationship?' · '+gn.relationship:''}</td></tr>`).join('')}
       <tr><td colspan="2"><h5>Fee</h5></td></tr>
       <tr><td>Registration fee</td><td><b>${KES(d.registration_fee)}</b></td></tr>
     </table>
@@ -2040,7 +2082,7 @@ function saveWizardStep(){
       d.guarantors[parseInt(el.dataset.g)][el.dataset.f] = el.value;
     });
     const g1 = d.guarantors[0];
-    if(!g1.full_name || !g1.national_id || !g1.phone){ toast('At least one complete guarantor is required.','error'); return false; }
+    if(!g1.full_name || !g1.national_id || !g1.phone){ toast('At least one complete next of kin entry is required.','error'); return false; }
   }
   return true;
 }
@@ -2073,7 +2115,7 @@ async function submitWizard(){
   }));
   if(guars.length){
     const { error: ge } = await sb.from('pb_guarantors').insert(guars);
-    if(ge) toast('Member saved, but guarantor save failed: '+ge.message, 'warn');
+    if(ge) toast('Member saved, but next of kin save failed: '+ge.message, 'warn');
     else state.data.guarantors.push(...guars);
   }
   state.data.members.unshift(created);
@@ -2100,11 +2142,11 @@ function openMemberEdit(m){
         </div>
       </div>
       <div class="divider"></div>
-      <div style="font-weight:700;font-size:13px;margin-bottom:10px">Guarantor details</div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:10px">Next of Kin details</div>
       <div class="grid-2">
-        <div class="field"><label>Guarantor Name</label><input id="me-g-name" value="${existingGuarantor.full_name||''}" placeholder="Full name" /></div>
-        <div class="field"><label>Guarantor Phone</label><input id="me-g-phone" value="${existingGuarantor.phone||''}" placeholder="07XX XXX XXX" /></div>
-        <div class="field"><label>Guarantor ID</label><input id="me-g-id" value="${existingGuarantor.national_id||''}" placeholder="National ID number" /></div>
+        <div class="field"><label>Next of Kin Name</label><input id="me-g-name" value="${existingGuarantor.full_name||''}" placeholder="Full name" /></div>
+        <div class="field"><label>Next of Kin Phone</label><input id="me-g-phone" value="${existingGuarantor.phone||''}" placeholder="07XX XXX XXX" /></div>
+        <div class="field"><label>Next of Kin ID</label><input id="me-g-id" value="${existingGuarantor.national_id||''}" placeholder="National ID number" /></div>
       </div>
     </form>`,
     actions:[
@@ -2128,11 +2170,11 @@ function openMemberEdit(m){
           };
           if(existingGuarantor.id){
             const { error: ge } = await sb.from('pb_guarantors').update({ full_name: gRow.full_name, phone: gRow.phone, national_id: gRow.national_id }).eq('id', existingGuarantor.id);
-            if(ge) toast('Member saved, but guarantor update failed: '+ge.message,'warn');
+            if(ge) toast('Member saved, but next of kin update failed: '+ge.message,'warn');
             else { Object.assign(existingGuarantor, gRow); }
           } else {
             const { data: newG, error: ge } = await sb.from('pb_guarantors').insert(gRow).select().single();
-            if(ge) toast('Member saved, but guarantor save failed: '+ge.message,'warn');
+            if(ge) toast('Member saved, but next of kin save failed: '+ge.message,'warn');
             else state.data.guarantors.push(newG);
           }
         }
@@ -2285,12 +2327,12 @@ function pageMemberProfile(){
             </table>
           </div>
           <div class="card card-pad">
-            <h3 style="margin:0 0 12px">Guarantors</h3>
+            <h3 style="margin:0 0 12px">Next of Kin</h3>
             ${guars.length ? guars.map(gn=>`
               <div style="padding:10px 0;border-bottom:1px solid var(--border)">
                 <div style="font-weight:600">${gn.full_name} <span class="muted" style="font-weight:400;font-size:12px">· ${gn.relationship||'—'}</span></div>
                 <div class="muted" style="font-size:12px">ID ${gn.national_id} · ${gn.phone} · ${gn.location||''}</div>
-              </div>`).join('') : '<p class="muted">No guarantors recorded.</p>'}
+              </div>`).join('') : '<p class="muted">No next of kin recorded.</p>'}
           </div>
         </div>
       ` : ''}
@@ -4074,25 +4116,75 @@ function staffActions(ev, id){
       await sb.from('pb_staff').update({ status: ns }).eq('id', id);
       s.status = ns; render(); toast('Staff status updated','success');
     }},
-    { label:'Delete & Reset Auth', danger:true, onClick: async ()=>{
-      if(!confirm('PERMANENTLY delete this staff member and their login?')) return;
-      let error;
-      if(s.auth_user_id){
-        const { error: rpcErr } = await sb.rpc('pb_delete_staff_auth', { target_user_id: s.auth_user_id });
-        error = rpcErr;
-      } else {
-        const { error: delErr } = await sb.from('pb_staff').delete().eq('id', id);
-        error = delErr;
-      }
-      if(error) return toast(error.message, 'error');
-      state.data.staff = state.data.staff.filter(x=>x.id!==id);
-      audit('delete_staff','pb_staff',id);
-      render();
-      toast('Staff member deleted and auth account removed.','success');
-    }}
+    { label:'Delete & Reset Auth', danger:true, onClick: ()=>confirmDeleteStaff(id) }
   ]);
 }
+
+function confirmDeleteStaff(id){
+  const s = state.data.staff.find(x=>x.id===id);
+  if(!s) return;
+  modal({
+    title:'⚠ Permanently delete staff member',
+    body:`
+      <div style="background:var(--danger-50);border:1px solid var(--danger);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px">
+        <div style="font-weight:700;color:var(--danger);margin-bottom:6px;font-size:14px">This action cannot be undone.</div>
+        <div style="font-size:13px;color:var(--danger)">
+          Deleting <b>${s.full_name}</b> will permanently remove their staff record and revoke their system login.
+          Any loans, savings, and repayments they recorded will remain intact.
+        </div>
+      </div>
+      <div class="field">
+        <label>Type <b>DELETE</b> below to confirm</label>
+        <input id="del-confirm-input" placeholder="Type DELETE to confirm" autocomplete="off"
+          style="border-color:var(--danger);font-weight:600;letter-spacing:.05em"
+          oninput="document.getElementById('del-confirm-btn').disabled = this.value !== 'DELETE'" />
+      </div>`,
+    actions:[
+      { label:'Cancel', cls:'btn-outline', onClick: closeModal },
+      { label:'Permanently delete', cls:'btn-danger', onClick: async ()=>{
+        const val = document.getElementById('del-confirm-input')?.value;
+        if(val !== 'DELETE'){ toast('Please type DELETE to confirm.','error'); return; }
+        if(!(await ensureFreshToken())) return;
+
+        const btn = document.querySelector('[data-act="1"]');
+        if(btn){ btn.disabled = true; btn.textContent = 'Deleting…'; }
+
+        let error;
+        if(s.auth_user_id){
+          const { error: rpcErr } = await sb.rpc('pb_delete_staff_auth', { target_user_id: s.auth_user_id });
+          if(rpcErr){
+            // RPC failed — fall back to deleting the staff row only
+            const { error: delErr } = await sb.from('pb_staff').delete().eq('id', id);
+            error = delErr;
+            if(!error) toast('Auth account could not be removed (may need manual cleanup in Supabase), but staff record deleted.','warn');
+          } else {
+            error = null;
+          }
+        } else {
+          const { error: delErr } = await sb.from('pb_staff').delete().eq('id', id);
+          error = delErr;
+        }
+
+        if(error){ toast('Delete failed: ' + error.message, 'error'); if(btn){ btn.disabled=false; btn.textContent='Permanently delete'; } return; }
+
+        // Remove from in-memory list immediately so the table updates without a reload
+        state.data.staff = state.data.staff.filter(x=>x.id!==id);
+        audit('delete_staff','pb_staff',id,{ full_name:s.full_name, email:s.email, role:s.app_role||s.role });
+        closeModal();
+        render();
+        toast(`${s.full_name} has been permanently deleted.`, 'success');
+      }}
+    ]
+  });
+  // Disable the delete button by default until DELETE is typed
+  setTimeout(()=>{
+    const btn = document.querySelector('[data-act="1"]');
+    if(btn) btn.disabled = true;
+  }, 30);
+}
 function openStaffForm(s=null){
+  // When editing, s.app_role is the real org role; s.role is the legacy bucket. Prefer app_role.
+  const currentRole = s ? (s.app_role || s.role) : '';
   modal({
     title: s?'Edit staff member':'Add staff member',
     body:`<form id="sf">
@@ -4101,28 +4193,33 @@ function openStaffForm(s=null){
       <div class="field"><label>Phone</label><input name="phone" value="${s?.phone||''}" /></div>
       ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The staff member can change this after first sign-in.</div></div>`:''}
       <div class="field"><label>Role</label>
-        <select name="role" ${s?'disabled':''}>
-          <option value="ceo" ${s?.role==='ceo'?'selected':''}>Chief Executive Officer</option>
-          <option value="branch_manager" ${s?.role==='branch_manager'?'selected':''}>Branch Manager</option>
-          <option value="admin" ${s?.role==='admin'?'selected':''}>Administrator</option>
-          <option value="supervisor" ${s?.role==='supervisor'?'selected':''}>Supervisor</option>
-          <option value="loan_officer" ${(s?.role==='loan_officer'||s?.role==='officer')?'selected':''}>Loan Officer</option>
-          <option value="inventory_officer" ${s?.role==='inventory_officer'?'selected':''}>Inventory Officer</option>
-          <option value="storekeeper" ${s?.role==='storekeeper'?'selected':''}>Storekeeper / Procurement</option>
+        <select name="role">
+          <option value="ceo" ${currentRole==='ceo'?'selected':''}>Chief Executive Officer</option>
+          <option value="branch_manager" ${currentRole==='branch_manager'?'selected':''}>Branch Manager</option>
+          <option value="admin" ${currentRole==='admin'?'selected':''}>Administrator</option>
+          <option value="supervisor" ${currentRole==='supervisor'?'selected':''}>Supervisor</option>
+          <option value="loan_officer" ${(currentRole==='loan_officer'||currentRole==='officer')?'selected':''}>Loan Officer</option>
+          <option value="inventory_officer" ${currentRole==='inventory_officer'?'selected':''}>Inventory Officer</option>
+          <option value="storekeeper" ${currentRole==='storekeeper'?'selected':''}>Storekeeper / Procurement</option>
         </select>
-        <div class="helper">Role drives sidebar visibility and approval rights. See deployment notes for the full access matrix.</div>
+        <div class="helper">Role controls sidebar access and approval rights. Changes take effect on the staff member's next sign-in.</div>
       </div>
     </form>`,
     actions:[
       { label:'Cancel', onClick: closeModal },
-      { label: s?'Save':'Create account', cls:'btn-primary', onClick: async () => {
+      { label: s?'Save changes':'Create account', cls:'btn-primary', onClick: async () => {
+        if(!(await ensureFreshToken())) return;
         const fd = new FormData($('sf')); const row = Object.fromEntries(fd);
         if(s){
-          const upd = { full_name: row.full_name, phone: row.phone||null };
+          const upd = { full_name: row.full_name, phone: row.phone||null, role: row.role };
           const { error } = await sb.from('pb_staff').update(upd).eq('id', s.id);
           if(error) return toast(error.message,'error');
-          Object.assign(s, upd); audit('update','pb_staff',s.id);
-          closeModal(); render(); toast('Staff updated','success'); return;
+          // Keep both the raw role and the legacy bucket in sync in memory
+          Object.assign(s, upd);
+          s.app_role = row.role;
+          s.role = ROLE_TO_LEGACY[row.role] || 'officer';
+          audit('update','pb_staff',s.id,null,upd);
+          closeModal(); render(); toast('Staff updated. Role change takes effect on next sign-in.','success'); return;
         }
         // Create auth user via admin client (does NOT log out current user)
         const { data, error } = await sbAdmin.auth.signUp({ email: row.email.toLowerCase(), password: row.password, options: { emailRedirectTo: authRedirectUrl() } });
@@ -4683,6 +4780,304 @@ async function submitPurchase(){
 /* =====================================================================
  * PAGE: REMITTANCES  (Maker-Checker workflow)
  * ===================================================================== */
+/* =====================================================================
+ * PAGE: SOLD ITEMS LOAN FORM (Storekeeper)
+ * Matches the physical "Sold Items Loan Form" used in the field.
+ * Interest = 2% per month (flat on principal); Charge = 6% one-time.
+ * ===================================================================== */
+let _soldItems = []; // rows in the current form session
+
+function pageSoldItems(){
+  const isAdmin = state.staff.role === 'admin';
+  const myGroups = isAdmin ? state.data.groups : state.data.groups.filter(g => g.officer_id === state.staff.id);
+
+  /* --- History of past sold-item forms recorded as orders with source:'sold_items' --- */
+  const history = state.data.orders.filter(o => {
+    try { return JSON.parse(o.notes||'{}').source === 'sold_items'; } catch{ return false; }
+  }).slice(0,50);
+
+  $('page').innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Sold Items Loan Form</h1>
+        <div class="desc">Record items issued to clients on credit. Interest: 2% per month · Service charge: 6% of principal.</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="openSoldItemsForm()">📋 New Form</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h3>Recent sold-items records</h3><div class="sub">${history.length} record(s)</div></div>
+      <div style="overflow-x:auto"><table class="tbl">
+        <thead><tr>
+          <th>Date</th><th>Credit Officer</th><th>Group</th><th>Branch</th>
+          <th class="num">Items</th><th class="num">Total Principal</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody>${history.map(o=>{
+          let meta = {}; try{ meta = JSON.parse(o.notes||'{}'); }catch{}
+          const g = state.data.groups.find(x=>x.id===o.group_id);
+          const off = state.data.staff.find(x=>x.id===o.recorded_by);
+          const rows = meta.rows || [];
+          const principal = rows.reduce((a,r)=>a+Number(r.loan_amount||0),0);
+          return `<tr>
+            <td>${fmtDate(o.ordered_on)}</td>
+            <td>${off?.full_name||meta.credit_officer||'—'}</td>
+            <td>${g?.name||meta.group_name||'—'}</td>
+            <td>${meta.branch||'—'}</td>
+            <td class="num">${rows.length}</td>
+            <td class="num"><b>${KES(principal)}</b></td>
+            <td><span class="badge ${o.status==='fulfilled'?'b-green':o.status==='pending'?'b-yellow':'b-grey'}">${o.status}</span></td>
+            <td><button class="btn btn-sm btn-outline" onclick="previewSoldItemsForm('${o.id}')">View</button></td>
+          </tr>`;
+        }).join('') || `<tr><td colspan="8"><div class="empty"><h4>No forms recorded yet</h4><p>Click "New Form" to record sold items.</p></div></td></tr>`}
+        </tbody>
+      </table></div>
+    </div>
+  `;
+}
+
+function openSoldItemsForm(){
+  _soldItems = Array.from({length:10}, (_,i) => ({ sr: i+1, client_name:'', phone:'', product:'', loan_amount:0, loan_term:'', loan_no:'' }));
+
+  modal({
+    title: 'Sold Items Loan Form — Wamama Pamoja',
+    size: 'lg',
+    body: `
+      <div class="grid-2" style="margin-bottom:14px">
+        <div class="field"><label>Credit Officer</label><input id="si-officer" value="${state.staff.full_name||''}" /></div>
+        <div class="field"><label>Group Name</label>
+          <select id="si-group">
+            <option value="">— Select group —</option>
+            ${state.data.groups.map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Branch</label><input id="si-branch" placeholder="e.g. Nairobi Central" /></div>
+        <div class="field"><label>Form date</label><input type="date" id="si-date" value="${todayISO()}" /></div>
+      </div>
+
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:12px;font-size:13px">
+        <b>Group Details</b>
+        <div class="grid-2" style="margin-top:8px">
+          <div class="field"><label>Location</label><input id="si-location" placeholder="Group meeting location" /></div>
+          <div class="field"><label>Meeting Day</label><input id="si-meeting-day" placeholder="e.g. Monday" /></div>
+          <div class="field"><label>Meeting Time</label><input id="si-meeting-time" placeholder="e.g. 9:00 AM" /></div>
+          <div class="field"><label>Nearest Landmark</label><input id="si-landmark" placeholder="e.g. Near the market" /></div>
+        </div>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">Loan Details — Interest: 2%/month flat · Service charge: 6% of principal</div>
+      <div style="overflow-x:auto">
+        <table class="tbl" id="si-table" style="min-width:760px;font-size:12px">
+          <thead><tr>
+            <th style="width:36px">SR.</th>
+            <th>Client Name</th><th>Phone No</th><th>Product</th>
+            <th class="num">Loan Amount (KES)</th><th>Loan Term (weeks)</th>
+            <th class="num">6% Charge</th><th class="num">Total Interest</th><th class="num">Total Payable</th>
+            <th style="width:60px">Loan No</th>
+          </tr></thead>
+          <tbody id="si-rows"></tbody>
+          <tfoot id="si-totals"></tfoot>
+        </table>
+      </div>
+    `,
+    actions:[
+      { label:'Cancel', onClick: closeModal },
+      { label:'Export Excel', cls:'btn-outline', onClick: ()=>exportSoldItemsExcel() },
+      { label:'Save & Submit', cls:'btn-primary', onClick: ()=>saveSoldItemsForm() }
+    ]
+  });
+
+  // Auto-fill meeting day when group is selected
+  setTimeout(()=>{
+    document.getElementById('si-group').addEventListener('change', function(){
+      const g = state.data.groups.find(x=>x.id===this.value);
+      if(g){
+        const mDay = document.getElementById('si-meeting-day');
+        const mTime = document.getElementById('si-meeting-time');
+        if(mDay && g.meeting_day) mDay.value = g.meeting_day;
+        if(mTime && g.meeting_time) mTime.value = g.meeting_time;
+      }
+    });
+    renderSoldItemsRows();
+  }, 50);
+}
+
+function renderSoldItemsRows(){
+  const tbody = document.getElementById('si-rows');
+  const tfoot = document.getElementById('si-totals');
+  if(!tbody) return;
+
+  let totalPrincipal=0, totalCharge=0, totalInterest=0, totalPayable=0;
+
+  tbody.innerHTML = _soldItems.map((row, i)=>{
+    const principal = Number(row.loan_amount)||0;
+    const weeks = parseInt(row.loan_term)||0;
+    const months = weeks / 4;
+    const charge = Math.round(principal * 0.06 * 100)/100;
+    const interest = Math.round(principal * 0.02 * months * 100)/100;
+    const payable = principal + charge + interest;
+    totalPrincipal += principal; totalCharge += charge; totalInterest += interest; totalPayable += payable;
+    return `<tr>
+      <td style="text-align:center;color:var(--text-muted)">${row.sr}.</td>
+      <td><input style="min-width:120px;font-size:12px" data-si="${i}" data-f="client_name" value="${row.client_name}" placeholder="Full name" onchange="siUpdateRow(${i},this)" /></td>
+      <td><input style="width:110px;font-size:12px" data-si="${i}" data-f="phone" value="${row.phone}" placeholder="07XX..." onchange="siUpdateRow(${i},this)" /></td>
+      <td><input style="min-width:110px;font-size:12px" data-si="${i}" data-f="product" value="${row.product}" placeholder="Product" onchange="siUpdateRow(${i},this)" /></td>
+      <td><input type="number" min="0" style="width:110px;font-size:12px;text-align:right" data-si="${i}" data-f="loan_amount" value="${row.loan_amount||''}" placeholder="0" onchange="siUpdateRow(${i},this)" oninput="siUpdateRow(${i},this)" /></td>
+      <td><input type="number" min="1" max="48" style="width:80px;font-size:12px;text-align:right" data-si="${i}" data-f="loan_term" value="${row.loan_term||''}" placeholder="wks" onchange="siUpdateRow(${i},this)" oninput="siUpdateRow(${i},this)" /></td>
+      <td class="num" style="color:var(--warning);font-size:12px">${principal>0?KES(charge):'—'}</td>
+      <td class="num" style="color:var(--info);font-size:12px">${principal>0&&weeks>0?KES(interest):'—'}</td>
+      <td class="num" style="font-weight:700;font-size:12px;color:var(--primary)">${principal>0?KES(payable):'—'}</td>
+      <td><input style="width:70px;font-size:12px" data-si="${i}" data-f="loan_no" value="${row.loan_no}" placeholder="Ref" onchange="siUpdateRow(${i},this)" /></td>
+    </tr>`;
+  }).join('');
+
+  tfoot.innerHTML = `<tr style="background:var(--surface-2);font-weight:700">
+    <td colspan="4" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS</td>
+    <td class="num" style="padding:8px 14px;font-size:12px">${KES(totalPrincipal)}</td>
+    <td></td>
+    <td class="num" style="padding:8px 14px;font-size:12px;color:var(--warning)">${KES(totalCharge)}</td>
+    <td class="num" style="padding:8px 14px;font-size:12px;color:var(--info)">${KES(totalInterest)}</td>
+    <td class="num" style="padding:8px 14px;font-size:12px;color:var(--primary)">${KES(totalPayable)}</td>
+    <td></td>
+  </tr>`;
+}
+
+function siUpdateRow(i, el){
+  _soldItems[i][el.dataset.f] = el.dataset.f === 'loan_amount' ? Number(el.value)||0 : el.value;
+  renderSoldItemsRows();
+}
+
+async function saveSoldItemsForm(){
+  if(!(await ensureFreshToken())) return;
+  const validRows = _soldItems.filter(r=>r.client_name && r.loan_amount>0);
+  if(!validRows.length) return toast('Please fill in at least one client row.','error');
+
+  const groupId = document.getElementById('si-group')?.value || null;
+  const creditOfficer = document.getElementById('si-officer')?.value || state.staff.full_name;
+  const branch = document.getElementById('si-branch')?.value || '';
+  const date = document.getElementById('si-date')?.value || todayISO();
+  const location = document.getElementById('si-location')?.value || '';
+  const meetingDay = document.getElementById('si-meeting-day')?.value || '';
+  const meetingTime = document.getElementById('si-meeting-time')?.value || '';
+  const landmark = document.getElementById('si-landmark')?.value || '';
+  const group = state.data.groups.find(x=>x.id===groupId);
+
+  const rowsWithCalc = validRows.map(r=>{
+    const principal = Number(r.loan_amount)||0;
+    const weeks = parseInt(r.loan_term)||0;
+    const months = weeks/4;
+    const charge = Math.round(principal*0.06*100)/100;
+    const interest = Math.round(principal*0.02*months*100)/100;
+    return { ...r, charge, interest, total_payable: principal+charge+interest };
+  });
+
+  const meta = {
+    source:'sold_items', credit_officer: creditOfficer, group_name: group?.name||'',
+    branch, location, meeting_day: meetingDay, meeting_time: meetingTime,
+    nearest_landmark: landmark, rows: rowsWithCalc
+  };
+
+  const totalPrincipal = rowsWithCalc.reduce((a,r)=>a+Number(r.loan_amount),0);
+  const ins = {
+    business_id: state.staff.business_id || null,
+    member_id: null, group_id: groupId || null,
+    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} item(s)`,
+    quantity: validRows.length, ordered_on: date, status:'pending',
+    recorded_by: state.staff.id, notes: JSON.stringify(meta),
+    desired_weeks: null, desired_weekly_installment: null
+  };
+  const { data, error } = await sb.from('pb_orders').insert(ins).select().single();
+  if(error) return toast('Save failed: '+error.message,'error');
+  state.data.orders.unshift(data);
+  audit('sold_items_form','pb_orders',data.id);
+  closeModal(); render();
+  toast(`Sold items form saved — ${validRows.length} client(s), total principal ${KES(totalPrincipal)}.`,'success');
+}
+
+function exportSoldItemsExcel(){
+  const validRows = _soldItems.filter(r=>r.client_name||r.loan_amount>0);
+  if(!validRows.length){ toast('No data to export.','warn'); return; }
+  const creditOfficer = document.getElementById('si-officer')?.value||state.staff.full_name;
+  const groupEl = document.getElementById('si-group');
+  const groupName = groupEl?.options[groupEl.selectedIndex]?.text||'';
+  const branch = document.getElementById('si-branch')?.value||'';
+  const date = document.getElementById('si-date')?.value||todayISO();
+  const rows = validRows.map(r=>{
+    const principal = Number(r.loan_amount)||0;
+    const weeks = parseInt(r.loan_term)||0;
+    const months = weeks/4;
+    const charge = Math.round(principal*0.06*100)/100;
+    const interest = Math.round(principal*0.02*months*100)/100;
+    return {
+      'SR.': r.sr, 'Client Name': r.client_name, 'Phone No': r.phone,
+      'Product': r.product, 'Loan Amount (KES)': principal,
+      'Loan Term (Weeks)': r.loan_term,
+      '6% Service Charge (KES)': charge,
+      'Interest (2%/mo) (KES)': interest,
+      'Total Payable (KES)': principal+charge+interest,
+      'Loan No': r.loan_no
+    };
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  // Add header info above data rows
+  XLSX.utils.sheet_add_aoa(ws, [
+    ['Wamama Pamoja — Sold Items Loan Form'],
+    [`Credit Officer: ${creditOfficer}`, `Group: ${groupName}`, `Branch: ${branch}`, `Date: ${date}`],
+    []
+  ], { origin: 'A1' });
+  XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
+  XLSX.utils.book_append_sheet(wb, ws, 'Sold Items Form');
+  XLSX.writeFile(wb, `sold_items_form_${date}.xlsx`);
+  toast('Excel exported.','success');
+}
+
+function previewSoldItemsForm(orderId){
+  const o = state.data.orders.find(x=>x.id===orderId);
+  if(!o) return;
+  let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
+  const rows = meta.rows||[];
+  modal({
+    title:`Sold Items Form — ${fmtDate(o.ordered_on)}`,
+    size:'lg',
+    body:`
+      <div class="grid-2" style="margin-bottom:12px;font-size:13px">
+        <div><b>Credit Officer:</b> ${meta.credit_officer||'—'}</div>
+        <div><b>Group:</b> ${meta.group_name||'—'}</div>
+        <div><b>Branch:</b> ${meta.branch||'—'}</div>
+        <div><b>Date:</b> ${fmtDate(o.ordered_on)}</div>
+      </div>
+      <div style="overflow-x:auto"><table class="tbl" style="min-width:640px;font-size:12px">
+        <thead><tr>
+          <th>SR.</th><th>Client</th><th>Phone</th><th>Product</th>
+          <th class="num">Loan Amt</th><th>Term</th>
+          <th class="num">6% Charge</th><th class="num">Interest</th><th class="num">Total</th><th>Loan No</th>
+        </tr></thead>
+        <tbody>${rows.map((r,i)=>`<tr>
+          <td>${i+1}.</td><td>${r.client_name||'—'}</td><td>${r.phone||'—'}</td>
+          <td>${r.product||'—'}</td><td class="num">${KES(r.loan_amount||0)}</td>
+          <td>${r.loan_term||'—'} wks</td>
+          <td class="num" style="color:var(--warning)">${KES(r.charge||0)}</td>
+          <td class="num" style="color:var(--info)">${KES(r.interest||0)}</td>
+          <td class="num" style="font-weight:700;color:var(--primary)">${KES(r.total_payable||0)}</td>
+          <td>${r.loan_no||'—'}</td>
+        </tr>`).join('')}
+        <tr style="background:var(--surface-2);font-weight:700">
+          <td colspan="4" style="padding:8px 14px">TOTALS</td>
+          <td class="num" style="padding:8px 14px">${KES(rows.reduce((a,r)=>a+Number(r.loan_amount||0),0))}</td>
+          <td></td>
+          <td class="num" style="padding:8px 14px;color:var(--warning)">${KES(rows.reduce((a,r)=>a+Number(r.charge||0),0))}</td>
+          <td class="num" style="padding:8px 14px;color:var(--info)">${KES(rows.reduce((a,r)=>a+Number(r.interest||0),0))}</td>
+          <td class="num" style="padding:8px 14px;color:var(--primary)">${KES(rows.reduce((a,r)=>a+Number(r.total_payable||0),0))}</td>
+          <td></td>
+        </tr>
+        </tbody>
+      </table></div>`,
+    actions:[{ label:'Close', onClick: closeModal }]
+  });
+}
+
 function pageReconciliation(){
   const isAdmin = state.staff.role === 'admin';
   const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
