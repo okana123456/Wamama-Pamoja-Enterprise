@@ -571,7 +571,7 @@ const PAGE_ACCESS = {
   orders:['branch_manager','inventory_officer','storekeeper'],
   reconciliation:['branch_manager','supervisor','loan_officer','officer'],
   expenses:['branch_manager','supervisor'],
-  accounting:[],
+  accounting:['branch_manager'],
   reports:['branch_manager','supervisor','inventory_officer'],
   staff:[], settings:[], audit:['branch_manager','supervisor'],
   memberProfile:'ALL'
@@ -805,7 +805,7 @@ function loanPaid(loanId){
   return state.data.repayments.filter(r=>r.loan_id===loanId && r.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 function memberEligible(memberId){
-  const t = Number(state.settings?.savings_threshold || 900);
+  const t = Number(state.settings?.savings_threshold || 400);
   return memberSavings(memberId) >= t;
 }
 function groupSavingsTotal(groupId){
@@ -856,7 +856,7 @@ function renderAuth(){
           <button class="btn btn-outline btn-block" onclick="authMode='forgot';renderAuth()">Forgot password</button>
           <button class="btn btn-outline btn-block" style="margin-top:8px" onclick="authMode='register';renderAuth()">Register a new business</button>
           <div class="muted" style="text-align:center;margin-top:10px;font-size:11px">
-            Loan officers do not self-register. The business administrator creates officer accounts from Staff &amp; Permissions.
+            Staff do not self-register. The administrator creates accounts from Staff &amp; Permissions.
           </div>
         ` : authMode === 'forgot' ? `
           <form id="form-forgot">
@@ -1657,13 +1657,13 @@ function pageGroups(){
     <div class="toolbar">
       <div class="search-box grow">
         <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
-        <input id="grp-search" placeholder="Search by name, chairman or group number" value="${state._groupSearch||''}"/>
+        <input id="grp-search" placeholder="Search by name, chairperson or group number" value="${state._groupSearch||''}"/>
       </div>
     </div>
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
-          <th>#</th><th>Name</th><th>Meeting day</th><th>Chairman</th>
+          <th>#</th><th>Name</th><th>Meeting day</th><th>Chairperson</th>
           <th>Treasurer</th><th>Officer</th><th class="num">Members</th><th class="num">Savings</th>
           <th>Status</th><th></th>
         </tr></thead>
@@ -1756,8 +1756,8 @@ function openGroupForm(g=null){
       </div>
       <div class="field"><label>Meeting location</label><input name="meeting_location" value="${g?.meeting_location||''}" placeholder="Venue / address" /></div>
       <div class="grid-2">
-        <div class="field"><label>Chairman name</label><input name="chairman_name" value="${g?.chairman_name||''}" /></div>
-        <div class="field"><label>Chairman phone</label><input name="chairman_phone" value="${g?.chairman_phone||''}" /></div>
+        <div class="field"><label>Chairperson name</label><input name="chairman_name" value="${g?.chairman_name||''}" /></div>
+        <div class="field"><label>Chairperson phone</label><input name="chairman_phone" value="${g?.chairman_phone||''}" /></div>
       </div>
       <div class="grid-2">
         <div class="field"><label>Treasurer name</label><input name="treasurer_name" value="${g?.treasurer_name||''}" /></div>
@@ -3608,7 +3608,7 @@ function openOrderForm(){
         if(!validLines.length) return toast('Please select at least one asset.','error');
 
         if(!memberEligible(member.id)){
-          if(!confirm(`This member has not yet reached the savings eligibility threshold of ${KES(state.settings?.savings_threshold||900)}. Submit order anyway?`)) return;
+          if(!confirm(`This member has not yet reached the savings eligibility threshold of ${KES(state.settings?.savings_threshold||400)}. Submit order anyway?`)) return;
         }
 
         // Combine asset names into a single string e.g. "Sofa (x1), Mattress (x2)"
@@ -4047,8 +4047,8 @@ function exportReport(kind){
 function pageStaff(){
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>Staff & permissions</h1><div class="desc">Administrators and loan officers who can sign in to the system.</div></div>
-      <div class="actions"><button class="btn btn-primary" onclick="openStaffForm()">Add loan officer</button></div>
+      <div><h1>Staff & permissions</h1><div class="desc">All staff members who can sign in to the system.</div></div>
+      <div class="actions"><button class="btn btn-primary" onclick="openStaffForm()">Add staff member</button></div>
     </div>
     <div class="table-wrap"><table class="tbl">
       <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th></th></tr></thead>
@@ -4060,7 +4060,7 @@ function pageStaff(){
           <td><span class="badge ${s.status==='active'?'b-green':'b-red'}">${s.status}</span></td>
           <td>${(ROLE_TO_LEGACY[s.role]||s.role)==='admin'?'<span class="muted">Full access</span>':'<button class="btn btn-sm btn-outline" onclick="editPerms(\''+s.id+'\')">Manage</button>'}</td>
           <td><button class="act-btn" onclick="staffActions(event,'${s.id}')">···</button></td>
-        </tr>`).join('') || `<tr><td colspan="6"><div class="empty"><h4>No staff yet</h4><p>Add loan officers to enable field operations.</p></div></td></tr>`}
+        </tr>`).join('') || `<tr><td colspan="6"><div class="empty"><h4>No staff yet</h4><p>Add staff members to enable system operations.</p></div></td></tr>`}
       </tbody>
     </table></div>
   `;
@@ -4094,12 +4094,12 @@ function staffActions(ev, id){
 }
 function openStaffForm(s=null){
   modal({
-    title: s?'Edit staff member':'Add loan officer',
+    title: s?'Edit staff member':'Add staff member',
     body:`<form id="sf">
       <div class="field"><label>Full name *</label><input name="full_name" value="${s?.full_name||''}" required /></div>
       <div class="field"><label>Email *</label><input type="email" name="email" value="${s?.email||''}" required ${s?'disabled':''} /></div>
       <div class="field"><label>Phone</label><input name="phone" value="${s?.phone||''}" /></div>
-      ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The officer can change this after first sign-in.</div></div>`:''}
+      ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The staff member can change this after first sign-in.</div></div>`:''}
       <div class="field"><label>Role</label>
         <select name="role" ${s?'disabled':''}>
           <option value="ceo" ${s?.role==='ceo'?'selected':''}>Chief Executive Officer</option>
@@ -4134,7 +4134,7 @@ function openStaffForm(s=null){
         await sb.from('pb_permissions').insert({ staff_id: created.id });
         state.data.staff.unshift(created);
         audit('create_staff','pb_staff',created.id,null,ins);
-        closeModal(); render(); toast('Staff account created. Officer must verify email before signing in.','success');
+        closeModal(); render(); toast('Staff account created. Staff member must verify email before signing in.','success');
       }}
     ]
   });
@@ -4697,12 +4697,12 @@ function pageReconciliation(){
   $('page').innerHTML = `
     <div class="page-head">
       <div>
-        <h1>Chairman remittances</h1>
+        <h1>Chairperson Remittances</h1>
         <div class="desc">${isAdmin
           ? pending.length
             ? `<span style="color:var(--warning);font-weight:600">${pending.length} pending your confirmation</span>`
             : 'All remittances confirmed.'
-          : 'Log the cash the chairman sends to Paybill after each meeting.'}</div>
+          : 'Log the cash the chairperson sends to Paybill after each meeting.'}</div>
       </div>
       <div class="actions">
         <button class="btn btn-primary" onclick="openReconForm()">Log remittance</button>
@@ -4713,8 +4713,8 @@ function pageReconciliation(){
     <div class="card card-pad" style="margin-bottom:16px;background:var(--info-50);border-color:var(--info)">
       <div style="font-weight:700;color:var(--info);margin-bottom:6px">Your job — Field logger</div>
       <div style="font-size:13px;line-height:1.9">
-        <b>1.</b> After the meeting, the chairman collects cash from members (savings + repayments).<br>
-        <b>2.</b> The chairman sends the total to the business M-Pesa Paybill and shows you the SMS.<br>
+        <b>1.</b> After the meeting, the chairperson collects cash from members (savings + repayments).<br>
+        <b>2.</b> The chairperson sends the total to the business M-Pesa Paybill and shows you the SMS.<br>
         <b>3.</b> You click <b>Log remittance</b> — the system auto-fills the expected amount from meeting records.<br>
         <b>4.</b> You confirm whether the SMS amount matches, then submit. The admin confirms receipt on their end.
       </div>
@@ -4792,7 +4792,7 @@ function openReconForm(){
     : state.data.groups.filter(g=>g.officer_id===state.staff.id);
 
   modal({
-    title:'Log chairman remittance',
+    title:'Log chairperson remittance',
     body:`
       <div style="background:var(--info-50);border:1px solid var(--info);border-radius:var(--radius-sm);padding:11px 14px;margin-bottom:16px;font-size:13px">
         Select the group and meeting date — the system will auto-fill the expected amount from your recorded savings and repayments.
@@ -4822,7 +4822,7 @@ function openReconForm(){
               <div style="font-weight:700;font-size:18px" id="rec-rp-disp">KES 0</div>
             </div>
             <div style="background:var(--surface);border-radius:var(--radius-sm);padding:8px;border:1px solid var(--border)">
-              <div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">Chairman should send</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">Chairperson should send</div>
               <div style="font-weight:800;font-size:20px;color:var(--accent)" id="rec-gt-disp">KES 0</div>
             </div>
           </div>
@@ -4832,18 +4832,18 @@ function openReconForm(){
         </div>
 
         <div class="field">
-          <label>Does the chairman's M-Pesa SMS show this exact amount? *</label>
+          <label>Does the chairperson's M-Pesa SMS show this exact amount? *</label>
           <select name="amount_matched" id="rec-match" required onchange="reconMatchChanged(this.value)">
             <option value="">— Select after checking the SMS —</option>
             <option value="yes">✓ Yes — the SMS amount matches exactly</option>
             <option value="no">✗ No — the SMS amount is different</option>
           </select>
-          <div class="helper">Look at the M-Pesa confirmation SMS the chairman is showing you and compare the amount above.</div>
+          <div class="helper">Look at the M-Pesa confirmation SMS the chairperson is showing you and compare the amount above.</div>
         </div>
 
         <div id="rec-diff-wrap" style="display:none" class="field">
           <label>What amount does the SMS show? (KES)</label>
-          <input type="number" name="actual_sms_amount" id="rec-actual" min="0" step="0.01" placeholder="Enter the amount from the chairman's SMS" />
+          <input type="number" name="actual_sms_amount" id="rec-actual" min="0" step="0.01" placeholder="Enter the amount from the chairperson's SMS" />
           <div class="helper" style="color:var(--warning)">This discrepancy will be flagged for the admin to investigate.</div>
         </div>
       </form>
