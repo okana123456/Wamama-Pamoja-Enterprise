@@ -522,11 +522,11 @@ async function signIn(email, password){
    This keeps Phase A backwards-compatible while real per-role gating comes later. */
 const ROLE_TO_LEGACY = {
   ceo: 'admin',
-  branch_manager: 'admin',
+  branch_manager: 'officer',   // branch_manager gets their own canView gates — NOT full admin
   admin: 'admin',
-  supervisor: 'admin',     // read-heavy oversight; treat as admin-view for now
+  supervisor: 'officer',
   loan_officer: 'officer',
-  officer: 'officer',      // legacy alias
+  officer: 'officer',          // legacy alias
   inventory_officer: 'officer',
   storekeeper: 'officer'
 };
@@ -542,7 +542,8 @@ function can(action){
   const matrix = {
     ceo:               ['*'],
     admin:             ['*'],
-    branch_manager:    ['approve_loan','approve_group','approve_savings','approve_repayment','approve_order','view_reports','view_inventory','view_payroll','manage_branch_staff','view_audit'],
+    branch_manager:    ['approve_loan','approve_group','approve_savings','approve_repayment','approve_order',
+                        'view_reports','view_inventory','manage_branch_staff','view_audit'],
     supervisor:        ['view_reports','view_field_activity','view_portfolio','audit','view_audit'],
     loan_officer:      ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
     officer:           ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
@@ -553,32 +554,37 @@ function can(action){
   return allowed.includes('*') || allowed.includes(action);
 }
 
-/* Phase B — page-level visibility map. 'admin' and 'ceo' implicitly see all. */
+/* Phase B — page-level visibility map.
+   Only 'ceo' and 'admin' implicitly see all pages.
+   branch_manager has its own explicit allow-list below.              */
 const PAGE_ACCESS = {
-  dashboard:'ALL',
-  groups:['branch_manager','supervisor','loan_officer','officer'],
-  members:['branch_manager','supervisor','loan_officer','officer'],
-  meeting:['branch_manager','loan_officer','officer'],
-  savings:['branch_manager','supervisor','loan_officer','officer'],
-  repayments:['branch_manager','supervisor','loan_officer','officer'],
-  loans:['branch_manager','supervisor','loan_officer','officer'],
-  arrears:['branch_manager','supervisor','loan_officer','officer'],
-  calculator:'ALL',
-  approvals:['branch_manager','inventory_officer'],
-  inventory:['branch_manager','supervisor','inventory_officer','storekeeper'],
-  suppliers:['branch_manager','inventory_officer'],
-  purchases:['branch_manager','inventory_officer'],
-  orders:['branch_manager','inventory_officer','storekeeper'],
-  sold_items:['branch_manager','storekeeper'],
-  reconciliation:['branch_manager','supervisor','loan_officer','officer'],
-  expenses:['branch_manager','supervisor'],
-  accounting:['branch_manager'],
-  reports:['branch_manager','supervisor','inventory_officer'],
-  staff:[], settings:[], audit:['branch_manager','supervisor'],
-  memberProfile:'ALL'
+  dashboard:      'ALL',
+  groups:         ['branch_manager','supervisor','loan_officer','officer'],
+  members:        ['branch_manager','supervisor','loan_officer','officer'],
+  meeting:        ['branch_manager','loan_officer','officer'],
+  savings:        ['branch_manager','supervisor','loan_officer','officer'],
+  repayments:     ['branch_manager','supervisor','loan_officer','officer'],
+  loans:          ['branch_manager','supervisor','loan_officer','officer'],
+  arrears:        ['branch_manager','supervisor','loan_officer','officer'],
+  calculator:     'ALL',
+  approvals:      ['branch_manager','inventory_officer'],
+  inventory:      ['branch_manager','supervisor','inventory_officer','storekeeper'],
+  suppliers:      ['inventory_officer'],                               // branch_manager: read-only via reports
+  purchases:      ['inventory_officer'],
+  orders:         ['branch_manager','inventory_officer','storekeeper'],
+  sold_items:     ['branch_manager','storekeeper'],
+  reconciliation: ['branch_manager','supervisor','loan_officer','officer'],
+  expenses:       ['branch_manager'],
+  accounting:     ['branch_manager'],
+  reports:        ['branch_manager','supervisor','inventory_officer'],
+  staff:          [],                                                  // admin + ceo only
+  settings:       [],                                                  // admin + ceo only
+  audit:          ['branch_manager','supervisor'],
+  memberProfile:  'ALL'
 };
 function canView(page){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
+  // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
   const acl = PAGE_ACCESS[page];
   if(acl === 'ALL') return true;
@@ -971,14 +977,17 @@ function navItems(){
   // Phase B — sidebar items are gated by canView(page). Legacy per-staff
   // permissions (state.perms) still narrow visibility within the role's allow-list.
   const p = state.perms || {};
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isLegacyAdmin = state.staff.role === 'admin';
+  // Branch manager can access meeting recorder (oversight role)
+  const canSeeMeeting = isLegacyAdmin || r === 'branch_manager' || p.can_record_savings || p.can_record_repayments;
   const pendApprovals = pendingApprovalsCount();
   const items = [
     { k:'dashboard',      label:'Dashboard',        icon:dashIcon() },
     { k:'approvals',      label:`Approvals${pendApprovals?` <span class="badge b-yellow" style="margin-left:6px">${pendApprovals}</span>`:''}`, icon: ic('<path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>') },
     { k:'groups',         label:'Groups',           icon:groupsIcon() },
     { k:'members',        label:'Members',          icon:memberIcon() },
-    { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: isLegacyAdmin || p.can_record_savings || p.can_record_repayments },
+    { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: canSeeMeeting },
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
     { k:'repayments',     label:'Repayments',       icon:repaymentsIcon() },
     { k:'loans',          label:'Active Loans',     icon:loanIcon() },
@@ -1351,8 +1360,13 @@ function arrearDateRange(){
 }
 
 function pageDashboard(){
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  // CEO and Administrator get the full admin dashboard.
+  // Branch Manager also gets the admin dashboard (read-only view, no write actions).
+  // All other roles get the officer dashboard.
   const isAdmin = state.staff.role === 'admin';
-  if(!isAdmin){ pageOfficerDashboard(); return; }
+  const showAdminDash = r === 'ceo' || r === 'admin' || r === 'branch_manager';
+  if(!showAdminDash){ pageOfficerDashboard(); return; }
 
   const { start, end } = dashDateRange();
   // Robust inRange: compare date strings directly (YYYY-MM-DD), with a fallback
@@ -1812,12 +1826,12 @@ function openGroupForm(g=null){
         </select>
       </div>
       <div class="field"><label>Status</label>
-        <select name="status" ${state.staff.role==='admin'?'':'disabled'}>
-          <option value="pending" ${(!g && state.staff.role!=='admin')||g?.status==='pending'?'selected':''}>Pending approval</option>
-          <option value="active" ${(g && g.status==='active') || (!g && state.staff.role==='admin')?'selected':''}>Active</option>
+        <select name="status" ${can('approve_group')?'':'disabled'}>
+          <option value="pending" ${(!g && !can('approve_group'))||g?.status==='pending'?'selected':''}>Pending approval</option>
+          <option value="active" ${(g && g.status==='active') || (!g && can('approve_group'))?'selected':''}>Active</option>
           <option value="inactive" ${g?.status==='inactive'?'selected':''}>Inactive</option>
         </select>
-        ${state.staff.role!=='admin'?'<div class="muted" style="font-size:11px;margin-top:4px">New groups require admin approval before becoming active.</div>':''}
+        ${!can('approve_group')?'<div class="muted" style="font-size:11px;margin-top:4px">New groups require admin approval before becoming active.</div>':''}
       </div>
     </form>`,
     actions:[
@@ -1830,7 +1844,36 @@ function openGroupForm(g=null){
         row.officer_id = row.officer_id || null;
         // Force pending for non-admin creators
         if(!g && state.staff.role !== 'admin'){ row.status = 'pending'; }
+
+        if(!g){
+          // === Duplicate prevention ===
+          const nameLower = (row.name||'').trim().toLowerCase();
+          const dupByName = state.data.groups.find(x =>
+            x.id !== (g?.id) &&
+            (x.name||'').trim().toLowerCase() === nameLower
+          );
+          if(dupByName){
+            return toast(`A group named "${dupByName.name}" already exists. Each group must have a unique name.`, 'error');
+          }
+          const dupByNumber = state.data.groups.find(x =>
+            x.id !== (g?.id) &&
+            Number(x.group_number) === Number(row.group_number)
+          );
+          if(dupByNumber){
+            return toast(`Group number ${row.group_number} is already assigned to "${dupByNumber.name}". Please use a different number.`, 'error');
+          }
+        }
+
         if(g){
+          // When editing, still block renaming to an existing group's name
+          const nameLower = (row.name||'').trim().toLowerCase();
+          const dupByName = state.data.groups.find(x =>
+            x.id !== g.id &&
+            (x.name||'').trim().toLowerCase() === nameLower
+          );
+          if(dupByName){
+            return toast(`A group named "${dupByName.name}" already exists. Each group must have a unique name.`, 'error');
+          }
           const { error } = await sb.from('pb_groups').update(row).eq('id', g.id);
           if(error) return toast(error.message,'error');
           Object.assign(g, row); audit('update','pb_groups',g.id,null,row);
@@ -2639,7 +2682,9 @@ async function submitMeeting(){
     const sav = Number(e.savings)||0;
 
     if(sav>0){
-      const savStatus = state.staff.role === 'admin' ? 'approved' : 'pending';
+      // Only CEO, Administrator, and Branch Manager can auto-approve on entry;
+      // Loan officers submit as 'pending' for supervisor/admin to approve.
+      const savStatus = can('approve_savings') ? 'approved' : 'pending';
       savRows.push({ business_id: state.staff.business_id || null, member_id: mem.id, group_id: m.groupId, meeting_id: meetingId, meeting_date: m.date, amount: sav, recorded_by: state.staff.id, notes: e.notes||null, status: savStatus });
     }
 
@@ -2651,7 +2696,7 @@ async function submitMeeting(){
           const ir = Number(ln.total_payable) ? (Number(ln.total_payable)-Number(ln.loan_value))/Number(ln.total_payable) : 0;
           const interest = +(rep*ir).toFixed(2);
           const principal = +(rep-interest).toFixed(2);
-          const repStatus = state.staff.role === 'admin' ? 'approved' : 'pending';
+          const repStatus = can('approve_repayment') ? 'approved' : 'pending';
           repRows.push({ business_id: state.staff.business_id || null, loan_id: ln.id, member_id: mem.id, group_id: m.groupId, meeting_id: meetingId, meeting_date: m.date, amount: rep, principal, interest, recorded_by: state.staff.id, status: repStatus });
         }
       }
@@ -6260,7 +6305,7 @@ function openStandaloneRepayment(loanId, memberId){
           meeting_date: date,
           amount, principal, interest,
           recorded_by: state.staff.id,
-          status: state.staff.role === 'admin' ? 'approved' : 'pending'
+          status: can('approve_repayment') ? 'approved' : 'pending'
         };
 
         const { data, error } = await sb.from('pb_repayments').insert(row).select().single();
