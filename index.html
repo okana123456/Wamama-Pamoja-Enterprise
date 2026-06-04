@@ -3150,23 +3150,25 @@ function showLoanSchedule(l){
  * ===================================================================== */
 function pageCalculator(){
   $('page').innerHTML = `
-    <div class="page-head"><div><h1>Loan calculator</h1><div class="desc">Compute weekly repayment schedules at the configured monthly interest rate.</div></div></div>
+    <div class="page-head"><div><h1>Loan calculator</h1><div class="desc">Compute weekly repayment schedules including all applicable fees.</div></div></div>
     <div class="card card-pad" style="margin-bottom:14px;background:var(--surface-2);border-left:3px solid var(--primary)">
-      <h4 style="margin:0 0 8px;font-size:13px;color:var(--primary)">ℹ️ How interest methods work</h4>
+      <h4 style="margin:0 0 8px;font-size:13px;color:var(--primary)">ℹ️ How fees & interest work</h4>
       <div style="font-size:13px;line-height:1.6;color:var(--text-muted)">
-        <b>Flat Rate:</b> Interest is calculated once on the full original loan amount for the entire duration. Every week carries the same interest charge regardless of how much has been repaid — simpler but costs more overall.<br>
-        <b>Reducing Balance:</b> Interest is calculated only on the outstanding (unpaid) balance each week. As the borrower repays, the balance shrinks and so does the interest charge — making it cheaper over time. The global <em>monthly interest rate</em> set in Settings drives both methods.
+        <b>3% Application Fee:</b> One-time fee charged on the loan principal when the loan is issued.<br>
+        <b>3% Insurance Cover:</b> One-time insurance fee charged on the loan principal at issuance.<br>
+        <b>Flat Rate:</b> Interest calculated once on the full original loan amount for the entire duration. Every week carries the same charge regardless of balance repaid — simpler but costs more overall.<br>
+        <b>Reducing Balance:</b> Interest calculated only on the outstanding balance each week. As the borrower repays, interest shrinks — cheaper over time.
       </div>
     </div>
     <div class="grid-2">
       <div class="card card-pad">
         <h3 style="margin:0 0 14px">Inputs</h3>
-        <div class="field"><label>Asset value / loan amount (KES)</label><input id="c-amount" type="number" min="0" value="10000" /></div>
-        <div class="field"><label>Affordable weekly repayment (KES)</label><input id="c-weekly" type="number" min="0" value="500" /></div>
+        <div class="field"><label>Asset value / loan amount (KES)</label><input id="c-amount" type="number" min="0" value="10000" oninput="runCalc()" /></div>
+        <div class="field"><label>Affordable weekly repayment (KES)</label><input id="c-weekly" type="number" min="0" value="500" oninput="runCalc()" /></div>
         <div class="field"><label>Interest method</label>
-          <select id="c-method"><option value="flat">Flat rate</option><option value="reducing">Reducing balance</option></select>
+          <select id="c-method" onchange="runCalc()"><option value="flat">Flat rate</option><option value="reducing">Reducing balance</option></select>
         </div>
-        <div class="field"><label>Loan start date</label><input id="c-start" type="date" value="${todayISO()}" /></div>
+        <div class="field"><label>Loan start date</label><input id="c-start" type="date" value="${todayISO()}" onchange="runCalc()" /></div>
         <button class="btn btn-primary btn-block" onclick="runCalc()">Compute schedule</button>
       </div>
       <div id="calc-out"></div>
@@ -3178,23 +3180,36 @@ function runCalc(){
   const amount = Number($('c-amount').value)||0;
   const weekly = Number($('c-weekly').value)||0;
   const method = $('c-method').value;
-  const start = new Date($('c-start').value);
-  const r = computeSchedule(amount, weekly, method, start);
+  const start  = new Date($('c-start').value);
+  const r      = computeSchedule(amount, weekly, method, start);
   const tooLong = r.weeks > (state.settings?.max_loan_weeks || 48);
+
+  // === 3% Application Fee + 3% Insurance Cover ===
+  const appFee  = Math.round(amount * 0.03 * 100) / 100;
+  const insFee  = Math.round(amount * 0.03 * 100) / 100;
+  const totalFees = appFee + insFee;
+  const grandTotal = r.totalPayable + totalFees;
+
   $('calc-out').innerHTML = `
     <div class="card card-pad">
       <h3 style="margin:0 0 12px">Result</h3>
       <table class="summary-table">
         <tr><td>Principal</td><td>${KES(amount)}</td></tr>
-        <tr><td>Total interest</td><td>${KES(r.totalInterest)}</td></tr>
-        <tr><td>Total payable</td><td><b>${KES(r.totalPayable)}</b></td></tr>
-        <tr><td>Weeks to complete</td><td>${r.weeks}</td></tr>
+        <tr style="color:var(--warning)"><td>⚠ 3% Application Fee (upfront)</td><td><b>${KES(appFee)}</b></td></tr>
+        <tr style="color:var(--warning)"><td>⚠ 3% Insurance Cover (upfront)</td><td><b>${KES(insFee)}</b></td></tr>
+        <tr><td>Total interest on repayments</td><td>${KES(r.totalInterest)}</td></tr>
+        <tr style="border-top:2px solid var(--border)"><td><b>Total payable (principal + interest)</b></td><td><b>${KES(r.totalPayable)}</b></td></tr>
+        <tr style="color:var(--danger)"><td><b>Grand total (incl. all fees)</b></td><td><b>${KES(grandTotal)}</b></td></tr>
+        <tr><td>Weeks to complete repayment</td><td>${r.weeks}</td></tr>
         <tr><td>Suggested weekly installment</td><td>${KES(r.suggestedWeekly)}</td></tr>
       </table>
+      <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:10px 14px;margin-top:12px;font-size:12px;color:var(--warning)">
+        ⚠ The Application Fee (${KES(appFee)}) and Insurance Cover (${KES(insFee)}) are deducted upfront on the day the loan is issued and do <b>not</b> form part of the weekly repayment schedule shown below.
+      </div>
       ${tooLong ? `<div class="auth-error" style="margin-top:12px">Repayment exceeds the maximum loan term of ${state.settings?.max_loan_weeks||48} weeks. Consider increasing the weekly amount to at least ${KES(r.suggestedWeekly)}.</div>`:''}
     </div>
     <div class="card" style="margin-top:14px">
-      <div class="card-head"><h3>Week-by-week schedule</h3></div>
+      <div class="card-head"><h3>Week-by-week repayment schedule</h3><div class="sub">Fees excluded — deducted upfront at issuance</div></div>
       <div class="table-wrap" style="border:none;border-radius:0">
         <table class="tbl">
           <thead><tr><th>Wk</th><th>Due</th><th class="num">Principal</th><th class="num">Interest</th><th class="num">Installment</th><th class="num">Balance</th></tr></thead>
@@ -5141,49 +5156,130 @@ function siUpdateRow(i, el){
 
 async function saveSoldItemsForm(){
   if(!(await ensureFreshToken())) return;
-  const validRows = _soldItems.filter(r=>r.client_name && Number(String(r.loan_amount).replace(/,/g,''))>0);
-  if(!validRows.length) return toast('Please fill in at least one client row with a name and loan amount.','error');
+  const validRows = _soldItems.filter(r => r.client_name && Number(String(r.loan_amount).replace(/,/g,'')) > 0);
+  if(!validRows.length) return toast('Please fill in at least one client row with a name and loan amount.', 'error');
+  if(validRows.some(r => !parseInt(r.loan_term))) return toast('Please enter a loan term (weeks) for every client row.', 'error');
 
-  const groupId      = document.getElementById('si-group')?.value || null;
-  const creditOfficer= document.getElementById('si-officer')?.value || state.staff.full_name;
-  const branch       = document.getElementById('si-branch')?.value || '';
-  const date         = document.getElementById('si-date')?.value || todayISO();
-  const location     = document.getElementById('si-location')?.value || '';
-  const meetingDay   = document.getElementById('si-meeting-day')?.value || '';
-  const meetingTime  = document.getElementById('si-meeting-time')?.value || '';
-  const landmark     = document.getElementById('si-landmark')?.value || '';
-  const group        = state.data.groups.find(x=>x.id===groupId);
+  const groupId       = document.getElementById('si-group')?.value || null;
+  const creditOfficer = document.getElementById('si-officer')?.value || state.staff.full_name;
+  const branch        = document.getElementById('si-branch')?.value || '';
+  const date          = document.getElementById('si-date')?.value || todayISO();
+  const location      = document.getElementById('si-location')?.value || '';
+  const meetingDay    = document.getElementById('si-meeting-day')?.value || '';
+  const meetingTime   = document.getElementById('si-meeting-time')?.value || '';
+  const landmark      = document.getElementById('si-landmark')?.value || '';
+  const group         = state.data.groups.find(x => x.id === groupId);
+  const officerId     = group?.officer_id || state.staff.id;
 
-  const rowsWithCalc = validRows.map(r=>{
-    const principal = Number(String(r.loan_amount).replace(/,/g,''))||0;
-    const weeks     = parseInt(r.loan_term)||0;
+  // ── 1. Save the order record (batch header) ──────────────────────────────
+  const rowsWithCalc = validRows.map(r => {
+    const principal = Number(String(r.loan_amount).replace(/,/g,'')) || 0;
+    const weeks     = parseInt(r.loan_term) || 0;
     const months    = weeks / 4;
-    const charge    = Math.round(principal*0.06*100)/100;
-    const interest  = Math.round(principal*0.02*months*100)/100;
-    return { ...r, loan_amount: principal, charge, interest, total_payable: principal+charge+interest };
+    const charge    = Math.round(principal * 0.06 * 100) / 100;
+    const interest  = Math.round(principal * 0.02 * months * 100) / 100;
+    const appFee    = Math.round(principal * 0.03 * 100) / 100;
+    const insFee    = Math.round(principal * 0.03 * 100) / 100;
+    const totalPayable = principal + interest; // charge + fees recorded separately
+    return { ...r, loan_amount: principal, weeks, charge, interest, appFee, insFee, totalPayable };
   });
 
   const meta = {
-    source:'sold_items', credit_officer: creditOfficer, group_name: group?.name||'',
+    source:'sold_items', credit_officer: creditOfficer, group_name: group?.name || '',
     branch, location, meeting_day: meetingDay, meeting_time: meetingTime,
     nearest_landmark: landmark, rows: rowsWithCalc
   };
 
-  const totalPrincipal = rowsWithCalc.reduce((a,r)=>a+Number(r.loan_amount),0);
-  const ins = {
+  const totalPrincipal = rowsWithCalc.reduce((a, r) => a + r.loan_amount, 0);
+  const orderIns = {
     business_id: state.staff.business_id || null,
     member_id: null, group_id: groupId || null,
-    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} item(s)`,
-    quantity: validRows.length, ordered_on: date, status:'pending',
-    recorded_by: state.staff.id, notes: JSON.stringify(meta),
+    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} client(s)`,
+    quantity: validRows.length, ordered_on: date, status: 'fulfilled',
+    recorded_by: state.staff.id, approved_by: state.staff.id,
+    notes: JSON.stringify(meta),
     desired_weeks: null, desired_weekly_installment: null
   };
-  const { data, error } = await sb.from('pb_orders').insert(ins).select().single();
-  if(error) return toast('Save failed: '+error.message,'error');
-  state.data.orders.unshift(data);
-  audit('sold_items_form','pb_orders',data.id);
+  const { data: orderData, error: orderErr } = await sb.from('pb_orders').insert(orderIns).select().single();
+  if(orderErr) return toast('Order save failed: ' + orderErr.message, 'error');
+  state.data.orders.unshift(orderData);
+
+  // ── 2. For each client row create a pb_loans record + upfront fee repayments ─
+  let loansCreated = 0, errors = [];
+
+  for(const row of rowsWithCalc){
+    // Try to match an existing member by name (case-insensitive) in the selected group
+    const nameLower = (row.client_name || '').trim().toLowerCase();
+    const member = state.data.members.find(m =>
+      m.full_name.trim().toLowerCase() === nameLower &&
+      (!groupId || m.group_id === groupId)
+    );
+    const memberId = member?.id || null;
+
+    // Calculate loan schedule
+    const startDate    = new Date(date);
+    const endDate      = new Date(startDate);
+    endDate.setDate(endDate.getDate() + 7 * row.weeks);
+    // Weekly installment = (principal + interest) / weeks
+    const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
+
+    const loanRow = {
+      business_id:       state.staff.business_id || null,
+      member_id:         memberId,
+      group_id:          groupId || null,
+      officer_id:        officerId,
+      order_id:          orderData.id,
+      asset_id:          null,
+      asset_name:        row.product || 'Sold item',
+      asset_quantity:    1,
+      loan_value:        row.loan_amount,
+      weekly_installment: weeklyInstallment,
+      total_payable:     row.totalPayable,
+      start_date:        date,
+      expected_end_date: endDate.toISOString().slice(0, 10),
+      status:            'active'
+    };
+
+    const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loanRow).select().single();
+    if(loanErr){ errors.push(`${row.client_name}: ${loanErr.message}`); continue; }
+    state.data.loans.unshift(loanData);
+    loansCreated++;
+    audit('sold_items_loan_issue', 'pb_loans', loanData.id, null, loanRow);
+
+    // ── Upfront fee repayments ─────────────────────────────────────────────
+    const upfrontEntries = [
+      { amount: row.charge,  notes: 'Auto-deducted 6% Service Charge (Sold Items)' },
+      { amount: row.appFee,  notes: 'Auto-deducted 3% Application Fee' },
+      { amount: row.insFee,  notes: 'Auto-deducted 3% Insurance Cover' },
+    ].filter(e => e.amount > 0);
+
+    for(const fee of upfrontEntries){
+      const feeRow = {
+        business_id:  state.staff.business_id || null,
+        loan_id:      loanData.id,
+        member_id:    memberId,
+        group_id:     groupId || null,
+        recorded_by:  state.staff.id,
+        amount:       fee.amount,
+        principal:    fee.amount,
+        interest:     0,
+        meeting_date: date,
+        notes:        fee.notes,
+        status:       'approved'
+      };
+      const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
+      if(feeErr) toast(`Fee record for ${row.client_name}: ${feeErr.message}`, 'warn');
+      else state.data.repayments.unshift(feeData);
+    }
+  }
+
   closeModal(); render();
-  toast(`Sold items form saved — ${validRows.length} client(s), total principal ${KES(totalPrincipal)}.`,'success');
+
+  if(errors.length){
+    toast(`${loansCreated} loan(s) created. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
+  } else {
+    toast(`✅ ${loansCreated} loan(s) fully registered — 6% charge, 3% app fee & 3% insurance recorded for each. Total principal: ${KES(totalPrincipal)}.`, 'success');
+  }
 }
 
 function exportSoldItemsExcel(){
@@ -5199,13 +5295,18 @@ function exportSoldItemsExcel(){
     const months    = weeks/4;
     const charge    = Math.round(principal*0.06*100)/100;
     const interest  = Math.round(principal*0.02*months*100)/100;
+    const appFee    = Math.round(principal*0.03*100)/100;
+    const insFee    = Math.round(principal*0.03*100)/100;
     return {
       'SR.': r.sr, 'Client Name': r.client_name, 'Phone No': r.phone,
       'Product': r.product, 'Loan Amount (KES)': principal,
       'Loan Term (Weeks)': r.loan_term,
       '6% Service Charge (KES)': charge,
       'Interest (2%/mo) (KES)': interest,
-      'Total Payable (KES)': principal+charge+interest,
+      '3% Application Fee (KES)': appFee,
+      '3% Insurance Cover (KES)': insFee,
+      'Total Payable (KES)': principal + interest,
+      'Grand Total incl. Fees (KES)': principal + interest + charge + appFee + insFee,
       'Loan No': r.loan_no
     };
   });
