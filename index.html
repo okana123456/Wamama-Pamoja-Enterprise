@@ -2151,25 +2151,30 @@ function saveWizardStep(){
     d.phone = normalisePhone(d.phone);
     if(!d.full_name || !d.national_id || !d.phone){ toast('Full name, National ID and phone are required.','error'); return false; }
 
-    // ── Duplicate: same National ID ──────────────────────────────────────
-    const dupById = state.data.members.find(m => m.national_id && m.national_id.trim() === d.national_id.trim());
+    // Only check against active/pending members — inactive members (from deleted or
+    // inactive groups) should not block a fresh registration in a new group.
+    const activeMembers = state.data.members.filter(m => m.status !== 'inactive');
+
+    // ── Duplicate: same National ID (active/pending members only) ────────
+    const dupById = activeMembers.find(m => m.national_id && m.national_id.trim() === d.national_id.trim());
     if(dupById){
-      toast(`A client with National ID ${d.national_id} is already registered as "${dupById.full_name}". Cannot register twice.`, 'error');
+      const dupGroup = state.data.groups.find(g => g.id === dupById.group_id);
+      toast(`A client with National ID ${d.national_id} is already registered as "${dupById.full_name}"${dupGroup?' in group '+dupGroup.name:''}. Cannot register twice.`, 'error');
       return false;
     }
-    // ── Duplicate: same phone number ─────────────────────────────────────
+    // ── Duplicate: same phone number (active/pending members only) ────────
     const normPhone = normalisePhone(d.phone);
-    const dupByPhone = state.data.members.find(m => normalisePhone(m.phone||'') === normPhone && normPhone.length >= 9);
+    const dupByPhone = activeMembers.find(m => normalisePhone(m.phone||'') === normPhone && normPhone.length >= 9);
     if(dupByPhone){
-      toast(`Phone number ${d.phone} is already registered to "${dupByPhone.full_name}". Each client must have a unique phone number.`, 'error');
+      const dupGroup = state.data.groups.find(g => g.id === dupByPhone.group_id);
+      toast(`Phone number ${d.phone} is already registered to "${dupByPhone.full_name}"${dupGroup?' in group '+dupGroup.name:''}. Each active client must have a unique phone number.`, 'error');
       return false;
     }
-    // ── Duplicate: same full name in system (warn, don't hard-block) ─────
+    // ── Duplicate: same full name (warn only — names can be legitimately shared) ──
     const nameLower = d.full_name.trim().toLowerCase();
-    const dupByName = state.data.members.find(m => m.full_name.trim().toLowerCase() === nameLower);
+    const dupByName = activeMembers.find(m => m.full_name.trim().toLowerCase() === nameLower);
     if(dupByName){
-      toast(`⚠ Warning: A client named "${dupByName.full_name}" already exists in the system (ID: ${dupByName.national_id||'—'}). Please verify this is a different person before continuing.`, 'warn');
-      // warn only — don't block, names can be legitimately shared
+      toast(`⚠ Warning: An active client named "${dupByName.full_name}" already exists (ID: ${dupByName.national_id||'—'}). Please verify this is a different person before continuing.`, 'warn');
     }
   }
   if(s===2){
