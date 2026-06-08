@@ -1893,15 +1893,24 @@ function openGroupForm(g=null){
  * ===================================================================== */
 function pageMembers(){
   const ctx = state.viewCtx || {};
-  const filterGroup = ctx.groupId || '';
+  const filterGroup  = ctx.groupId || '';
+  const filterStatus = ctx.memberStatus || 'all';
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
-  let list = isAdmin ? state.data.members : state.data.members.filter(m=>{
+  const canApprove = can('approve_group');
+
+  let list = (isAdmin || canApprove) ? state.data.members : state.data.members.filter(m=>{
     const g = state.data.groups.find(x=>x.id===m.group_id);
-    return g?.officer_id === state.staff.id;
+    return g?.officer_id === state.staff.id || m.officer_id === state.staff.id;
   });
   if(filterGroup) list = list.filter(m=>m.group_id===filterGroup);
+  if(filterStatus !== 'all') list = list.filter(m=>m.status===filterStatus);
   const q = (state._memberSearch||'').toLowerCase();
   if(q) list = list.filter(m => (m.full_name||'').toLowerCase().includes(q) || (m.national_id||'').includes(q) || (m.phone||'').includes(q));
+
+  const pendingCount = state.data.members.filter(m => m.status==='pending' &&
+    ((isAdmin||canApprove) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
+  ).length;
 
   const PAGE_SIZE = 15;
   const _page = state._membersPage || 0;
@@ -1910,7 +1919,12 @@ function pageMembers(){
 
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>Members</h1><div class="desc">Registered members${isAdmin?'':' in your groups'}.</div></div>
+      <div>
+        <h1>Members</h1>
+        <div class="desc">Registered clients${isAdmin||canApprove?'':' in your groups'}.
+          ${pendingCount > 0 ? `<span class="badge b-yellow" style="margin-left:8px">⏳ ${pendingCount} pending approval</span>` : ''}
+        </div>
+      </div>
       <div class="actions"><button class="btn btn-primary" onclick="openMemberWizard()">Register member</button></div>
     </div>
     <div class="toolbar">
@@ -1918,44 +1932,63 @@ function pageMembers(){
         <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
         <input id="mem-search" placeholder="Search by name, ID or phone" value="${state._memberSearch||''}"/>
       </div>
-      <select id="mem-group" style="max-width:240px">
+      <select id="mem-group" style="max-width:200px">
         <option value="">All groups</option>
-        ${state.data.groups.filter(g=>isAdmin||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
+        ${state.data.groups.filter(g=>isAdmin||canApprove||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
+      </select>
+      <select id="mem-status" style="max-width:160px">
+        <option value="all" ${filterStatus==='all'?'selected':''}>All statuses</option>
+        <option value="active" ${filterStatus==='active'?'selected':''}>Active only</option>
+        <option value="pending" ${filterStatus==='pending'?'selected':''}>Pending approval</option>
+        <option value="inactive" ${filterStatus==='inactive'?'selected':''}>Inactive</option>
       </select>
     </div>
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
           <th>Name</th><th>ID number</th><th>Group</th><th class="num">Savings</th>
-          <th>Eligibility</th><th>Loan</th><th></th>
+          <th>Status</th><th>Loan</th><th></th>
         </tr></thead>
         <tbody>
           ${paged.map(m => {
-            const g = state.data.groups.find(x=>x.id===m.group_id);
+            const g  = state.data.groups.find(x=>x.id===m.group_id);
             const sv = memberSavings(m.id);
-            const elig = memberEligible(m.id);
             const ln = memberLoan(m.id);
-            return `<tr style="cursor:pointer" onclick="state._memberProfileTab='overview'; go('memberProfile', {memberId: '${m.id}'})">
-              <td><b>${m.full_name}</b><div class="muted" style="font-size:11px">${m.phone||''}</div></td>
-              <td>${m.national_id}</td>
+            const isPending  = m.status === 'pending';
+            const isInactive = m.status === 'inactive';
+            const statusBadge = isPending
+              ? `<span class="badge b-yellow">⏳ Pending</span>`
+              : isInactive
+                ? `<span class="badge b-grey">Inactive</span>`
+                : memberEligible(m.id)
+                  ? `<span class="badge b-green">Active · Eligible</span>`
+                  : `<span class="badge b-blue">Active</span>`;
+            return `<tr style="cursor:pointer;${isPending?'opacity:.85':''}" onclick="state._memberProfileTab='overview'; go('memberProfile', {memberId: '${m.id}'})">
+              <td>
+                <b>${m.full_name}</b>
+                <div class="muted" style="font-size:11px">${m.phone||''}</div>
+              </td>
+              <td>${m.national_id||'—'}</td>
               <td>${g?.name||'—'}</td>
               <td class="num">${KES(sv)}</td>
-              <td>${elig?'<span class="badge b-green">Eligible</span>':'<span class="badge b-grey">Not yet</span>'}</td>
-              <td>${ln?'<span class="badge b-blue">Active</span>':'<span class="badge b-grey">None</span>'}</td>
+              <td>${statusBadge}${isPending&&canApprove?` <button class="btn btn-sm btn-primary" style="margin-left:6px;font-size:11px;padding:2px 8px" onclick="event.stopPropagation();approveMemberReg('${m.id}')">Approve</button>`:''}
+              </td>
+              <td>${ln?'<span class="badge b-blue">Active loan</span>':'<span class="badge b-grey">None</span>'}</td>
               <td onclick="event.stopPropagation()"><button class="act-btn" onclick="memberActions(event,'${m.id}')">···</button></td>
             </tr>`;
-          }).join('') || `<tr><td colspan="7"><div class="empty"><h4>No members found</h4><p>Register a member to one of your active groups.</p></div></td></tr>`}
+          }).join('') || `<tr><td colspan="7"><div class="empty"><h4>No members found</h4><p>${filterStatus==='pending'?'No clients awaiting approval.':'Register a member to one of your active groups.'}</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
     ${total > PAGE_SIZE ? `<div style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:13px;color:var(--text-muted)">
       <button class="btn btn-sm btn-outline" ${_page===0?'disabled':''} onclick="state._membersPage=${_page-1};pageMembers()">← Prev</button>
-      <span>Page ${_page+1} of ${Math.ceil(total/PAGE_SIZE)} &nbsp;(${total} members)</span>
+      <span>Page ${_page+1} of ${Math.ceil(total/PAGE_SIZE)} &nbsp;(${total} clients)</span>
       <button class="btn btn-sm btn-outline" ${(_page+1)*PAGE_SIZE>=total?'disabled':''} onclick="state._membersPage=${_page+1};pageMembers()">Next →</button>
     </div>` : ''}
   `;
   $('mem-search').addEventListener('input', e => { state._memberSearch = e.target.value; state._membersPage=0; pageMembers(); setTimeout(()=>{ const el=$('mem-search'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } },0); });
-  $('mem-group').addEventListener('change', e => { state.viewCtx = { groupId: e.target.value }; state._membersPage=0; pageMembers(); });
+  $('mem-group').addEventListener('change',  e => { state.viewCtx = { ...ctx, groupId: e.target.value }; state._membersPage=0; pageMembers(); });
+  $('mem-status').addEventListener('change', e => { state.viewCtx = { ...ctx, memberStatus: e.target.value }; state._membersPage=0; pageMembers(); });
 }
 function memberActions(ev, id){
   const m = state.data.members.find(x=>x.id===id);
@@ -2076,7 +2109,13 @@ function renderWizardStep(){
   // Step 4: Review
   const g = state.data.groups.find(x=>x.id===d.group_id);
   const off = state.data.staff.find(x=>x.id===(d.officer_id||g?.officer_id));
+  const willBePending = !can('approve_group');
   return `
+    ${willBePending ? `
+    <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:14px;font-size:13px">
+      <div style="font-weight:700;color:var(--warning);margin-bottom:4px">⏳ Pending approval after submission</div>
+      <div style="color:var(--warning)">This client will be registered with <b>Pending</b> status and must be approved by a Branch Manager or Administrator before they can access loans or have savings recorded. You will see them in your client list as pending.</div>
+    </div>` : ''}
     <p class="muted" style="margin-top:0">Review the information below before confirming registration.</p>
     <table class="summary-table">
       <tr><td colspan="2"><h5>Personal details</h5></td></tr>
@@ -2098,6 +2137,7 @@ function renderWizardStep(){
       ${d.guarantors.map((gn,i)=>`<tr><td>Next of Kin ${i+1}</td><td>${gn.full_name} · ${gn.national_id} · ${gn.phone}${gn.relationship?' · '+gn.relationship:''}</td></tr>`).join('')}
       <tr><td colspan="2"><h5>Fee</h5></td></tr>
       <tr><td>Registration fee</td><td><b>${KES(d.registration_fee)}</b></td></tr>
+      <tr><td>Status after registration</td><td><span class="badge ${willBePending?'b-yellow':'b-green'}">${willBePending?'Pending approval':'Active'}</span></td></tr>
     </table>
   `;
 }
@@ -2110,8 +2150,27 @@ function saveWizardStep(){
     });
     d.phone = normalisePhone(d.phone);
     if(!d.full_name || !d.national_id || !d.phone){ toast('Full name, National ID and phone are required.','error'); return false; }
-    const dup = state.data.members.find(m => m.national_id === d.national_id);
-    if(dup){ toast('A member with this National ID already exists.','error'); return false; }
+
+    // ── Duplicate: same National ID ──────────────────────────────────────
+    const dupById = state.data.members.find(m => m.national_id && m.national_id.trim() === d.national_id.trim());
+    if(dupById){
+      toast(`A client with National ID ${d.national_id} is already registered as "${dupById.full_name}". Cannot register twice.`, 'error');
+      return false;
+    }
+    // ── Duplicate: same phone number ─────────────────────────────────────
+    const normPhone = normalisePhone(d.phone);
+    const dupByPhone = state.data.members.find(m => normalisePhone(m.phone||'') === normPhone && normPhone.length >= 9);
+    if(dupByPhone){
+      toast(`Phone number ${d.phone} is already registered to "${dupByPhone.full_name}". Each client must have a unique phone number.`, 'error');
+      return false;
+    }
+    // ── Duplicate: same full name in system (warn, don't hard-block) ─────
+    const nameLower = d.full_name.trim().toLowerCase();
+    const dupByName = state.data.members.find(m => m.full_name.trim().toLowerCase() === nameLower);
+    if(dupByName){
+      toast(`⚠ Warning: A client named "${dupByName.full_name}" already exists in the system (ID: ${dupByName.national_id||'—'}). Please verify this is a different person before continuing.`, 'warn');
+      // warn only — don't block, names can be legitimately shared
+    }
   }
   if(s===2){
     d.group_id = $('w-group_id').value;
@@ -2138,13 +2197,19 @@ async function submitWizard(){
   const g = state.data.groups.find(x=>x.id===d.group_id);
   const officer_id = d.officer_id || g?.officer_id || null;
 
+  // Only CEO, admin, and branch_manager can auto-approve a new client.
+  // Loan officers and all other roles submit as 'pending' — awaits BM/admin approval.
+  const canAutoApprove = can('approve_group'); // reuses the same gate as group approval
+  const memberStatus = canAutoApprove ? 'active' : 'pending';
+
   const memberRow = {
     business_id: state.staff.business_id || null,
     group_id: d.group_id, full_name: d.full_name, national_id: d.national_id,
     date_of_birth: d.date_of_birth || null, gender: d.gender, phone: d.phone, email: d.email || null,
     address: d.address || null, nearest_town: d.nearest_town || null, occupation: d.occupation || null,
     employer: d.employer || null, income_estimate: d.income_estimate ? Number(d.income_estimate) : null,
-    registration_fee: Number(d.registration_fee)||0, registered_on: d.registered_on, officer_id, status:'active'
+    registration_fee: Number(d.registration_fee)||0, registered_on: d.registered_on, officer_id,
+    status: memberStatus
   };
 
   const { data: created, error } = await sb.from('pb_members').insert(memberRow).select().single();
@@ -2164,7 +2229,11 @@ async function submitWizard(){
   state.data.members.unshift(created);
   audit('register_member','pb_members',created.id,null,memberRow);
   closeModal();
-  toast('Member registered successfully.', 'success');
+  if(memberStatus === 'pending'){
+    toast('✅ Client registered and submitted for approval. They will be activated once a Branch Manager or Administrator approves their registration in the Approvals Queue.', 'success');
+  } else {
+    toast('Client registered and activated successfully.', 'success');
+  }
   render();
 }
 
