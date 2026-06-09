@@ -5482,7 +5482,7 @@ async function deleteSoldItemsForm(orderId){
         <label>Type <b>DELETE</b> to confirm</label>
         <input id="del-si-input" placeholder="Type DELETE" autocomplete="off"
           style="border-color:var(--danger);font-weight:600;letter-spacing:.05em"
-          oninput="(function(el){ const btn=document.querySelector('.modal-foot [data-act=\"1\"]'); if(btn) btn.disabled = el.value !== 'DELETE'; })(this)" />
+          oninput="var b=document.getElementById('del-si-confirm-btn');if(b)b.disabled=this.value!=='DELETE'" />
       </div>`,
     actions:[
       { label:'Cancel', cls:'btn-outline', onClick: closeModal },
@@ -5493,7 +5493,7 @@ async function deleteSoldItemsForm(orderId){
         if(!(await ensureFreshToken())) return;
 
         // Disable the confirm button while deleting
-        const delBtn = document.querySelector('.modal-foot [data-act="1"]');
+        const delBtn = document.getElementById('del-si-confirm-btn');
         if(delBtn){ delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
 
         let hadError = false;
@@ -5530,10 +5530,14 @@ async function deleteSoldItemsForm(orderId){
     ]
   });
 
-  // Disable delete button until DELETE is typed
+  // Tag and disable the confirm button until DELETE is typed
   setTimeout(()=>{
-    const btn = document.querySelector('.modal-foot [data-act="1"]');
-    if(btn) btn.disabled = true;
+    const foot = document.querySelector('.modal-foot');
+    if(!foot) return;
+    const btns = foot.querySelectorAll('button');
+    // The confirm button is the last one in the footer
+    const confirmBtn = btns[btns.length - 1];
+    if(confirmBtn){ confirmBtn.id = 'del-si-confirm-btn'; confirmBtn.disabled = true; }
   }, 30);
 }
 
