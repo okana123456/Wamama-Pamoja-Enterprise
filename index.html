@@ -4922,8 +4922,9 @@ async function submitPurchase(){
 let _soldItems = []; // rows in the current form session
 
 function pageSoldItems(){
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canDelete = r === 'admin' || r === 'ceo' || r === 'branch_manager';
   const isAdmin = state.staff.role === 'admin';
-  const myGroups = isAdmin ? state.data.groups : state.data.groups.filter(g => g.officer_id === state.staff.id);
 
   /* --- History of past sold-item forms recorded as orders with source:'sold_items' --- */
   const history = state.data.orders.filter(o => {
@@ -4953,7 +4954,7 @@ function pageSoldItems(){
           const g = state.data.groups.find(x=>x.id===o.group_id);
           const off = state.data.staff.find(x=>x.id===o.recorded_by);
           const rows = meta.rows || [];
-          const principal = rows.reduce((a,r)=>a+Number(r.loan_amount||0),0);
+          const principal = rows.reduce((a,rw)=>a+Number(rw.loan_amount||0),0);
           return `<tr>
             <td>${fmtDate(o.ordered_on)}</td>
             <td>${off?.full_name||meta.credit_officer||'—'}</td>
@@ -4962,7 +4963,10 @@ function pageSoldItems(){
             <td class="num">${rows.length}</td>
             <td class="num"><b>${KES(principal)}</b></td>
             <td><span class="badge ${o.status==='fulfilled'?'b-green':o.status==='pending'?'b-yellow':'b-grey'}">${o.status}</span></td>
-            <td><button class="btn btn-sm btn-outline" onclick="previewSoldItemsForm('${o.id}')">View</button></td>
+            <td style="display:flex;gap:6px;justify-content:flex-end">
+              <button class="btn btn-sm btn-outline" onclick="previewSoldItemsForm('${o.id}')">View</button>
+              ${canDelete ? `<button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="deleteSoldItemsForm('${o.id}')">Delete</button>` : ''}
+            </td>
           </tr>`;
         }).join('') || `<tr><td colspan="8"><div class="empty"><h4>No forms recorded yet</h4><p>Click "New Form" to record sold items.</p></div></td></tr>`}
         </tbody>
@@ -5290,28 +5294,32 @@ async function saveSoldItemsForm(){
     );
     const memberId = member?.id || null;
 
-    // Calculate loan schedule
-    const startDate    = new Date(date);
-    const endDate      = new Date(startDate);
+    // Calculate loan schedule.
+    // Repayments start AFTER one week — so start_date is set 7 days after the form date.
+    // This means the first installment falls due at week 2 from today, giving clients
+    // one full week grace before their first payment is expected.
+    const formDate      = new Date(date);
+    const startDate     = new Date(formDate);
+    startDate.setDate(startDate.getDate() + 7);           // first repayment week begins after 1 week
+    const endDate       = new Date(startDate);
     endDate.setDate(endDate.getDate() + 7 * row.weeks);
-    // Weekly installment = (principal + interest) / weeks
     const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
 
     const loanRow = {
-      business_id:       state.staff.business_id || null,
-      member_id:         memberId,
-      group_id:          groupId || null,
-      officer_id:        officerId,
-      order_id:          orderData.id,
-      asset_id:          null,
-      asset_name:        row.product || 'Sold item',
-      asset_quantity:    1,
-      loan_value:        row.loan_amount,
+      business_id:        state.staff.business_id || null,
+      member_id:          memberId,
+      group_id:           groupId || null,
+      officer_id:         officerId,
+      order_id:           orderData.id,
+      asset_id:           null,
+      asset_name:         row.product || 'Sold item',
+      asset_quantity:     1,
+      loan_value:         row.loan_amount,
       weekly_installment: weeklyInstallment,
-      total_payable:     row.totalPayable,
-      start_date:        date,
-      expected_end_date: endDate.toISOString().slice(0, 10),
-      status:            'active'
+      total_payable:      row.totalPayable,
+      start_date:         startDate.toISOString().slice(0, 10),   // 7 days after form date
+      expected_end_date:  endDate.toISOString().slice(0, 10),
+      status:             'active'
     };
 
     const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loanRow).select().single();
@@ -5402,6 +5410,9 @@ function previewSoldItemsForm(orderId){
   if(!o) return;
   let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
   const rows = meta.rows||[];
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canDelete = r === 'admin' || r === 'ceo' || r === 'branch_manager';
+
   modal({
     title:`Sold Items Form — ${fmtDate(o.ordered_on)}`,
     size:'lg',
@@ -5418,28 +5429,112 @@ function previewSoldItemsForm(orderId){
           <th class="num">Loan Amt</th><th>Term</th>
           <th class="num">6% Charge</th><th class="num">Interest</th><th class="num">Total</th><th>Loan No</th>
         </tr></thead>
-        <tbody>${rows.map((r,i)=>`<tr>
-          <td>${i+1}.</td><td>${r.client_name||'—'}</td><td>${r.phone||'—'}</td>
-          <td>${r.product||'—'}</td><td class="num">${KES(r.loan_amount||0)}</td>
-          <td>${r.loan_term||'—'} wks</td>
-          <td class="num" style="color:var(--warning)">${KES(r.charge||0)}</td>
-          <td class="num" style="color:var(--info)">${KES(r.interest||0)}</td>
-          <td class="num" style="font-weight:700;color:var(--primary)">${KES(r.total_payable||0)}</td>
-          <td>${r.loan_no||'—'}</td>
+        <tbody>${rows.map((rw,i)=>`<tr>
+          <td>${i+1}.</td><td>${rw.client_name||'—'}</td><td>${rw.phone||'—'}</td>
+          <td>${rw.product||'—'}</td><td class="num">${KES(rw.loan_amount||0)}</td>
+          <td>${rw.loan_term||'—'} wks</td>
+          <td class="num" style="color:var(--warning)">${KES(rw.charge||0)}</td>
+          <td class="num" style="color:var(--info)">${KES(rw.interest||0)}</td>
+          <td class="num" style="font-weight:700;color:var(--primary)">${KES(rw.total_payable||0)}</td>
+          <td>${rw.loan_no||'—'}</td>
         </tr>`).join('')}
         <tr style="background:var(--surface-2);font-weight:700">
           <td colspan="4" style="padding:8px 14px">TOTALS</td>
-          <td class="num" style="padding:8px 14px">${KES(rows.reduce((a,r)=>a+Number(r.loan_amount||0),0))}</td>
+          <td class="num" style="padding:8px 14px">${KES(rows.reduce((a,rw)=>a+Number(rw.loan_amount||0),0))}</td>
           <td></td>
-          <td class="num" style="padding:8px 14px;color:var(--warning)">${KES(rows.reduce((a,r)=>a+Number(r.charge||0),0))}</td>
-          <td class="num" style="padding:8px 14px;color:var(--info)">${KES(rows.reduce((a,r)=>a+Number(r.interest||0),0))}</td>
-          <td class="num" style="padding:8px 14px;color:var(--primary)">${KES(rows.reduce((a,r)=>a+Number(r.total_payable||0),0))}</td>
+          <td class="num" style="padding:8px 14px;color:var(--warning)">${KES(rows.reduce((a,rw)=>a+Number(rw.charge||0),0))}</td>
+          <td class="num" style="padding:8px 14px;color:var(--info)">${KES(rows.reduce((a,rw)=>a+Number(rw.interest||0),0))}</td>
+          <td class="num" style="padding:8px 14px;color:var(--primary)">${KES(rows.reduce((a,rw)=>a+Number(rw.total_payable||0),0))}</td>
           <td></td>
         </tr>
         </tbody>
       </table></div>`,
-    actions:[{ label:'Close', onClick: closeModal }]
+    actions:[
+      { label:'Close', cls:'btn-outline', onClick: closeModal },
+      ...(canDelete ? [{ label:'🗑 Delete this form', cls:'btn-danger', onClick: ()=>{ closeModal(); deleteSoldItemsForm(orderId); } }] : [])
+    ]
   });
+}
+
+async function deleteSoldItemsForm(orderId){
+  const o = state.data.orders.find(x=>x.id===orderId);
+  if(!o) return;
+  let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
+  const rows = meta.rows||[];
+  const principal = rows.reduce((a,rw)=>a+Number(rw.loan_amount||0),0);
+
+  // Find all loans linked to this order
+  const linkedLoans = state.data.loans.filter(l => l.order_id === orderId);
+
+  modal({
+    title:'🗑 Delete sold items form',
+    body:`
+      <div style="background:var(--danger-50);border:1px solid var(--danger);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px">
+        <div style="font-weight:700;color:var(--danger);margin-bottom:6px">This will permanently delete:</div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;color:var(--danger);line-height:1.8">
+          <li>The sold items form (${rows.length} client row${rows.length!==1?'s':''}, total principal ${KES(principal)})</li>
+          <li>${linkedLoans.length} linked loan record${linkedLoans.length!==1?'s':''}</li>
+          <li>All upfront fee repayments (6% charge, 3% app fee, 3% insurance) recorded for these loans</li>
+        </ul>
+        <div style="margin-top:8px;font-size:12px;color:var(--danger);font-weight:600">This action cannot be undone.</div>
+      </div>
+      <div class="field">
+        <label>Type <b>DELETE</b> to confirm</label>
+        <input id="del-si-input" placeholder="Type DELETE" autocomplete="off"
+          style="border-color:var(--danger);font-weight:600;letter-spacing:.05em"
+          oninput="(function(el){ const btn=document.querySelector('.modal-foot [data-act=\"1\"]'); if(btn) btn.disabled = el.value !== 'DELETE'; })(this)" />
+      </div>`,
+    actions:[
+      { label:'Cancel', cls:'btn-outline', onClick: closeModal },
+      { label:'Permanently delete', cls:'btn-danger', onClick: async ()=>{
+        if(document.getElementById('del-si-input')?.value !== 'DELETE'){
+          toast('Please type DELETE to confirm.','error'); return;
+        }
+        if(!(await ensureFreshToken())) return;
+
+        // Disable the confirm button while deleting
+        const delBtn = document.querySelector('.modal-foot [data-act="1"]');
+        if(delBtn){ delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
+
+        let hadError = false;
+
+        // 1. Delete all repayments linked to each loan
+        for(const loan of linkedLoans){
+          const { error: repErr } = await sb.from('pb_repayments').delete().eq('loan_id', loan.id);
+          if(repErr){ toast(`Could not delete repayments for loan ${loan.id}: ${repErr.message}`, 'warn'); hadError = true; }
+          else { state.data.repayments = state.data.repayments.filter(rp => rp.loan_id !== loan.id); }
+        }
+
+        // 2. Delete all linked loans
+        if(linkedLoans.length){
+          const loanIds = linkedLoans.map(l=>l.id);
+          const { error: loanErr } = await sb.from('pb_loans').delete().in('id', loanIds);
+          if(loanErr){ toast(`Could not delete loans: ${loanErr.message}`, 'warn'); hadError = true; }
+          else { state.data.loans = state.data.loans.filter(l => !loanIds.includes(l.id)); }
+        }
+
+        // 3. Delete the order record itself
+        const { error: orderErr } = await sb.from('pb_orders').delete().eq('id', orderId);
+        if(orderErr){ toast(`Could not delete form record: ${orderErr.message}`, 'warn'); hadError = true; }
+        else { state.data.orders = state.data.orders.filter(x => x.id !== orderId); }
+
+        audit('delete_sold_items_form','pb_orders', orderId, { rows: rows.length, principal }, null);
+        closeModal();
+        render();
+        if(!hadError){
+          toast(`Sold items form and ${linkedLoans.length} loan(s) deleted successfully.`, 'success');
+        } else {
+          toast('Form deleted with some warnings — check repayments manually.', 'warn');
+        }
+      }}
+    ]
+  });
+
+  // Disable delete button until DELETE is typed
+  setTimeout(()=>{
+    const btn = document.querySelector('.modal-foot [data-act="1"]');
+    if(btn) btn.disabled = true;
+  }, 30);
 }
 
 function pageReconciliation(){
