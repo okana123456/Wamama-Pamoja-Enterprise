@@ -2676,28 +2676,49 @@ function renderMeetList(){
             <div class="av">${initials(mem.full_name)}</div>
             <div style="flex:1">
               <div class="nm">${mem.full_name}</div>
-              <div class="meta">ID ${mem.national_id} · Total Savings ${KES(sv)} · ${lns.length} Active Loan(s)</div>
+              <div class="meta">ID ${mem.national_id} · Total Savings ${KES(sv)} · ${lns.length} Active Loan${lns.length!==1?'s':''}</div>
             </div>
           </div>
+
           <div class="row">
             <div>
-              <label>Savings this week (KES)</label>
-              <input type="number" min="0" data-id="${mem.id}" data-f="savings" value="${ent.savings}" ${ent.absent?'disabled':''} />
+              <label>💰 Savings this week (KES)</label>
+              <input type="number" min="0" data-id="${mem.id}" data-f="savings"
+                value="${ent.savings}" ${ent.absent?'disabled':''}
+                placeholder="0" />
             </div>
-            <div></div>
+            <div>
+              ${lns.length===0 ? `<div class="ro" style="margin-top:22px;color:var(--text-muted);font-size:12px">No active loan</div>` : ''}
+            </div>
           </div>
+
           ${lns.map(ln => {
-            const out = Number(ln.total_payable) - loanPaid(ln.id);
-            return `<div class="row" style="margin-top:10px; border-top:1px dashed var(--border); padding-top:10px;">
-              <div>
-                <label>Repayment: <b>${ln.asset_name}</b> (KES)</label>
-                <input type="number" min="0" data-id="${mem.id}" data-loanid="${ln.id}" value="${ent.repayments[ln.id]}" ${ent.absent?'disabled':''} />
-              </div>
-              <div>
-                <div class="ro" style="margin-top:22px">Outstanding<b>${KES(out)}</b></div>
+            const paid       = loanPaid(ln.id);
+            const out        = Math.max(0, Number(ln.total_payable) - paid);
+            const weekly     = Number(ln.weekly_installment) || 0;
+            const currentAmt = ent.repayments[ln.id] !== undefined ? ent.repayments[ln.id] : weekly;
+            const isExcess   = Number(currentAmt) > weekly && weekly > 0;
+            return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${isExcess?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
+              <div class="row">
+                <div>
+                  <label style="color:var(--primary);font-weight:600">📋 Loan Repayment: ${ln.asset_name}</label>
+                  <input type="number" min="0" data-id="${mem.id}" data-loanid="${ln.id}"
+                    value="${currentAmt}" ${ent.absent?'disabled':''}
+                    placeholder="${weekly}"
+                    style="border-color:${isExcess?'var(--warning)':'var(--border)'}" />
+                  <div style="font-size:11px;margin-top:3px;color:${isExcess?'var(--warning)':'var(--text-muted)'}">
+                    Weekly installment: <b>${KES(weekly)}</b>
+                    ${isExcess ? ` · ⚡ Excess payment — ${KES(Number(currentAmt)-weekly)} above weekly amount. This will reduce future weeks owed.` : ''}
+                  </div>
+                </div>
+                <div>
+                  <div class="ro" style="margin-top:22px">Outstanding<b>${KES(out)}</b></div>
+                  ${paid > 0 ? `<div class="ro" style="font-size:11px;color:var(--success)">Paid so far<b>${KES(paid)}</b></div>` : ''}
+                </div>
               </div>
             </div>`;
           }).join('')}
+
           <div class="absent-row">
             <input type="checkbox" id="abs-${mem.id}" ${ent.absent?'checked':''} data-id="${mem.id}" data-f="absent" />
             <label for="abs-${mem.id}" style="margin:0">Mark as absent (no contributions this week)</label>
@@ -2719,6 +2740,7 @@ function renderMeetList(){
         }
       } else if (lid) {
         m.entries[id].repayments[lid] = el.value;
+        renderMeetList(); // re-render to show/clear excess payment highlight
       } else {
         m.entries[id][f] = el.value;
       }
@@ -2726,7 +2748,12 @@ function renderMeetList(){
     el.addEventListener('input', () => {
       const id = el.dataset.id, f = el.dataset.f, lid = el.dataset.loanid;
       if (el.type !== 'checkbox') {
-        if (lid) m.entries[id].repayments[lid] = el.value;
+        if (lid) {
+          m.entries[id].repayments[lid] = el.value;
+          // Debounce re-render so typing remains smooth
+          clearTimeout(el._excessTimer);
+          el._excessTimer = setTimeout(() => renderMeetList(), 400);
+        }
         else m.entries[id][f] = el.value;
       }
     });
