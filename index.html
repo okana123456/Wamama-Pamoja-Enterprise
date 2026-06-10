@@ -811,6 +811,10 @@ function memberLoan(memberId){
 function loanPaid(loanId){
   return state.data.repayments.filter(r=>r.loan_id===loanId && r.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
 }
+// Returns true only for genuine weekly client repayments.
+// Excludes auto-deducted setup fees (6% charge, 3% app fee, 3% insurance)
+// so dashboards, KPIs and reports show only real collected cash.
+const isClientRepayment = r => !(r.notes||'').startsWith('Auto-deducted');
 function memberEligible(memberId){
   const t = Number(state.settings?.savings_threshold || 400);
   return memberSavings(memberId) >= t;
@@ -1386,7 +1390,7 @@ function pageDashboard(){
   };
 
   const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && s.status !== 'pending');
-  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending');
+  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending' && isClientRepayment(r));
   const totalSavings = savings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRepay = repayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
@@ -1400,7 +1404,7 @@ function pageDashboard(){
   const todayISO_ = todayISO();
   const officerPerf = officers.map(o => {
     const oSav = state.data.savings.filter(s=>s.recorded_by===o.id && inRangeFallback(s.meeting_date||'', s.created_at) && s.status !== 'pending').reduce((a,b)=>a+Number(b.amount||0),0);
-    const oRep = state.data.repayments.filter(r=>r.recorded_by===o.id && inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending').reduce((a,b)=>a+Number(b.amount||0),0);
+    const oRep = state.data.repayments.filter(r=>r.recorded_by===o.id && inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending' && isClientRepayment(r)).reduce((a,b)=>a+Number(b.amount||0),0);
     const oLoans = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active').reduce((a,b)=>a+Number(b.loan_value||0),0);
     const oOrdersToday = state.data.orders.filter(o2=>o2.recorded_by===o.id && (o2.ordered_on||'').slice(0,10)===todayISO_).length;
     const oLoanValuePeriod = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active' && inRangeFallback(l.start_date, l.created_at)).reduce((a,b)=>a+Number(b.loan_value||0),0);
@@ -1584,7 +1588,7 @@ function pageOfficerDashboard(){
     return false;
   };
   const mySavings = state.data.savings.filter(s=>s.recorded_by===me.id && inRangeOff(s.meeting_date, s.created_at) && s.status !== 'pending');
-  const myRepay = state.data.repayments.filter(r=>r.recorded_by===me.id && inRangeOff(r.meeting_date, r.created_at) && r.status !== 'pending');
+  const myRepay = state.data.repayments.filter(r=>r.recorded_by===me.id && inRangeOff(r.meeting_date, r.created_at) && r.status !== 'pending' && isClientRepayment(r));
   const myGroupIds = new Set(myGroups.map(g=>g.id));
   const myLoans = state.data.loans.filter(l=>l.status==='active' && (l.officer_id===me.id || myGroupIds.has(l.group_id)));
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
@@ -5891,7 +5895,7 @@ function pageAccounting(){
   // === INCOME ===
   const savingsInPeriod = state.data.savings.filter(s=>inRange(s.meeting_date||''));
   const totalSavingsIn = savingsInPeriod.reduce((a,b)=>a+Number(b.amount||0),0);
-  const repayInPeriod = state.data.repayments.filter(r=>inRange(r.meeting_date||''));
+  const repayInPeriod = state.data.repayments.filter(r=>inRange(r.meeting_date||'') && isClientRepayment(r));
   const totalPrincipalIn = repayInPeriod.reduce((a,b)=>a+Number(b.principal||0),0);
   const totalInterestIn = repayInPeriod.reduce((a,b)=>a+Number(b.interest||0),0);
   const totalRepayIn = repayInPeriod.reduce((a,b)=>a+Number(b.amount||0),0);
@@ -6432,6 +6436,12 @@ function pageRepayments(){
     return true;
   });
 
+  // Separate client repayments from auto-deducted setup fees
+  const clientReps = filtered.filter(r => isClientRepayment(r));
+  const feeReps    = filtered.filter(r => !isClientRepayment(r));
+  const showFees   = state._repShowFees || false;
+  const displayed  = showFees ? feeReps : clientReps;
+
   const groups = isAdmin
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
@@ -6441,17 +6451,32 @@ function pageRepayments(){
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
   ];
 
-  const totalAmt = filtered.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalPrincipal = filtered.reduce((a,b)=>a+Number(b.principal||0),0);
-  const totalInterest = filtered.reduce((a,b)=>a+Number(b.interest||0),0);
+  const totalAmt      = displayed.reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalPrincipal= displayed.reduce((a,b)=>a+Number(b.principal||0),0);
+  const totalInterest = displayed.reduce((a,b)=>a+Number(b.interest||0),0);
 
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>Repayments Register</h1><div class="desc">${filtered.length} entries · Total ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}</div></div>
-      <div class="actions">
+      <div>
+        <h1>Repayments Register</h1>
+        <div class="desc">${displayed.length} ${showFees?'fee':'client repayment'} entries · Total ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}</div>
+      </div>
+      <div class="actions" style="gap:8px">
+        <button class="btn ${showFees?'btn-primary':'btn-outline'}" onclick="state._repShowFees=${!showFees};pageRepayments()" title="${showFees?'Show client repayments':'Show upfront fees'}">
+          ${showFees?'👥 Client Repayments':'🏷 Show Fees'}
+        </button>
         <button class="btn btn-outline" onclick="exportRepaymentsFiltered()">⬇ Export to Excel</button>
       </div>
     </div>
+    ${feeReps.length > 0 && !showFees ? `
+    <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
+      <div><span style="font-weight:700;color:var(--warning)">ℹ ${feeReps.length} upfront fee entries</span> <span style="color:var(--text-muted)">(6% service charge, 3% app fee, 3% insurance) are hidden from this view. These are one-time setup costs, not client collections.</span></div>
+      <button class="btn btn-sm btn-outline" style="border-color:var(--warning);color:var(--warning);white-space:nowrap;margin-left:12px" onclick="state._repShowFees=true;pageRepayments()">View fees</button>
+    </div>` : ''}
+    ${showFees ? `
+    <div style="background:var(--info-50);border:1px solid var(--info);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:12px;font-size:13px">
+      <span style="font-weight:700;color:var(--info)">Showing upfront loan fees only</span> — these are one-time setup deductions (6% service charge, 3% app fee, 3% insurance). They are <b>not</b> weekly client collections.
+    </div>` : ''}
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
       ${dateFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_repDateFilter===k?'btn-primary':'btn-outline'}" onclick="_repDateFilter='${k}';pageRepayments()">${l}</button>`).join('')}
@@ -6482,26 +6507,27 @@ function pageRepayments(){
           <th>Status</th><th>Recorded By</th><th></th>
         </tr></thead>
         <tbody>
-          ${filtered.length ? filtered.map(r => {
+          ${displayed.length ? displayed.map(r => {
             const mem = state.data.members.find(x=>x.id===r.member_id);
             const grp = state.data.groups.find(x=>x.id===r.group_id);
             const ln = state.data.loans.find(x=>x.id===r.loan_id);
             const rec = state.data.staff.find(x=>x.id===r.recorded_by);
             const isPending = r.status === 'pending';
-            return `<tr${isPending ? ' style="background:var(--warning-50)"' : ''}>
+            const isFee = !isClientRepayment(r);
+            return `<tr${isPending ? ' style="background:var(--warning-50)"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
               <td>${fmtDate(r.meeting_date)}</td>
-              <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
+              <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${isFee?`<span style="color:var(--warning);font-size:10px">${r.notes}</span>`:mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td style="font-size:12px">${ln?.asset_name||'—'}</td>
               <td class="num"><b>${KES(r.amount)}</b>${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
               </td>
               <td class="num">${KES(r.principal)}</td>
               <td class="num" style="color:var(--warning)">${KES(r.interest)}</td>
-              <td>${isPending ? '<span class="badge b-yellow">Pending Admin Approval</span>' : '<span class="badge b-green">Approved</span>'}</td>
+              <td>${isPending ? '<span class="badge b-yellow">Pending Approval</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : '<span class="badge b-green">Approved</span>'}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
             </tr>`;
-          }).join('') : `<tr><td colspan="10"><div class="empty"><h4>No repayments found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
+          }).join('') : `<tr><td colspan="10"><div class="empty"><h4>No ${showFees?'fee':'repayment'} entries found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
