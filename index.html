@@ -5076,6 +5076,8 @@ function openSoldItemsForm(){
   setTimeout(()=>{
     siFilterGroups(''); // pre-populate dropdown list
     renderSoldItemsRows();
+    // Show match status for any pre-filled rows
+    setTimeout(()=> _soldItems.forEach((_,i) => siCheckMatch(i)), 60);
   }, 50);
 }
 
@@ -5169,9 +5171,13 @@ function renderSoldItemsRows(){
       <td><input style="min-width:130px;font-size:12px" data-si="${i}" data-f="client_name"
         value="${row.client_name}" placeholder="Full name"
         onchange="siSaveField(${i},'client_name',this.value)" /></td>
-      <td><input style="width:110px;font-size:12px" data-si="${i}" data-f="phone"
-        value="${row.phone}" placeholder="07XX..."
-        onchange="siSaveField(${i},'phone',this.value)" /></td>
+      <td>
+        <input style="width:110px;font-size:12px" data-si="${i}" data-f="phone"
+          value="${row.phone}" placeholder="07XX..."
+          onchange="siSaveField(${i},'phone',this.value);siCheckMatch(${i})"
+          onblur="siSaveField(${i},'phone',this.value);siCheckMatch(${i})" />
+        <div id="si-match-${i}" style="font-size:10px;margin-top:2px"></div>
+      </td>
       <td><input style="min-width:110px;font-size:12px" data-si="${i}" data-f="product"
         value="${row.product}" placeholder="Product"
         onchange="siSaveField(${i},'product',this.value)" /></td>
@@ -5220,6 +5226,30 @@ function renderSoldItemsRows(){
 /* Save a single field without re-rendering the whole table (preserves focus) */
 function siSaveField(i, field, value){
   _soldItems[i][field] = value;
+}
+
+/* Check if the phone number in row i matches a registered member and show indicator */
+function siCheckMatch(i){
+  const row = _soldItems[i];
+  const el  = document.getElementById(`si-match-${i}`);
+  if(!el) return;
+  const groupId   = document.getElementById('si-group')?.value || null;
+  const normPhone = normalisePhone(row.phone||'');
+  if(normPhone.length < 9){ el.innerHTML = ''; return; }
+
+  let member = state.data.members.find(m =>
+    normalisePhone(m.phone||'') === normPhone &&
+    (!groupId || m.group_id === groupId)
+  );
+  if(!member){
+    member = state.data.members.find(m => normalisePhone(m.phone||'') === normPhone);
+  }
+
+  if(member){
+    el.innerHTML = `<span style="color:var(--success)">✅ ${member.full_name} · ID ${member.national_id||'—'}</span>`;
+  } else {
+    el.innerHTML = `<span style="color:var(--danger)">⚠ No member found — loan will be unlinked</span>`;
+  }
 }
 
 /* Recalculate only the computed cells for one row after amount/term changes */
@@ -5320,12 +5350,34 @@ async function saveSoldItemsForm(){
   let loansCreated = 0, errors = [];
 
   for(const row of rowsWithCalc){
-    // Try to match an existing member by name (case-insensitive) in the selected group
-    const nameLower = (row.client_name || '').trim().toLowerCase();
-    const member = state.data.members.find(m =>
-      m.full_name.trim().toLowerCase() === nameLower &&
-      (!groupId || m.group_id === groupId)
-    );
+    // Match member by phone first (most reliable), then fall back to name.
+    // Phone is normalised before comparison to handle 07xx vs +2547xx variants.
+    const normRowPhone = normalisePhone(row.phone||'');
+    let member = null;
+
+    // 1. Match by phone number (exact, after normalisation)
+    if(normRowPhone.length >= 9){
+      member = state.data.members.find(m =>
+        normalisePhone(m.phone||'') === normRowPhone &&
+        (!groupId || m.group_id === groupId)
+      );
+      // If not found in selected group, try across all groups
+      if(!member){
+        member = state.data.members.find(m =>
+          normalisePhone(m.phone||'') === normRowPhone
+        );
+      }
+    }
+
+    // 2. Fall back to name match (case-insensitive) within the selected group
+    if(!member){
+      const nameLower = (row.client_name||'').trim().toLowerCase();
+      member = state.data.members.find(m =>
+        m.full_name.trim().toLowerCase() === nameLower &&
+        (!groupId || m.group_id === groupId)
+      );
+    }
+
     const memberId = member?.id || null;
 
     // Calculate loan schedule.
