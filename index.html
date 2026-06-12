@@ -3013,7 +3013,10 @@ function exportArrearsCollectionSheet(){
 }
 
 function pageLoans(){
-  const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const isAdmin = state.staff.role === 'admin';
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canSeeAll = r === 'ceo' || r === 'admin' || r === 'branch_manager' || r === 'supervisor';
+  const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
 
   // Compute loan date range
   const loanDateRange = () => {
@@ -3031,7 +3034,7 @@ function pageLoans(){
   };
   const { start: ldrStart, end: ldrEnd } = loanDateRange();
 
-  let loans = isAdmin
+  let loans = canSeeAll
     ? state.data.loans
     : state.data.loans.filter(l => myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id);
 
@@ -3044,7 +3047,7 @@ function pageLoans(){
     return sd >= ldrStart && sd <= ldrEnd;
   });
 
-  if (isAdmin && state._loanOfficerFilter) {
+  if (canSeeAll && state._loanOfficerFilter) {
     loans = loans.filter(l => l.officer_id === state._loanOfficerFilter);
   }
 
