@@ -811,7 +811,20 @@ function memberLoan(memberId){
 function loanPaid(loanId){
   return state.data.repayments.filter(r=>r.loan_id===loanId && r.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
 }
-// Returns true only for genuine weekly client repayments.
+// Global lock to prevent double-taps while a Supabase call is in flight
+let _processing = false;
+async function withLock(btn, fn){
+  if(_processing) return;
+  _processing = true;
+  const origText = btn?.textContent;
+  const origDisabled = btn?.disabled;
+  if(btn){ btn.disabled = true; btn.textContent = origText?.includes('…') ? origText : (origText + '…'); }
+  try { await fn(); }
+  finally {
+    _processing = false;
+    if(btn){ btn.disabled = origDisabled || false; btn.textContent = origText; }
+  }
+}
 // Excludes auto-deducted setup fees (6% charge, 3% app fee, 3% insurance)
 // so dashboards, KPIs and reports show only real collected cash.
 const isClientRepayment = r => !(r.notes||'').startsWith('Auto-deducted');
@@ -1149,7 +1162,7 @@ function pageApprovals(){
         <td>${off?.full_name||'—'}</td>
         <td>${(m.registered_on||m.created_at||'').slice(0,10)}</td>
         <td style="text-align:right">
-          <button class="btn btn-sm btn-primary" onclick="approveMemberReg('${m.id}')">Approve</button>
+          <button class="btn btn-sm btn-primary" onclick="approveMemberReg('${m.id}',this)">Approve</button>
           <button class="btn btn-sm btn-outline" style="margin-left:4px" onclick="rejectMemberReg('${m.id}')">Reject</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="5" class="muted" style="padding:16px;text-align:center">No pending client registrations</td></tr>`,
@@ -1162,7 +1175,7 @@ function pageApprovals(){
       const officer = (d.staff||[]).find(s=>s.id===g.created_by);
       return `<tr><td><strong>${g.name||'—'}</strong></td><td>${officer?officer.full_name:'—'}</td><td>${(g.created_at||'').slice(0,10)}</td>
         <td style="text-align:right">
-          <button class="btn btn-sm btn-primary" onclick="approveGroup('${g.id}')">Approve</button>
+          <button class="btn btn-sm btn-primary" onclick="approveGroup('${g.id}',this)">Approve</button>
           <button class="btn btn-sm btn-outline" onclick="rejectGroup('${g.id}')">Reject</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending groups</td></tr>`, head:'<th>Group</th><th>Submitted by</th><th>Date</th><th></th>'});
@@ -1203,11 +1216,22 @@ function pageApprovals(){
     ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
   `;
 }
-async function approveMemberReg(id){
+async function approveMemberReg(id, btn){
+  // Guard: disable button immediately to prevent double-tap
+  if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
+  // Check current status first — may already be approved from a previous tap
+  const m = state.data.members.find(x=>x.id===id);
+  if(m && m.status === 'active'){
+    if(btn){ btn.disabled = false; btn.textContent = 'Approve'; }
+    return toast('This client is already active.','warn');
+  }
   if(!(await ensureFreshToken())) return;
   const { error } = await sb.from('pb_members').update({ status:'active' }).eq('id', id);
-  if(error) return toast(error.message,'error');
-  const m = state.data.members.find(x=>x.id===id); if(m) m.status='active';
+  if(error){
+    if(btn){ btn.disabled = false; btn.textContent = 'Approve'; }
+    return toast(error.message,'error');
+  }
+  if(m) m.status = 'active';
   audit('approve_member','pb_members',id);
   render(); toast('Client approved and activated','success');
 }
@@ -1779,11 +1803,20 @@ function groupActions(ev, id){
   }, { title:'Delete group', danger:true }) });
   showActMenu(ev, items);
 }
-async function approveGroup(id){
+async function approveGroup(id, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
+  const g = state.data.groups.find(x=>x.id===id);
+  if(g && g.status === 'active'){
+    if(btn){ btn.disabled = false; btn.textContent = 'Approve'; }
+    return toast('This group is already active.','warn');
+  }
   if(!(await ensureFreshToken())) return;
   const { error } = await sb.from('pb_groups').update({status:'active'}).eq('id',id);
-  if(error) return toast(error.message,'error');
-  const g = state.data.groups.find(x=>x.id===id); if(g) g.status='active';
+  if(error){
+    if(btn){ btn.disabled = false; btn.textContent = 'Approve'; }
+    return toast(error.message,'error');
+  }
+  if(g) g.status = 'active';
   audit('approve','pb_groups',id);
   render(); toast('Group approved & activated','success');
 }
@@ -1975,7 +2008,7 @@ function pageMembers(){
               <td>${m.national_id||'—'}</td>
               <td>${g?.name||'—'}</td>
               <td class="num">${KES(sv)}</td>
-              <td>${statusBadge}${isPending&&canApprove?` <button class="btn btn-sm btn-primary" style="margin-left:6px;font-size:11px;padding:2px 8px" onclick="event.stopPropagation();approveMemberReg('${m.id}')">Approve</button>`:''}
+              <td>${statusBadge}${isPending&&canApprove?` <button class="btn btn-sm btn-primary" style="margin-left:6px;font-size:11px;padding:2px 8px" onclick="event.stopPropagation();approveMemberReg('${m.id}',this)">Approve</button>`:''}
               </td>
               <td>${ln?'<span class="badge b-blue">Active loan</span>':'<span class="badge b-grey">None</span>'}</td>
               <td onclick="event.stopPropagation()"><button class="act-btn" onclick="memberActions(event,'${m.id}')">···</button></td>
