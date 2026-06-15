@@ -1034,8 +1034,12 @@ function pendingApprovalsCount(){
                               n += (d.members||[]).filter(m=>m.status==='pending').length;
   if(can('approve_group'))    n += (d.groups||[]).filter(g=>g.status==='pending').length;
   if(can('approve_savings'))  n += (d.savings||[]).filter(s=>s.status==='pending').length;
-  if(can('approve_repayment'))n += (d.repayments||[]).filter(r=>r.status==='pending').length;
+  if(can('approve_repayment'))n += (d.repayments||[]).filter(r=>r.status==='pending' && isClientRepayment(r)).length;
   if(can('approve_order'))    n += (d.orders||[]).filter(o=>o.status==='pending').length;
+  if(can('approve_loan') || can('approve_order'))
+                              n += (d.loans||[]).filter(l => l.status==='pending' &&
+                                l.order_id && (d.orders||[]).find(o => o.id===l.order_id && (()=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } })())
+                              ).length;
   return n;
 }
 
@@ -1169,6 +1173,28 @@ function pageApprovals(){
     head:'<th>Client name</th><th>Group</th><th>Officer</th><th>Registered</th><th></th>'});
   }
 
+  // Pending sold items loans — require BM/Admin approval
+  if(can('approve_loan') || can('approve_order')){
+    const list = (d.loans||[]).filter(l => l.status === 'pending' &&
+      l.order_id && (d.orders||[]).find(o => o.id === l.order_id && (()=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } })())
+    );
+    sections.push({title:'Sold Items Loans awaiting approval', count:list.length, rows: list.map(l=>{
+      const mem = (d.members||[]).find(x=>x.id===l.member_id);
+      const g   = (d.groups||[]).find(x=>x.id===l.group_id);
+      return `<tr>
+        <td><b>${mem?.full_name||l.asset_name||'—'}</b><div class="muted" style="font-size:11px">${l.asset_name}</div></td>
+        <td>${g?.name||'—'}</td>
+        <td class="num">${KES(l.loan_value)}</td>
+        <td class="num">${KES(l.weekly_installment)}/wk</td>
+        <td>${fmtDate(l.start_date)}</td>
+        <td style="text-align:right">
+          <button class="btn btn-sm btn-primary" onclick="approveSoldItemsLoan('${l.id}',this)">Approve</button>
+          <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectSoldItemsLoan('${l.id}')">Reject</button>
+        </td></tr>`;
+    }).join('') || `<tr><td colspan="6" class="muted" style="padding:16px;text-align:center">No pending sold items loans</td></tr>`,
+    head:'<th>Client / Asset</th><th>Group</th><th class="num">Principal</th><th class="num">Weekly</th><th>Start date</th><th></th>'});
+  }
+
   if(can('approve_group')){
     const list = (d.groups||[]).filter(g=>g.status==='pending');
     sections.push({title:'Pending groups', count:list.length, rows: list.map(g=>{
@@ -1216,6 +1242,57 @@ function pageApprovals(){
     ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
   `;
 }
+async function approveSoldItemsLoan(loanId, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
+  const loan = state.data.loans.find(x=>x.id===loanId);
+  if(loan && loan.status === 'active'){
+    if(btn){ btn.disabled=false; btn.textContent='Approve'; }
+    return toast('This loan is already active.','warn');
+  }
+  if(!(await ensureFreshToken())) return;
+
+  // Activate the loan
+  const { error: loanErr } = await sb.from('pb_loans')
+    .update({ status:'active', approved_by: state.staff.id })
+    .eq('id', loanId);
+  if(loanErr){
+    if(btn){ btn.disabled=false; btn.textContent='Approve'; }
+    return toast('Approval failed: '+loanErr.message,'error');
+  }
+
+  // Approve all pending fee repayments for this loan
+  const { error: repErr } = await sb.from('pb_repayments')
+    .update({ status:'approved' })
+    .eq('loan_id', loanId)
+    .eq('status','pending');
+  if(repErr) toast('Loan approved but fee repayments could not be updated: '+repErr.message,'warn');
+
+  if(loan){ loan.status = 'active'; }
+  // Also update in-memory repayments
+  state.data.repayments.filter(r=>r.loan_id===loanId && r.status==='pending')
+    .forEach(r=>r.status='approved');
+
+  audit('approve_sold_items_loan','pb_loans',loanId);
+  render();
+  toast('Sold items loan approved and added to client portfolio.','success');
+}
+
+async function rejectSoldItemsLoan(loanId){
+  confirmDialog('Reject and cancel this sold items loan? The loan record will be marked cancelled.', async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_loans').update({ status:'cancelled' }).eq('id', loanId);
+    if(error) return toast(error.message,'error');
+    const loan = state.data.loans.find(x=>x.id===loanId);
+    if(loan) loan.status = 'cancelled';
+    // Also cancel pending fee repayments
+    await sb.from('pb_repayments').update({ status:'cancelled' }).eq('loan_id', loanId).eq('status','pending');
+    state.data.repayments.filter(r=>r.loan_id===loanId && r.status==='pending').forEach(r=>r.status='cancelled');
+    audit('reject_sold_items_loan','pb_loans',loanId);
+    render();
+    toast('Sold items loan rejected and cancelled.','warn');
+  },{ title:'Reject sold items loan', danger:true });
+}
+
 async function approveMemberReg(id, btn){
   // Guard: disable button immediately to prevent double-tap
   if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
@@ -4338,29 +4415,29 @@ function confirmDeleteStaff(id){
       </div>
       <div class="field">
         <label>Type <b>DELETE</b> below to confirm</label>
-        <input id="del-confirm-input" placeholder="Type DELETE to confirm" autocomplete="off"
+        <input id="del-staff-input" placeholder="Type DELETE to confirm" autocomplete="off"
           style="border-color:var(--danger);font-weight:600;letter-spacing:.05em"
-          oninput="document.getElementById('del-confirm-btn').disabled = this.value !== 'DELETE'" />
+          oninput="var b=document.getElementById('del-staff-btn');if(b)b.disabled=this.value!=='DELETE'" />
       </div>`,
     actions:[
       { label:'Cancel', cls:'btn-outline', onClick: closeModal },
       { label:'Permanently delete', cls:'btn-danger', onClick: async ()=>{
-        const val = document.getElementById('del-confirm-input')?.value;
+        const val = document.getElementById('del-staff-input')?.value;
         if(val !== 'DELETE'){ toast('Please type DELETE to confirm.','error'); return; }
         if(!(await ensureFreshToken())) return;
 
-        const btn = document.querySelector('[data-act="1"]');
+        const btn = document.getElementById('del-staff-btn');
         if(btn){ btn.disabled = true; btn.textContent = 'Deleting…'; }
 
         let error;
         if(s.auth_user_id){
           const { error: rpcErr } = await sb.rpc('pb_delete_staff_auth', { target_user_id: s.auth_user_id });
           if(rpcErr){
-            // RPC failed — fall back to deleting the staff row only
             const { error: delErr } = await sb.from('pb_staff').delete().eq('id', id);
             error = delErr;
             if(!error) toast('Auth account could not be removed (may need manual cleanup in Supabase), but staff record deleted.','warn');
           } else {
+            // RPC handles the pb_staff delete internally
             error = null;
           }
         } else {
@@ -4368,9 +4445,12 @@ function confirmDeleteStaff(id){
           error = delErr;
         }
 
-        if(error){ toast('Delete failed: ' + error.message, 'error'); if(btn){ btn.disabled=false; btn.textContent='Permanently delete'; } return; }
+        if(error){
+          toast('Delete failed: ' + error.message, 'error');
+          if(btn){ btn.disabled=false; btn.textContent='Permanently delete'; }
+          return;
+        }
 
-        // Remove from in-memory list immediately so the table updates without a reload
         state.data.staff = state.data.staff.filter(x=>x.id!==id);
         audit('delete_staff','pb_staff',id,{ full_name:s.full_name, email:s.email, role:s.app_role||s.role });
         closeModal();
@@ -4379,10 +4459,13 @@ function confirmDeleteStaff(id){
       }}
     ]
   });
-  // Disable the delete button by default until DELETE is typed
+  // Tag and disable the confirm button after modal renders
   setTimeout(()=>{
-    const btn = document.querySelector('[data-act="1"]');
-    if(btn) btn.disabled = true;
+    const foot = document.querySelector('.modal-foot');
+    if(!foot) return;
+    const btns = foot.querySelectorAll('button');
+    const confirmBtn = btns[btns.length - 1];
+    if(confirmBtn){ confirmBtn.id = 'del-staff-btn'; confirmBtn.disabled = true; }
   }, 30);
 }
 function openStaffForm(s=null){
@@ -5440,7 +5523,9 @@ async function saveSoldItemsForm(){
       total_payable:      row.totalPayable,
       start_date:         startDate.toISOString().slice(0, 10),   // 7 days after form date
       expected_end_date:  endDate.toISOString().slice(0, 10),
-      status:             'active'
+      // Sold items loans start as 'pending' — must be approved by BM or Admin
+      // before they appear in the client's active portfolio and arrears tracking.
+      status:             can('approve_loan') ? 'active' : 'pending'
     };
 
     const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loanRow).select().single();
@@ -5466,9 +5551,9 @@ async function saveSoldItemsForm(){
         amount:       fee.amount,
         principal:    fee.amount,
         interest:     0,
-        meeting_date: date,
+        meeting_date: startDate.toISOString().slice(0, 10),
         notes:        fee.notes,
-        status:       'approved'
+        status:       can('approve_loan') ? 'approved' : 'pending'
       };
       const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
       if(feeErr) toast(`Fee record for ${row.client_name}: ${feeErr.message}`, 'warn');
@@ -5477,11 +5562,11 @@ async function saveSoldItemsForm(){
   }
 
   closeModal(); render();
-
+  const isPending = !can('approve_loan');
   if(errors.length){
-    toast(`${loansCreated} loan(s) created. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
+    toast(`${loansCreated} loan(s) ${isPending?'submitted for approval':'created'}. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
   } else {
-    toast(`✅ ${loansCreated} loan(s) fully registered — 6% charge, 3% app fee & 3% insurance recorded for each. Total principal: ${KES(totalPrincipal)}.`, 'success');
+    toast(`✅ ${loansCreated} sold items loan(s) ${isPending ? 'submitted for BM/Admin approval — they will appear in the Approvals Queue' : 'issued and activated'}. Total principal: ${KES(totalPrincipal)}.`, 'success');
   }
 }
 
