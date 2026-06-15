@@ -1253,22 +1253,20 @@ async function approveSoldItemsLoan(loanId, btn){
 
   // Activate the loan
   const { error: loanErr } = await sb.from('pb_loans')
-    .update({ status:'active', approved_by: state.staff.id })
+    .update({ status:'active' })
     .eq('id', loanId);
   if(loanErr){
     if(btn){ btn.disabled=false; btn.textContent='Approve'; }
     return toast('Approval failed: '+loanErr.message,'error');
   }
 
-  // Approve all pending fee repayments for this loan
-  const { error: repErr } = await sb.from('pb_repayments')
+  // Approve any remaining pending non-fee repayments for this loan (if any)
+  await sb.from('pb_repayments')
     .update({ status:'approved' })
     .eq('loan_id', loanId)
     .eq('status','pending');
-  if(repErr) toast('Loan approved but fee repayments could not be updated: '+repErr.message,'warn');
 
   if(loan){ loan.status = 'active'; }
-  // Also update in-memory repayments
   state.data.repayments.filter(r=>r.loan_id===loanId && r.status==='pending')
     .forEach(r=>r.status='approved');
 
@@ -5553,7 +5551,9 @@ async function saveSoldItemsForm(){
         interest:     0,
         meeting_date: startDate.toISOString().slice(0, 10),
         notes:        fee.notes,
-        status:       can('approve_loan') ? 'approved' : 'pending'
+        // Fees are auto-calculated system charges — always approved regardless of who records.
+        // Only the loan itself requires BM/Admin sign-off.
+        status:       'approved'
       };
       const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
       if(feeErr) toast(`Fee record for ${row.client_name}: ${feeErr.message}`, 'warn');
