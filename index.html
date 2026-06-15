@@ -547,7 +547,7 @@ function can(action){
     supervisor:        ['view_reports','view_field_activity','view_portfolio','audit','view_audit'],
     loan_officer:      ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
     officer:           ['create_group','create_member','record_savings','record_repayment','view_own_clients'],
-    inventory_officer: ['view_suppliers','create_purchase_order','approve_order','view_procurement_reports','request_stock','view_inventory'],
+    inventory_officer: ['view_suppliers','create_purchase_order','approve_order','view_procurement_reports','request_stock','view_inventory','manage_inventory','view_members'],
     storekeeper:       ['receive_stock','issue_stock','stock_count','view_inventory_reports','view_inventory','request_stock']
   };
   const allowed = matrix[r] || [];
@@ -559,8 +559,8 @@ function can(action){
    branch_manager has its own explicit allow-list below.              */
 const PAGE_ACCESS = {
   dashboard:      'ALL',
-  groups:         ['branch_manager','supervisor','loan_officer','officer'],
-  members:        ['branch_manager','supervisor','loan_officer','officer'],
+  groups:         ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
+  members:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   meeting:        ['branch_manager','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer'],
@@ -3420,6 +3420,8 @@ function computeSchedule(principal, weekly, method, startDate){
 function pageInventory(){
   const inv = state.data.inventory;
   const isAdmin = state.staff.role === 'admin';
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canManageInventory = isAdmin || r === 'ceo' || r === 'branch_manager' || r === 'inventory_officer' || r === 'storekeeper';
   const q = (state._invSearch||'').toLowerCase();
   const filtered = q ? inv.filter(a=>a.name.toLowerCase().includes(q)||(a.category||'').toLowerCase().includes(q)) : inv;
   const PAGE_SIZE = 20;
@@ -3429,9 +3431,9 @@ function pageInventory(){
 
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>Inventory</h1><div class="desc">${isAdmin?'Assets available for loan issuance.':'Check asset availability before placing orders.'}</div></div>
+      <div><h1>Inventory</h1><div class="desc">${canManageInventory?'Assets available for loan issuance. You can add, edit and update stock.':'Check asset availability before placing orders.'}</div></div>
       <div class="actions">
-        ${isAdmin?`
+        ${canManageInventory?`
         <button class="btn btn-outline" onclick="downloadInventoryTemplate()">⬇ Download template</button>
         <button class="btn btn-outline" onclick="$('inv-import').click()">⬆ Import from Excel</button>
         <input type="file" id="inv-import" accept=".xlsx,.xls,.csv" style="display:none" onchange="importInventory(this)" />
@@ -3468,7 +3470,7 @@ function pageInventory(){
               <td class="num"><b>${KES(totalLoan)}</b></td>
               <td class="num">${margin.toFixed(1)}%</td>
               <td>${status}</td>
-              ${isAdmin?`<td><button class="act-btn" onclick="invActions(event,'${a.id}')">···</button></td>`:'<td></td>'}
+              ${canManageInventory?`<td><button class="act-btn" onclick="invActions(event,'${a.id}')">···</button></td>`:'<td></td>'}
             </tr>`;
           }).join('') || `<tr><td colspan="10"><div class="empty"><h4>No inventory yet</h4><p>Add assets manually or import from Excel.</p></div></td></tr>`}
         </tbody>
