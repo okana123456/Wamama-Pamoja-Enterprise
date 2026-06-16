@@ -1499,7 +1499,7 @@ function pageDashboard(){
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
 
   // Officer performance — active loan officers only
-  const officers = state.data.staff.filter(s => s.role==='officer' && s.status==='active');
+  const officers = state.data.staff.filter(s => ( s.role==='officer' || s.role==='loan_officer') && s.status==='active');
   const todayISO_ = todayISO();
   const officerPerf = officers.map(o => {
     const oSav = state.data.savings.filter(s=>s.recorded_by===o.id && inRangeFallback(s.meeting_date||'', s.created_at) && s.status !== 'pending').reduce((a,b)=>a+Number(b.amount||0),0);
@@ -1906,7 +1906,7 @@ async function rejectGroup(id){
   },{ title:'Reject group', danger:true });
 }
 function openGroupForm(g=null){
-  const officers = state.data.staff.filter(s=>s.role==='officer' && s.status==='active');
+  const officers = state.data.staff.filter(s=>( s.role==='officer' || s.role==='loan_officer') && s.status==='active');
   modal({
     title: g ? 'Edit group' : 'Register new group',
     body: `<form id="gform">
@@ -2188,7 +2188,7 @@ function renderWizardStep(){
         <div class="field"><label>Assigned loan officer</label>
           <select id="w-officer_id">
             <option value="">— Auto from group —</option>
-            ${state.data.staff.filter(s=>s.role==='officer' && s.status==='active').map(s=>`<option value="${s.id}" ${d.officer_id===s.id?'selected':''}>${s.full_name}</option>`).join('')}
+            ${state.data.staff.filter(s=>( s.role==='officer' || s.role==='loan_officer') && s.status==='active').map(s=>`<option value="${s.id}" ${d.officer_id===s.id?'selected':''}>${s.full_name}</option>`).join('')}
           </select>
         </div>
       </div>`;
@@ -2438,7 +2438,7 @@ async function mpDeleteSaving(id){
 }
 function mpSavingMenu(ev, id, isPending){
   const isAdmin = state.staff.role==='admin';
-  const isOfficer = state.staff.role==='officer';
+  const isOfficer = ( state.staff.role==='officer' || state.staff.role==='loan_officer');
   const items = [{ label:'✏ Edit Entry', onClick:()=>openEditSaving(id) }];
   if(isPending && isAdmin){
     items.push('sep');
@@ -2471,7 +2471,7 @@ async function mpDeleteRepayment(id){
 }
 function mpRepaymentMenu(ev, id, isPending){
   const isAdmin = state.staff.role==='admin';
-  const isOfficer = state.staff.role==='officer';
+  const isOfficer = ( state.staff.role==='officer' || state.staff.role==='loan_officer');
   const items = [{ label:'✏ Edit Entry', onClick:()=>openEditRepayment(id) }];
   if(isPending && isAdmin){
     items.push('sep');
@@ -2583,7 +2583,7 @@ function pageMemberProfile(){
             return d>=mpSvStart && d<=mpSvEnd;
           });
           const mpSvFilterBtns=[['all','All'],['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','Last Month'],['3months','Last 3 Months'],['custom','Custom']];
-          const canEdit = state.staff.role==='admin' || state.staff.role==='officer';
+          const canEdit = state.staff.role==='admin' || ( state.staff.role==='officer' || state.staff.role==='loan_officer');
           let running = 0;
           const rowsHtml = [...svFiltered].reverse().map(s=>{
             const isPending = s.status === 'pending';
@@ -2687,11 +2687,11 @@ function pageMemberProfile(){
             </div>
           </div>
           <div style="overflow-x:auto"><table class="tbl">
-            <thead><tr><th>Date</th><th class="num">Amount</th><th class="num">Principal</th><th class="num">Interest</th><th>Status</th><th>Recorded by</th>${(state.staff.role==='admin'||state.staff.role==='officer')?'<th></th>':''}</tr></thead>
+            <thead><tr><th>Date</th><th class="num">Amount</th><th class="num">Principal</th><th class="num">Interest</th><th>Status</th><th>Recorded by</th>${(state.staff.role==='admin'||( state.staff.role==='officer' || state.staff.role==='loan_officer'))?'<th></th>':''}</tr></thead>
             <tbody>
               ${repayments.map(r=>{
                 const officer = state.data.staff.find(x=>x.id===r.recorded_by);
-                const canEdit = state.staff.role==='admin' || state.staff.role==='officer';
+                const canEdit = state.staff.role==='admin' || ( state.staff.role==='officer' || state.staff.role==='loan_officer');
                 const isPending = r.status === 'pending';
                 return `<tr${isPending?' style="background:var(--warning-50)"':''}>
                   <td>${fmtDate(r.meeting_date)}</td>
@@ -2702,7 +2702,7 @@ function pageMemberProfile(){
                   <td>${officer?.full_name||'—'}</td>
                   ${canEdit?`<td><button class="act-btn" onclick="mpRepaymentMenu(event,'${r.id}',${isPending})">···</button></td>`:''}
                 </tr>`;
-              }).join('') || `<tr><td colspan="${(state.staff.role==='admin'||state.staff.role==='officer')?7:6}"><div class="empty"><h4>No repayments yet</h4></div></td></tr>`}
+              }).join('') || `<tr><td colspan="${(state.staff.role==='admin'||( state.staff.role==='officer' || state.staff.role==='loan_officer'))?7:6}"><div class="empty"><h4>No repayments yet</h4></div></td></tr>`}
             </tbody>
           </table></div>
         </div>
@@ -2992,7 +2992,7 @@ function pageArrears(){
   if (isAdmin && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
 
   const officersWithLoans = isAdmin
-    ? state.data.staff.filter(s => s.role === 'officer' && report.some(r => r.loan.officer_id === s.id))
+    ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && report.some(r => r.loan.officer_id === s.id))
     : [];
 
   const filterBtns = [
@@ -3176,7 +3176,7 @@ function pageLoans(){
         ${isAdmin ? `
         <select style="max-width:200px" onchange="state._loanOfficerFilter=this.value; pageLoans()">
           <option value="">All Officers</option>
-          ${state.data.staff.filter(s=>s.role==='officer').map(o=>`<option value="${o.id}" ${state._loanOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
+          ${state.data.staff.filter(s=>s.role==='officer'||s.role==='loan_officer').map(o=>`<option value="${o.id}" ${state._loanOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
         </select>
         ` : ''}
       </div>
@@ -3227,7 +3227,7 @@ function pageLoans(){
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
   const isAdmin = state.staff.role==='admin';
-  const canRepay = isAdmin || state.staff.role === 'officer';
+  const canRepay = isAdmin || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   showActMenu(ev, [
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
@@ -3263,7 +3263,7 @@ function loanActions(ev, id){
   ]);
 }
 function openLoanTransfer(l){
-  const officers = state.data.staff.filter(s => s.role === 'officer' && s.status === 'active');
+  const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
   if(!officers.length){ toast('No active loan officers found to transfer to.','warn'); return; }
   const currentOfficer = state.data.staff.find(s => s.id === l.officer_id);
   const optionsHtml = officers.map(function(o){
@@ -6429,7 +6429,7 @@ function pageSavings(){
   const groups = isAdmin
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
-  const officers = state.data.staff.filter(s => s.role === 'officer' && s.status === 'active');
+  const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
 
   const dateFilterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
@@ -6497,7 +6497,7 @@ function pageSavings(){
 function savingsRowActions(ev, id){
   const sav = state.data.savings.find(x=>x.id===id);
   const isAdmin = state.staff.role === 'admin';
-  const isOfficer = state.staff.role === 'officer';
+  const isOfficer = ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   const items = [
     { label: '✏ Edit entry', onClick: () => openEditSaving(id) }
   ];
@@ -6620,7 +6620,7 @@ function pageRepayments(){
   const groups = isAdmin
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
-  const officers = state.data.staff.filter(s => s.role === 'officer' && s.status === 'active');
+  const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
 
   const dateFilterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
@@ -6712,7 +6712,7 @@ function pageRepayments(){
 function repRowActions(ev, id){
   const rep = state.data.repayments.find(x=>x.id===id);
   const isAdmin = state.staff.role === 'admin';
-  const isOfficer = state.staff.role === 'officer';
+  const isOfficer = ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   const items = [
     { label: '✏ Edit entry', onClick: () => openEditRepayment(id) }
   ];
@@ -6790,7 +6790,7 @@ function exportRepaymentsFiltered(){
  * ===================================================================== */
 function openCollectionSheetModal(){
   const isAdmin = state.staff.role === 'admin';
-  const officers = state.data.staff.filter(s => s.role === 'officer' && s.status === 'active');
+  const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
 
   modal({
     title: 'Export Collection Sheet',
@@ -6988,7 +6988,7 @@ function srCalcSplit(ir){
  * FEATURE 4 & 5: EDIT SAVINGS with AUDIT TRAIL
  * ===================================================================== */
 function openEditSaving(savingId){
-  const canEdit = state.staff.role === 'admin' || state.staff.role === 'officer';
+  const canEdit = state.staff.role === 'admin' || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   if(!canEdit){ toast('You do not have permission to edit savings entries.', 'error'); return; }
 
   const sv = state.data.savings.find(x => x.id === savingId);
@@ -7044,7 +7044,7 @@ function openEditSaving(savingId){
  * FEATURE 4 & 5: EDIT REPAYMENT with AUDIT TRAIL
  * ===================================================================== */
 function openEditRepayment(repaymentId){
-  const canEdit = state.staff.role === 'admin' || state.staff.role === 'officer';
+  const canEdit = state.staff.role === 'admin' || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   if(!canEdit){ toast('You do not have permission to edit repayment entries.', 'error'); return; }
 
   const rep = state.data.repayments.find(x => x.id === repaymentId);
