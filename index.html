@@ -5615,9 +5615,13 @@ function previewSoldItemsForm(orderId){
   const o = state.data.orders.find(x=>x.id===orderId);
   if(!o) return;
   let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
-  const rows = meta.rows||[];
   const r = state.staff?.app_role || state.staff?.role || 'officer';
-  const canDelete = r === 'admin' || r === 'ceo' || r === 'branch_manager';
+  const canEdit   = r==='admin'||r==='ceo'||r==='branch_manager'||r==='inventory_officer'||r==='storekeeper';
+  const canDelete = r==='admin'||r==='ceo'||r==='branch_manager';
+  const rows = meta.rows||[];
+
+  // Build editable rows stored in a temp array — keyed by orderId
+  window._siEditRows = rows.map((rw,i)=>({...rw, sr:i+1}));
 
   modal({
     title:`Sold Items Form — ${fmtDate(o.ordered_on)}`,
@@ -5629,37 +5633,208 @@ function previewSoldItemsForm(orderId){
         <div><b>Branch:</b> ${meta.branch||'—'}</div>
         <div><b>Date:</b> ${fmtDate(o.ordered_on)}</div>
       </div>
-      <div style="overflow-x:auto"><table class="tbl" style="min-width:640px;font-size:12px">
-        <thead><tr>
-          <th>SR.</th><th>Client</th><th>Phone</th><th>Product</th>
-          <th class="num">Loan Amt</th><th>Term</th>
-          <th class="num">6% Charge</th><th class="num">Interest</th><th class="num">Total</th><th>Loan No</th>
-        </tr></thead>
-        <tbody>${rows.map((rw,i)=>`<tr>
-          <td>${i+1}.</td><td>${rw.client_name||'—'}</td><td>${rw.phone||'—'}</td>
-          <td>${rw.product||'—'}</td><td class="num">${KES(rw.loan_amount||0)}</td>
-          <td>${rw.loan_term||'—'} wks</td>
-          <td class="num" style="color:var(--warning)">${KES(rw.charge||0)}</td>
-          <td class="num" style="color:var(--info)">${KES(rw.interest||0)}</td>
-          <td class="num" style="font-weight:700;color:var(--primary)">${KES(rw.total_payable||0)}</td>
-          <td>${rw.loan_no||'—'}</td>
-        </tr>`).join('')}
-        <tr style="background:var(--surface-2);font-weight:700">
-          <td colspan="4" style="padding:8px 14px">TOTALS</td>
-          <td class="num" style="padding:8px 14px">${KES(rows.reduce((a,rw)=>a+Number(rw.loan_amount||0),0))}</td>
-          <td></td>
-          <td class="num" style="padding:8px 14px;color:var(--warning)">${KES(rows.reduce((a,rw)=>a+Number(rw.charge||0),0))}</td>
-          <td class="num" style="padding:8px 14px;color:var(--info)">${KES(rows.reduce((a,rw)=>a+Number(rw.interest||0),0))}</td>
-          <td class="num" style="padding:8px 14px;color:var(--primary)">${KES(rows.reduce((a,rw)=>a+Number(rw.total_payable||0),0))}</td>
-          <td></td>
-        </tr>
-        </tbody>
-      </table></div>`,
+      ${canEdit?`<div style="background:var(--primary-50);border:1px solid var(--primary);border-radius:var(--radius-sm);padding:8px 14px;margin-bottom:10px;font-size:12px;color:var(--primary)">
+        ✏ You can edit client names, phone numbers, products and amounts below. Saving will re-link loans to registered members automatically.
+      </div>`:''}
+      <div style="overflow-x:auto">
+        <table class="tbl" style="min-width:760px;font-size:12px">
+          <thead><tr>
+            <th>SR.</th><th>Client Name</th><th>Phone</th><th>Product</th>
+            <th class="num">Loan Amt</th><th>Term(wks)</th>
+            <th class="num">6% Charge</th><th class="num">Interest</th><th class="num">Total</th>
+          </tr></thead>
+          <tbody id="si-edit-tbody"></tbody>
+          <tfoot id="si-edit-tfoot"></tfoot>
+        </table>
+      </div>`,
     actions:[
-      { label:'Close', cls:'btn-outline', onClick: closeModal },
-      ...(canDelete ? [{ label:'🗑 Delete this form', cls:'btn-danger', onClick: ()=>{ closeModal(); deleteSoldItemsForm(orderId); } }] : [])
+      { label:'Close', cls:'btn-outline', onClick: ()=>{ window._siEditRows=null; closeModal(); } },
+      ...(canEdit ? [{ label:'💾 Save changes', cls:'btn-primary', onClick: ()=>saveSoldItemsEdit(orderId) }] : []),
+      ...(canDelete ? [{ label:'🗑 Delete', cls:'btn-danger', onClick: ()=>{ closeModal(); deleteSoldItemsForm(orderId); } }] : [])
     ]
   });
+
+  setTimeout(()=>renderSiEditRows(canEdit), 40);
+}
+
+function renderSiEditRows(canEdit){
+  const tbody = document.getElementById('si-edit-tbody');
+  const tfoot = document.getElementById('si-edit-tfoot');
+  if(!tbody || !window._siEditRows) return;
+
+  let tp=0, tc=0, ti=0, tpay=0;
+
+  tbody.innerHTML = window._siEditRows.map((row,i)=>{
+    const principal = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
+    const weeks     = parseInt(row.loan_term)||0;
+    const charge    = Math.round(principal*0.06*100)/100;
+    const interest  = Math.round(principal*0.02*(weeks/4)*100)/100;
+    const payable   = principal+charge+interest;
+    tp+=principal; tc+=charge; ti+=interest; tpay+=payable;
+
+    // Try to find matching member
+    const normPhone = row.phone ? normalisePhone(row.phone) : '';
+    let matched = null;
+    if(normPhone.length>=9) matched = state.data.members.find(m=>normalisePhone(m.phone||'')===normPhone);
+    if(!matched && row.client_name){
+      const nl = (row.client_name||'').trim().toLowerCase();
+      matched = state.data.members.find(m=>m.full_name.trim().toLowerCase()===nl);
+    }
+    const matchBadge = matched
+      ? `<div style="font-size:10px;color:var(--success);margin-top:2px">✅ ${matched.full_name}</div>`
+      : `<div style="font-size:10px;color:var(--danger);margin-top:2px">⚠ Not linked</div>`;
+
+    if(canEdit) return `<tr style="${i%2?'background:var(--surface-2)':''}">
+      <td style="text-align:center;color:var(--text-muted)">${row.sr}.</td>
+      <td>
+        <input style="min-width:130px;font-size:12px" value="${(row.client_name||'').replace(/"/g,'&quot;')}" placeholder="Client name"
+          onchange="siEditField(${i},'client_name',this.value)" />
+        ${matchBadge}
+      </td>
+      <td>
+        <input style="width:108px;font-size:12px" value="${row.phone||''}" placeholder="07XX..."
+          onchange="siEditField(${i},'phone',this.value);setTimeout(()=>renderSiEditRows(true),100)" />
+      </td>
+      <td><input style="min-width:100px;font-size:12px" value="${(row.product||'').replace(/"/g,'&quot;')}" placeholder="Product"
+        onchange="siEditField(${i},'product',this.value)" /></td>
+      <td><input type="text" inputmode="numeric" style="width:90px;font-size:12px;text-align:right" value="${row.loan_amount||''}" placeholder="0"
+        onchange="siEditField(${i},'loan_amount',this.value);setTimeout(()=>renderSiEditRows(true),100)" /></td>
+      <td><input type="text" inputmode="numeric" style="width:60px;font-size:12px;text-align:right" value="${row.loan_term||''}" placeholder="wks"
+        onchange="siEditField(${i},'loan_term',this.value);setTimeout(()=>renderSiEditRows(true),100)" /></td>
+      <td class="num" style="color:var(--warning)">${principal>0?KES(charge):'—'}</td>
+      <td class="num" style="color:var(--info)">${principal>0&&weeks>0?KES(interest):'—'}</td>
+      <td class="num" style="font-weight:700;color:var(--primary)">${principal>0?KES(payable):'—'}</td>
+    </tr>`;
+
+    // Read-only view
+    return `<tr style="${i%2?'background:var(--surface-2)':''}">
+      <td style="text-align:center;color:var(--text-muted)">${row.sr}.</td>
+      <td><b>${row.client_name||'—'}</b>${matchBadge}</td>
+      <td>${row.phone||'—'}</td>
+      <td>${row.product||'—'}</td>
+      <td class="num">${KES(principal)}</td>
+      <td>${weeks} wks</td>
+      <td class="num" style="color:var(--warning)">${KES(charge)}</td>
+      <td class="num" style="color:var(--info)">${KES(interest)}</td>
+      <td class="num" style="font-weight:700;color:var(--primary)">${KES(payable)}</td>
+    </tr>`;
+  }).join('');
+
+  tfoot.innerHTML = `<tr style="background:var(--surface-2);font-weight:700;border-top:2px solid var(--border)">
+    <td colspan="4" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${window._siEditRows.length} rows)</td>
+    <td class="num" style="padding:8px 14px">${KES(tp)}</td>
+    <td></td>
+    <td class="num" style="padding:8px 14px;color:var(--warning)">${KES(tc)}</td>
+    <td class="num" style="padding:8px 14px;color:var(--info)">${KES(ti)}</td>
+    <td class="num" style="padding:8px 14px;color:var(--primary)">${KES(tpay)}</td>
+  </tr>`;
+}
+
+function siEditField(i, field, value){
+  if(!window._siEditRows) return;
+  window._siEditRows[i][field] = value;
+}
+
+async function saveSoldItemsEdit(orderId){
+  if(!(await ensureFreshToken())) return;
+  const o = state.data.orders.find(x=>x.id===orderId);
+  if(!o || !window._siEditRows) return;
+
+  const btn = document.querySelector('.modal-foot .btn-primary');
+  if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
+
+  // Recalculate all rows with updated values
+  const updatedRows = window._siEditRows.map(row=>{
+    const principal = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
+    const weeks     = parseInt(row.loan_term)||0;
+    const charge    = Math.round(principal*0.06*100)/100;
+    const interest  = Math.round(principal*0.02*(weeks/4)*100)/100;
+    const appFee    = Math.round(principal*0.03*100)/100;
+    const insFee    = Math.round(principal*0.03*100)/100;
+    return { ...row, loan_amount:principal, weeks, charge, interest, appFee, insFee,
+      total_payable: principal+interest };
+  });
+
+  // Update the order notes JSON with edited rows
+  let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
+  meta.rows = updatedRows;
+  const { error: orderErr } = await sb.from('pb_orders')
+    .update({ notes: JSON.stringify(meta) })
+    .eq('id', orderId);
+  if(orderErr){
+    if(btn){ btn.disabled=false; btn.textContent='💾 Save changes'; }
+    return toast('Save failed: '+orderErr.message, 'error');
+  }
+  o.notes = JSON.stringify(meta);
+
+  // Re-link each loan to its member using phone (primary) or name (fallback)
+  const linkedLoans = state.data.loans.filter(l=>l.order_id===orderId);
+  let linked=0, skipped=0;
+
+  for(const row of updatedRows){
+    // Find the loan that matches this row's product
+    const loan = linkedLoans.find(l=>
+      (l.asset_name||'').trim().toLowerCase() === (row.product||'').trim().toLowerCase()
+      || l.member_id === null
+    );
+    if(!loan) continue;
+
+    // Attempt member match
+    const normPhone = normalisePhone(row.phone||'');
+    let member = null;
+    if(normPhone.length>=9){
+      member = state.data.members.find(m=>normalisePhone(m.phone||'')===normPhone);
+    }
+    if(!member && row.client_name){
+      const nl = (row.client_name||'').trim().toLowerCase();
+      member = state.data.members.find(m=>m.full_name.trim().toLowerCase()===nl);
+    }
+
+    if(member && loan.member_id !== member.id){
+      // Update loan principal/schedule if amounts changed
+      const principal  = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
+      const weeks      = parseInt(row.loan_term)||0;
+      const interest   = Math.round(principal*0.02*(weeks/4)*100)/100;
+      const totalPayable = principal+interest;
+      const weeklyInst = weeks>0 ? Math.round(totalPayable/weeks*100)/100 : loan.weekly_installment;
+
+      const loanUpd = {
+        member_id:          member.id,
+        group_id:           member.group_id || loan.group_id,
+        loan_value:         principal||loan.loan_value,
+        total_payable:      totalPayable||loan.total_payable,
+        weekly_installment: weeklyInst||loan.weekly_installment,
+        asset_name:         row.product||loan.asset_name
+      };
+      const { error: lErr } = await sb.from('pb_loans').update(loanUpd).eq('id', loan.id);
+      if(!lErr){
+        Object.assign(loan, loanUpd);
+        // Also update repayments member_id
+        await sb.from('pb_repayments').update({ member_id: member.id }).eq('loan_id', loan.id);
+        state.data.repayments.filter(r=>r.loan_id===loan.id).forEach(r=>r.member_id=member.id);
+        linked++;
+      }
+    } else if(member && loan.member_id === member.id){
+      // Already linked — still update amounts if changed
+      const principal = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
+      if(principal>0 && principal !== loan.loan_value){
+        const weeks        = parseInt(row.loan_term)||0;
+        const interest     = Math.round(principal*0.02*(weeks/4)*100)/100;
+        const totalPayable = principal+interest;
+        const weeklyInst   = weeks>0 ? Math.round(totalPayable/weeks*100)/100 : loan.weekly_installment;
+        const loanUpd = { loan_value:principal, total_payable:totalPayable, weekly_installment:weeklyInst, asset_name:row.product||loan.asset_name };
+        await sb.from('pb_loans').update(loanUpd).eq('id', loan.id);
+        Object.assign(loan, loanUpd);
+      }
+      skipped++;
+    } else {
+      skipped++;
+    }
+  }
+
+  window._siEditRows = null;
+  closeModal(); render();
+  toast(`✅ Form saved. ${linked} loan(s) newly linked to members${skipped?' · '+skipped+' already linked or unmatched':''}.`, 'success');
 }
 
 async function deleteSoldItemsForm(orderId){
