@@ -563,16 +563,16 @@ const PAGE_ACCESS = {
   members:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   meeting:        ['branch_manager','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
-  repayments:     ['branch_manager','supervisor','loan_officer','officer'],
-  loans:          ['branch_manager','supervisor','loan_officer','officer'],
-  arrears:        ['branch_manager','supervisor','loan_officer','officer'],
+  repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
+  loans:          ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
+  arrears:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   calculator:     'ALL',
   approvals:      ['branch_manager','inventory_officer'],
   inventory:      ['branch_manager','supervisor','inventory_officer','storekeeper'],
-  suppliers:      ['inventory_officer'],                               // branch_manager: read-only via reports
+  suppliers:      ['inventory_officer'],
   purchases:      ['inventory_officer'],
   orders:         ['branch_manager','inventory_officer','storekeeper'],
-  sold_items:     ['branch_manager','storekeeper'],
+  sold_items:     ['branch_manager','inventory_officer','storekeeper'],
   reconciliation: ['branch_manager','supervisor','loan_officer','officer'],
   expenses:       ['branch_manager'],
   accounting:     ['branch_manager'],
@@ -1464,11 +1464,10 @@ function arrearDateRange(){
 
 function pageDashboard(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
-  // CEO and Administrator get the full admin dashboard.
-  // Branch Manager also gets the admin dashboard (read-only view, no write actions).
-  // All other roles get the officer dashboard.
   const isAdmin = state.staff.role === 'admin';
   const showAdminDash = r === 'ceo' || r === 'admin' || r === 'branch_manager';
+  const showInventoryDash = r === 'inventory_officer' || r === 'storekeeper';
+  if(showInventoryDash){ pageInventoryDashboard(); return; }
   if(!showAdminDash){ pageOfficerDashboard(); return; }
 
   const { start, end } = dashDateRange();
@@ -1672,6 +1671,97 @@ function dashArrFilter(){
       + '<td><span class="badge ' + badgeCls + '">' + badgeTxt + '</span></td>'
       + '</tr>';
   }).join('');
+}
+
+function pageInventoryDashboard(){
+  const inv        = state.data.inventory || [];
+  const orders     = state.data.orders    || [];
+  const loans      = state.data.loans     || [];
+  const members    = state.data.members   || [];
+  const r          = state.staff?.app_role || state.staff?.role || 'officer';
+
+  const inventoryValue = inv.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
+  const lowStock       = inv.filter(i=>Number(i.stock||0)<=Number(i.reorder_level||5));
+  const pendingOrders  = orders.filter(o=>o.status==='pending');
+  const soldItemOrders = orders.filter(o=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } });
+  const activeLoans    = loans.filter(l=>l.status==='active' && l.order_id && soldItemOrders.find(o=>o.id===l.order_id));
+  const pendingLoans   = loans.filter(l=>l.status==='pending' && l.order_id && soldItemOrders.find(o=>o.id===l.order_id));
+  const totalOutstanding = activeLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-((state.data.repayments||[]).filter(rp=>rp.loan_id===l.id&&rp.status!=='pending'&&isClientRepayment(rp)).reduce((s,rp)=>s+Number(rp.amount||0),0))),0);
+
+  $('page').innerHTML = `
+    <div class="page-head">
+      <div><h1>Inventory Dashboard</h1><div class="desc">Real-time stock and sold items overview.</div></div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="go('sold_items')">📋 New Sold Items Form</button>
+        <button class="btn btn-outline" onclick="go('inventory')">View Inventory</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:20px">
+      <div class="card card-pad">
+        <div class="kpi-label">INVENTORY VALUE</div>
+        <div class="kpi-val">${KES(inventoryValue)}</div>
+        <div class="kpi-sub">${inv.length} asset${inv.length!==1?'s':''}</div>
+      </div>
+      <div class="card card-pad" style="${lowStock.length>0?'border-color:var(--warning)':''}">
+        <div class="kpi-label">LOW STOCK ALERTS</div>
+        <div class="kpi-val" style="color:${lowStock.length>0?'var(--warning)':'inherit'}">${lowStock.length}</div>
+        <div class="kpi-sub">Below reorder level</div>
+      </div>
+      <div class="card card-pad">
+        <div class="kpi-label">PENDING ORDERS</div>
+        <div class="kpi-val">${pendingOrders.length}</div>
+        <div class="kpi-sub">Awaiting fulfilment</div>
+      </div>
+      <div class="card card-pad">
+        <div class="kpi-label">ACTIVE SOLD LOANS</div>
+        <div class="kpi-val">${activeLoans.length}</div>
+        <div class="kpi-sub">Outstanding ${KES(totalOutstanding)}</div>
+      </div>
+      <div class="card card-pad" style="${pendingLoans.length>0?'border-color:var(--warning)':''}">
+        <div class="kpi-label">AWAITING APPROVAL</div>
+        <div class="kpi-val" style="color:${pendingLoans.length>0?'var(--warning)':'inherit'}">${pendingLoans.length}</div>
+        <div class="kpi-sub">Sold items loans</div>
+      </div>
+    </div>
+
+    ${lowStock.length > 0 ? `
+    <div class="card" style="margin-bottom:16px;border-color:var(--warning)">
+      <div class="card-head"><h3 style="color:var(--warning)">⚠ Low Stock Items</h3><div class="sub">These items are at or below reorder level</div></div>
+      <div style="overflow-x:auto"><table class="tbl">
+        <thead><tr><th>Asset</th><th>Category</th><th class="num">Stock</th><th class="num">Reorder Level</th><th class="num">Loan Price</th></tr></thead>
+        <tbody>${lowStock.map(i=>`<tr>
+          <td><b>${i.name}</b></td>
+          <td>${i.category||'—'}</td>
+          <td class="num" style="color:var(--danger);font-weight:700">${i.stock}</td>
+          <td class="num">${i.reorder_level||5}</td>
+          <td class="num">${KES(i.loan_price)}</td>
+        </tr>`).join('')||'<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">All stock levels healthy</td></tr>'}
+        </tbody>
+      </table></div>
+    </div>` : ''}
+
+    <div class="card">
+      <div class="card-head"><h3>Recent Sold Items Forms</h3><div class="sub"><button class="btn btn-sm btn-outline" onclick="go('sold_items')">View all →</button></div></div>
+      <div style="overflow-x:auto"><table class="tbl">
+        <thead><tr><th>Date</th><th>Group</th><th class="num">Items</th><th class="num">Principal</th><th>Status</th></tr></thead>
+        <tbody>${soldItemOrders.slice(0,8).map(o=>{
+          let meta={}; try{meta=JSON.parse(o.notes||'{}');}catch{}
+          const rows=meta.rows||[];
+          const principal=rows.reduce((a,rw)=>a+Number(rw.loan_amount||0),0);
+          const g=state.data.groups.find(x=>x.id===o.group_id);
+          return `<tr style="cursor:pointer" onclick="go('sold_items')">
+            <td>${fmtDate(o.ordered_on)}</td>
+            <td>${g?.name||meta.group_name||'—'}</td>
+            <td class="num">${rows.length}</td>
+            <td class="num"><b>${KES(principal)}</b></td>
+            <td><span class="badge ${o.status==='fulfilled'?'b-green':o.status==='pending'?'b-yellow':'b-grey'}">${o.status}</span></td>
+          </tr>`;
+        }).join('')||'<tr><td colspan="5"><div class="empty"><h4>No sold items forms yet</h4></div></td></tr>'}
+        </tbody>
+      </table></div>
+    </div>
+  `;
 }
 
 function pageOfficerDashboard(){
