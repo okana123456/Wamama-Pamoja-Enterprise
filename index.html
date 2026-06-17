@@ -5639,7 +5639,9 @@ async function saveSoldItemsForm(){
         amount:       fee.amount,
         principal:    fee.amount,
         interest:     0,
-        meeting_date: startDate.toISOString().slice(0, 10),
+        // Fees are charged on the actual form date (day items are issued),
+        // NOT on startDate — the grace period only applies to weekly installments.
+        meeting_date: formDate.toISOString().slice(0, 10),
         notes:        fee.notes,
         // Fees are auto-calculated system charges — always approved regardless of who records.
         // Only the loan itself requires BM/Admin sign-off.
