@@ -3845,17 +3845,19 @@ function exportInventory(){
  * ===================================================================== */
 function pageOrders(){
   const isAdmin = state.staff.role==='admin';
-  const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canSeeAll = isAdmin || r==='ceo' || r==='branch_manager' || r==='inventory_officer' || r==='storekeeper';
+  const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
   const tab = state._orderTab || 'pending';
 
   const list = state.data.orders
-    .filter(o => isAdmin || myGroupIds.includes(o.group_id) || o.recorded_by === state.staff.id)
+    .filter(o => canSeeAll || myGroupIds.includes(o.group_id) || o.recorded_by === state.staff.id)
     .filter(o => tab === 'all' ? true : o.status === tab);
   $('page').innerHTML = `
     <div class="page-head">
       <div><h1>Orders</h1><div class="desc">Member asset orders awaiting approval and fulfilment.</div></div>
       <div class="actions">
-        ${(isAdmin || state.perms?.can_submit_orders) ? `<button class="btn btn-primary" onclick="openOrderForm()">New order</button>`:''}
+        ${(canSeeAll || state.perms?.can_submit_orders) ? `<button class="btn btn-primary" onclick="openOrderForm()">New order</button>`:''}
       </div>
     </div>
     <div class="tabs">
@@ -4100,11 +4102,12 @@ function ordUpdateSummary(){
 function filterOrderMembers(){
   const q = ($('ord-mem-search').value||'').toLowerCase();
   const list = $('ord-mem-list'); if(!list) return;
-  const isAdmin = state.staff.role === 'admin';
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  const canSeeAll = state.staff.role === 'admin' || r === 'ceo' || r === 'branch_manager' || r === 'inventory_officer' || r === 'storekeeper';
   const matches = state.data.members.filter(m => {
     if(m.status !== 'active') return false;
-    if(!isAdmin){
-      // Officers only see members whose group is assigned to them
+    if(!canSeeAll){
+      // Loan officers only see members whose group is assigned to them
       const grp = state.data.groups.find(g => g.id === m.group_id);
       if(!grp || grp.officer_id !== state.staff.id) return false;
     }
