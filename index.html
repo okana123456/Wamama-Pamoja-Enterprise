@@ -2511,9 +2511,14 @@ function openMemberEdit(m){
 function mpApproveSaving(id){
   const s = state.data.savings.find(x=>x.id===id);
   if(!s) return;
-  sb.from('pb_savings').update({status:'approved'}).eq('id',id).then(({error})=>{
-    if(error) return toast(error.message,'error');
-    s.status='approved'; render(); toast('Savings entry approved.','success');
+  if(s.status === 'approved'){ toast('Already approved.','warn'); return; }
+  if(!can('approve_savings')){ toast('You do not have permission to approve savings.','error'); return; }
+  ensureFreshToken().then(ok => {
+    if(!ok) return;
+    sb.from('pb_savings').update({status:'approved'}).eq('id',id).then(({error})=>{
+      if(error) return toast(error.message,'error');
+      s.status='approved'; render(); toast('Savings entry approved.','success');
+    });
   });
 }
 async function mpDeleteSaving(id){
@@ -3295,8 +3300,13 @@ function pageLoans(){
             const paid = loanPaid(l.id);
             const out = Number(l.total_payable)-paid;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
-            return `<tr style="${l.status==='completed'?'background:var(--surface-2);color:var(--text-muted)':l.status==='defaulted'?'background:var(--danger-50)':''}">
-              <td><b>${m?.full_name||'—'}</b></td>
+            // Detect duplicate — same member, same order, more than one active loan
+            const isDup = l.member_id && l.order_id && loans.filter(x=>
+              x.id !== l.id && x.member_id === l.member_id &&
+              x.order_id === l.order_id && x.status === 'active'
+            ).length > 0;
+            return `<tr style="${isDup?'background:var(--warning-50);':l.status==='completed'?'background:var(--surface-2);color:var(--text-muted)':l.status==='defaulted'?'background:var(--danger-50)':''}">
+              <td><b>${m?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow" title="Duplicate loan detected — use ··· to delete">⚠ Duplicate</span>`:''}</td>
               <td>${grp?.name||'—'}</td>
               <td>${l.asset_name}</td>
               ${isAdmin ? `<td style="font-size:12px;color:var(--text-muted)">${off?.full_name||'—'}</td>` : ''}
@@ -3316,12 +3326,39 @@ function pageLoans(){
 }
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role==='admin';
-  const canRepay = isAdmin || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
+  const canApproveLoan = can('approve_loan');
+  const canRepay = canApproveLoan || r==='officer' || r==='loan_officer';
+
+  // Detect if this loan is a duplicate (same member + same order, more than one active)
+  const duplicateLoans = state.data.loans.filter(x =>
+    x.id !== id &&
+    x.member_id === l.member_id &&
+    x.order_id  === l.order_id  &&
+    x.status    === 'active'
+  );
+  const isDuplicate = duplicateLoans.length > 0;
+
   showActMenu(ev, [
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
-    ...(isAdmin && l.status==='active' ? [
+    ...(isDuplicate ? [{
+      label:'⚠ Delete duplicate loan', danger:true, onClick: ()=>confirmDialog(
+        `This loan appears to be a duplicate of another active loan for the same member (${state.data.members.find(m=>m.id===l.member_id)?.full_name||'—'}) on the same order. Delete this duplicate?`,
+        async()=>{
+          if(!(await ensureFreshToken())) return;
+          const { error } = await sb.from('pb_loans').delete().eq('id', id);
+          if(error) return toast('Delete failed: '+error.message,'error');
+          state.data.loans = state.data.loans.filter(x=>x.id!==id);
+          audit('delete_duplicate_loan','pb_loans',id,{ asset_name:l.asset_name, loan_value:l.loan_value });
+          render();
+          toast('Duplicate loan deleted.','success');
+        },
+        { title:'Delete Duplicate Loan', danger:true }
+      )
+    }] : []),
+    ...(canApproveLoan && l.status==='active' ? [
       { label:'Transfer Loan', onClick: ()=>openLoanTransfer(l) },
       { label:'Restructure Loan', onClick: ()=>openLoanRestructure(l) },
       { label:'Mark as defaulted', danger:true, onClick: ()=>confirmDialog(
@@ -3336,13 +3373,13 @@ function loanActions(ev, id){
       },
       'sep',
       { label:'🗑 Delete Loan', danger:true, onClick: ()=>confirmDialog(
-          'PERMANENTLY delete this active loan? All repayment records will remain but the loan will be removed from the system. This action cannot be undone.',
+          'PERMANENTLY delete this loan? All repayment records will remain but the loan will be removed. This cannot be undone.',
           async()=>{
             if(!(await ensureFreshToken())) return;
             const { error } = await sb.from('pb_loans').delete().eq('id', id);
-            if(error) return toast('Delete failed: '+error.message, 'error');
+            if(error) return toast('Delete failed: '+error.message,'error');
             state.data.loans = state.data.loans.filter(x=>x.id!==id);
-            audit('delete_loan','pb_loans',id,{ asset_name:l.asset_name, member_id:l.member_id, loan_value:l.loan_value },null);
+            audit('delete_loan','pb_loans',id,{ asset_name:l.asset_name, member_id:l.member_id, loan_value:l.loan_value });
             render();
             toast('Loan deleted and action logged.','warn');
           },
@@ -4230,7 +4267,24 @@ function approveOrder(o){
     actions:[
       { label:'Cancel', onClick: closeModal },
       { label:'Issue loan', cls:'btn-primary', onClick: async () => {
-        if(!(await ensureFreshToken())) return;
+        // Double-tap guard — disable button immediately
+        const issueBtn = document.querySelector('.modal-foot .btn-primary');
+        if(issueBtn){
+          if(issueBtn.dataset.processing === '1') return;
+          issueBtn.dataset.processing = '1';
+          issueBtn.disabled = true;
+          issueBtn.textContent = 'Issuing…';
+        }
+        // Check if a loan already exists for this order (duplicate prevention)
+        const existingLoan = state.data.loans.find(l => l.order_id === o.id && l.status === 'active');
+        if(existingLoan){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast('A loan has already been issued for this order. Check Active Loans.','warn');
+        }
+        if(!(await ensureFreshToken())){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return;
+        }
         const weekly = Number($('wi').value)||0;
         const weeksInput = Number($('al-weeks').value)||0;
         const start = new Date($('sd').value);
@@ -4255,7 +4309,10 @@ function approveOrder(o){
           start_date: $('sd').value, expected_end_date: end.toISOString().slice(0,10), status:'active'
         };
         const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loan).select().single();
-        if(loanErr) return toast('Loan save failed: '+loanErr.message,'error');
+        if(loanErr){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast('Loan save failed: '+loanErr.message,'error');
+        }
 
         // === Fix 5: Deduct stock for each asset line individually ===
         for(const line of resolvedLines){
@@ -6766,22 +6823,27 @@ function pageSavings(){
 
 function savingsRowActions(ev, id){
   const sav = state.data.savings.find(x=>x.id===id);
-  const isAdmin = state.staff.role === 'admin';
-  const isOfficer = ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
+  const canApproveSav = can('approve_savings');
+  const canEdit = canApproveSav || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   const items = [
     { label: '✏ Edit entry', onClick: () => openEditSaving(id) }
   ];
-  if(isAdmin && sav && sav.status === 'pending'){
+  if(canApproveSav && sav && sav.status === 'pending'){
     items.push('sep');
-    items.push({ label: '✓ Approve', onClick: async () => {
+    items.push({ label: '✓ Approve', onClick: async (ev) => {
+      const btn = ev?.target;
+      if(btn){ btn.disabled=true; btn.textContent='Approving…'; }
+      // Guard against double-tap
+      if(sav.status === 'approved'){ toast('Already approved.','warn'); return; }
+      if(!(await ensureFreshToken())) return;
       const { error } = await sb.from('pb_savings').update({ status: 'approved' }).eq('id', id);
-      if(error) return toast(error.message, 'error');
+      if(error){ if(btn){ btn.disabled=false; btn.textContent='✓ Approve'; } return toast(error.message, 'error'); }
       sav.status = 'approved';
       render();
       toast('Savings entry approved.', 'success');
     }});
   }
-  if(isAdmin || isOfficer){
+  if(canEdit){
     items.push('sep');
     items.push({ label: '🗑 Delete entry', danger: true, onClick: () => confirmDialog(
       'Delete this savings entry? This cannot be undone.',
@@ -6981,14 +7043,16 @@ function pageRepayments(){
 
 function repRowActions(ev, id){
   const rep = state.data.repayments.find(x=>x.id===id);
-  const isAdmin = state.staff.role === 'admin';
-  const isOfficer = ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
+  const canApproveRep = can('approve_repayment');
+  const canEdit = canApproveRep || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
   const items = [
     { label: '✏ Edit entry', onClick: () => openEditRepayment(id) }
   ];
-  if(isAdmin && rep && rep.status === 'pending'){
+  if(canApproveRep && rep && rep.status === 'pending'){
     items.push('sep');
     items.push({ label: '✓ Approve', onClick: async () => {
+      if(rep.status === 'approved'){ toast('Already approved.','warn'); return; }
+      if(!(await ensureFreshToken())) return;
       const { error } = await sb.from('pb_repayments').update({ status: 'approved' }).eq('id', id);
       if(error) return toast(error.message, 'error');
       rep.status = 'approved';
@@ -6996,7 +7060,7 @@ function repRowActions(ev, id){
       toast('Repayment entry approved.', 'success');
     }});
   }
-  if(isAdmin || isOfficer){
+  if(canEdit){
     items.push('sep');
     items.push({ label: '🗑 Delete entry', danger: true, onClick: () => confirmDialog(
       'Delete this repayment entry? This cannot be undone.',
