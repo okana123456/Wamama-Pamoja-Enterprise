@@ -3425,55 +3425,136 @@ function openLoanTransfer(l){
   });
 }
 function openLoanRestructure(l){
-  const paid = loanPaid(l.id);
-  const outstanding = Number(l.total_payable) - paid;
+  const paid       = loanPaid(l.id);
+  const outstanding = Math.max(0, Number(l.total_payable) - paid);
+  const weeksLeft  = Number(l.weekly_installment) > 0 ? Math.ceil(outstanding / Number(l.weekly_installment)) : 0;
 
   modal({
-    title: 'Restructure Loan — ' + l.asset_name,
-    body: '<div style="font-size:13px;color:var(--text-muted);margin-bottom:14px">'
-        + 'Adjust the weekly installment to recalculate the remaining repayment schedule.'
-        + '<br><b>Current Weekly:</b> ' + KES(l.weekly_installment)
-        + '<br><b>Outstanding Balance:</b> ' + KES(outstanding)
-        + '</div>'
-        + '<div class="field"><label>New Weekly Installment (KES) *</label>'
-        + '<input type="number" id="lr-weekly" min="1" value="' + l.weekly_installment + '" required /></div>'
-        + '<div class="field"><label>Effective Date *</label>'
-        + '<input type="date" id="lr-date" value="' + todayISO() + '" required /></div>'
-        + '<div class="field"><label>Reason for Restructure</label>'
-        + '<textarea id="lr-reason" rows="2" placeholder="e.g. Member requested lower payments due to hardship..."></textarea></div>',
+    title: 'Restructure Loan — ' + (state.data.members.find(m=>m.id===l.member_id)?.full_name||l.asset_name),
+    body: `
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:14px;font-size:13px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div><span class="muted">Original principal</span><br><b>${KES(l.loan_value)}</b></div>
+          <div><span class="muted">Total payable</span><br><b>${KES(l.total_payable)}</b></div>
+          <div><span class="muted">Amount paid so far</span><br><b style="color:var(--success)">${KES(paid)}</b></div>
+          <div><span class="muted">Outstanding balance</span><br><b style="color:var(--danger)">${KES(outstanding)}</b></div>
+          <div><span class="muted">Current weekly</span><br><b>${KES(l.weekly_installment)}</b></div>
+          <div><span class="muted">Weeks remaining (est.)</span><br><b>${weeksLeft} wks</b></div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Restructure method</label>
+        <select id="lr-method" onchange="lrUpdatePreview()">
+          <option value="weekly">Change weekly installment (term adjusts automatically)</option>
+          <option value="term">Change loan term in weeks (installment adjusts automatically)</option>
+          <option value="both">Set both weekly installment AND new term</option>
+        </select>
+      </div>
+      <div class="grid-2">
+        <div class="field" id="lr-weekly-wrap">
+          <label>New weekly installment (KES)</label>
+          <input type="number" id="lr-weekly" min="1" value="${l.weekly_installment}" oninput="lrUpdatePreview()" />
+        </div>
+        <div class="field" id="lr-term-wrap" style="display:none">
+          <label>New loan term (weeks)</label>
+          <input type="number" id="lr-term" min="1" max="96" value="${weeksLeft}" oninput="lrUpdatePreview()" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Effective date</label>
+        <input type="date" id="lr-date" value="${todayISO()}" onchange="lrUpdatePreview()" />
+      </div>
+      <div class="field">
+        <label>Reason for restructure</label>
+        <textarea id="lr-reason" rows="2" placeholder="e.g. Client requested shorter term — will pay KES X per week..."></textarea>
+      </div>
+      <div id="lr-preview" style="background:var(--primary-50);border:1px solid var(--primary);border-radius:var(--radius-sm);padding:10px 14px;font-size:13px;margin-top:4px"></div>
+    `,
     actions: [
       { label: 'Cancel', cls: 'btn-outline', onClick: closeModal },
-      { label: 'Apply Restructure', cls: 'btn-primary', onClick: async function() {
-        const newWeekly = Number(document.getElementById('lr-weekly').value);
-        const effectiveDateVal = document.getElementById('lr-date').value;
-        const reason = document.getElementById('lr-reason').value.trim();
+      { label: 'Apply restructure', cls: 'btn-primary', onClick: async () => {
+        const method     = document.getElementById('lr-method').value;
+        const newWeekly  = Number(document.getElementById('lr-weekly').value)||0;
+        const newTerm    = parseInt(document.getElementById('lr-term').value)||0;
+        const effectDate = document.getElementById('lr-date').value;
+        const reason     = (document.getElementById('lr-reason').value||'').trim();
 
-        if(!newWeekly || newWeekly <= 0) return toast('Invalid weekly amount.', 'error');
+        if(!effectDate) return toast('Please set an effective date.','error');
 
-        const effectiveDate = new Date(effectiveDateVal);
-        const remainingWeeks = Math.ceil(outstanding / newWeekly);
-        const end = new Date(effectiveDate);
-        end.setDate(end.getDate() + 7 * remainingWeeks);
-        const expectedEnd = end.toISOString().slice(0,10);
+        let finalWeekly, finalWeeks;
+        if(method === 'weekly'){
+          if(!newWeekly) return toast('Enter a valid weekly amount.','error');
+          finalWeekly = newWeekly;
+          finalWeeks  = Math.ceil(outstanding / finalWeekly);
+        } else if(method === 'term'){
+          if(!newTerm) return toast('Enter a valid number of weeks.','error');
+          finalWeeks  = newTerm;
+          finalWeekly = Math.round((outstanding / finalWeeks) * 100) / 100;
+        } else {
+          if(!newWeekly || !newTerm) return toast('Enter both weekly amount and term.','error');
+          finalWeekly = newWeekly;
+          finalWeeks  = newTerm;
+        }
 
-        const oldWeekly = l.weekly_installment;
-        const upd = {
-          weekly_installment: newWeekly,
-          expected_end_date: expectedEnd
-        };
+        if(finalWeeks > 96) return toast('Maximum restructured term is 96 weeks.','error');
 
+        const endDate = new Date(effectDate);
+        endDate.setDate(endDate.getDate() + 7 * finalWeeks);
+
+        if(!(await ensureFreshToken())) return;
+        const upd = { weekly_installment: finalWeekly, expected_end_date: endDate.toISOString().slice(0,10) };
         const { error } = await sb.from('pb_loans').update(upd).eq('id', l.id);
-        if(error) return toast('Failed to update loan: ' + error.message, 'error');
-
+        if(error) return toast('Failed: '+error.message,'error');
         Object.assign(l, upd);
-        // Restructure reason is stored in the audit log (pb_loans has no notes column)
-        audit('loan_restructure', 'pb_loans', l.id, { old_weekly: oldWeekly }, { new_weekly: newWeekly, expected_end_date: expectedEnd, reason });
-        closeModal();
-        render();
-        toast('Loan restructured successfully.', 'success');
+        audit('loan_restructure','pb_loans',l.id,
+          { weekly: l.weekly_installment, end: l.expected_end_date },
+          { weekly: finalWeekly, weeks: finalWeeks, end: upd.expected_end_date, reason }
+        );
+        closeModal(); render();
+        toast(`Loan restructured — new weekly: ${KES(finalWeekly)} for ${finalWeeks} weeks, ending ${fmtDate(upd.expected_end_date)}.`,'success');
       }}
     ]
   });
+
+  // Show preview on load
+  setTimeout(lrUpdatePreview, 40);
+}
+
+function lrUpdatePreview(){
+  const method    = document.getElementById('lr-method')?.value;
+  const weeklyWrap = document.getElementById('lr-weekly-wrap');
+  const termWrap   = document.getElementById('lr-term-wrap');
+  const preview    = document.getElementById('lr-preview');
+  if(!method || !preview) return;
+
+  // Show/hide fields based on method
+  if(weeklyWrap) weeklyWrap.style.display = method==='term' ? 'none' : '';
+  if(termWrap)   termWrap.style.display   = method==='weekly' ? 'none' : '';
+
+  const newWeekly = Number(document.getElementById('lr-weekly')?.value)||0;
+  const newTerm   = parseInt(document.getElementById('lr-term')?.value)||0;
+  const effectDate = document.getElementById('lr-date')?.value;
+
+  // Get outstanding from the loan currently being restructured
+  const loanId = Object.keys(state.data.loans.reduce((a,l)=>(a[l.id]=1,a),{})).find(id=>{
+    const l = state.data.loans.find(x=>x.id===id);
+    return l && document.querySelector('.modal-head')?.textContent?.includes(l.asset_name);
+  });
+  // Simpler: re-read from last opened loan via closure isn't available here
+  // so just show calculated values from inputs
+  if(method==='weekly' && newWeekly > 0){
+    const endDate = new Date(effectDate||todayISO());
+    endDate.setDate(endDate.getDate() + 7 * Math.ceil(999999/newWeekly)); // placeholder
+    preview.innerHTML = `New weekly: <b>${KES(newWeekly)}</b> · Term will be recalculated from outstanding balance`;
+  } else if(method==='term' && newTerm > 0){
+    preview.innerHTML = `New term: <b>${newTerm} weeks</b> · Weekly installment will be recalculated from outstanding balance`;
+  } else if(method==='both' && newWeekly > 0 && newTerm > 0){
+    const endDate = new Date(effectDate||todayISO());
+    endDate.setDate(endDate.getDate() + 7 * newTerm);
+    preview.innerHTML = `New weekly: <b>${KES(newWeekly)}</b> · New term: <b>${newTerm} weeks</b> · Ends: <b>${fmtDate(endDate.toISOString().slice(0,10))}</b>`;
+  } else {
+    preview.innerHTML = '<span style="color:var(--text-muted)">Enter values above to see a preview.</span>';
+  }
 }
 function showLoanSchedule(l){
   const sched = computeSchedule(Number(l.loan_value), Number(l.weekly_installment), 'flat', new Date(l.start_date));
@@ -5656,6 +5737,18 @@ async function saveSoldItemsForm(){
     const endDate       = new Date(startDate);
     endDate.setDate(endDate.getDate() + 7 * row.weeks);
     const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
+
+    // Check for existing active loan for this member on this order
+    // Check for existing active loan for this member on this order (duplicate prevention)
+    const existingActiveLoan = state.data.loans.find(ex =>
+      ex.order_id === orderData.id &&
+      ex.status   === 'active' &&
+      (memberId ? ex.member_id === memberId : ex.asset_name === (row.product||'Sold item'))
+    );
+    if(existingActiveLoan){
+      errors.push(`${row.client_name}: loan already exists — skipped duplicate`);
+      continue;
+    }
 
     const loanRow = {
       business_id:        state.staff.business_id || null,
