@@ -1259,20 +1259,55 @@ async function approveSoldItemsLoan(loanId, btn){
     if(btn){ btn.disabled=false; btn.textContent='Approve'; }
     return toast('Approval failed: '+loanErr.message,'error');
   }
+  if(loan){ loan.status = 'active'; }
 
-  // Approve any remaining pending non-fee repayments for this loan (if any)
+  // Record 3% app fee + 3% insurance on approval (not before)
+  // The 6% service charge is already in total_payable so NOT recorded here
+  const principal = Number(loan.loan_value) || 0;
+  const appFee    = Math.round(principal * 0.03 * 100) / 100;
+  const insFee    = Math.round(principal * 0.03 * 100) / 100;
+  const feeDate   = todayISO();
+
+  for(const fee of [
+    { amount: appFee, notes: 'Auto-deducted 3% Application Fee' },
+    { amount: insFee, notes: 'Auto-deducted 3% Insurance Cover' }
+  ]){
+    if(fee.amount <= 0) continue;
+    // Check not already recorded to prevent double-approval recording
+    const alreadyExists = state.data.repayments.find(r =>
+      r.loan_id === loanId && r.notes === fee.notes
+    );
+    if(alreadyExists) continue;
+
+    const feeRow = {
+      business_id:  loan.business_id || state.staff.business_id || null,
+      loan_id:      loanId,
+      member_id:    loan.member_id,
+      group_id:     loan.group_id,
+      recorded_by:  state.staff.id,
+      amount:       fee.amount,
+      principal:    fee.amount,
+      interest:     0,
+      meeting_date: feeDate,
+      notes:        fee.notes,
+      status:       'approved'
+    };
+    const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
+    if(feeErr) toast(`Fee record failed: ${feeErr.message}`,'warn');
+    else state.data.repayments.unshift(feeData);
+  }
+
+  // Approve any other pending non-fee repayments
   await sb.from('pb_repayments')
     .update({ status:'approved' })
     .eq('loan_id', loanId)
     .eq('status','pending');
-
-  if(loan){ loan.status = 'active'; }
   state.data.repayments.filter(r=>r.loan_id===loanId && r.status==='pending')
     .forEach(r=>r.status='approved');
 
   audit('approve_sold_items_loan','pb_loans',loanId);
   render();
-  toast('Sold items loan approved and added to client portfolio.','success');
+  toast('Sold items loan approved — 3% fees recorded. Loan now active in client portfolio.','success');
 }
 
 async function rejectSoldItemsLoan(loanId){
@@ -1629,7 +1664,11 @@ function dashArrFilter(){
     const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
     const weekly    = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears   = Math.max(0, expectedPaid - paid);
+    // KES 5 tolerance prevents phantom arrears from rounding — e.g. weekly=310.75
+    // means after 1 week client owes 310.75 but may have paid 310 or 311.
+    // Any shortfall under KES 5 is treated as on-track.
+    const ARREARS_TOLERANCE = 5;
+    const arrears   = Math.max(0, expectedPaid - paid - ARREARS_TOLERANCE);
 
     let nextDueDate = null;
     for (let w = 1; w <= 1040; w++) {
@@ -3064,7 +3103,7 @@ function pageArrears(){
     const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
     const weekly = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears = Math.max(0, expectedPaid - paid);
+    const arrears = Math.max(0, expectedPaid - paid - 5);
 
     let nextDueDate = null;
     for (let w = 1; w <= 1040; w++) {
@@ -3175,7 +3214,7 @@ function exportArrearsCollectionSheet(){
     const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
     const weekly = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears = Math.max(0, expectedPaid - paid);
+    const arrears = Math.max(0, expectedPaid - paid - 5);
     let nextDueDate = null;
     for (let w = 1; w <= 1040; w++) {
       const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
@@ -5669,7 +5708,9 @@ async function saveSoldItemsForm(){
     const interest  = Math.round(principal * 0.02 * months * 100) / 100;
     const appFee    = Math.round(principal * 0.03 * 100) / 100;
     const insFee    = Math.round(principal * 0.03 * 100) / 100;
-    const totalPayable = principal + interest; // charge + fees recorded separately
+    // P + I + C (6% service charge included in total payable as client sees it in passbook)
+    // 3% app fee and 3% insurance are admin charges deducted upfront — not in weekly schedule
+    const totalPayable = principal + interest + charge;
     return { ...r, loan_amount: principal, weeks, charge, interest, appFee, insFee, totalPayable };
   });
 
@@ -5736,6 +5777,7 @@ async function saveSoldItemsForm(){
     startDate.setDate(startDate.getDate() + 7);           // first repayment week begins after 1 week
     const endDate       = new Date(startDate);
     endDate.setDate(endDate.getDate() + 7 * row.weeks);
+    // Weekly installment derived from full P+I+C total so passbook figure matches exactly
     const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
 
     // Check for existing active loan for this member on this order
@@ -5776,34 +5818,39 @@ async function saveSoldItemsForm(){
     audit('sold_items_loan_issue', 'pb_loans', loanData.id, null, loanRow);
 
     // ── Upfront fee repayments ─────────────────────────────────────────────
-    const upfrontEntries = [
-      { amount: row.charge,  notes: 'Auto-deducted 6% Service Charge (Sold Items)' },
-      { amount: row.appFee,  notes: 'Auto-deducted 3% Application Fee' },
-      { amount: row.insFee,  notes: 'Auto-deducted 3% Insurance Cover' },
-    ].filter(e => e.amount > 0);
+    // The 6% service charge is now included in total_payable (P+I+C) so it
+    // is repaid through weekly installments — do NOT record it separately.
+    // The 3% app fee and 3% insurance are admin charges recorded only when
+    // the loan is approved by BM/Admin, not automatically on form save.
+    // This prevents any automatic payments appearing on a new loan.
+    if(can('approve_loan')){
+      // Only CEO/Admin/BM recording: record the 3% admin fees immediately
+      const adminFees = [
+        { amount: row.appFee, notes: 'Auto-deducted 3% Application Fee' },
+        { amount: row.insFee, notes: 'Auto-deducted 3% Insurance Cover' },
+      ].filter(e => e.amount > 0);
 
-    for(const fee of upfrontEntries){
-      const feeRow = {
-        business_id:  state.staff.business_id || null,
-        loan_id:      loanData.id,
-        member_id:    memberId,
-        group_id:     groupId || null,
-        recorded_by:  state.staff.id,
-        amount:       fee.amount,
-        principal:    fee.amount,
-        interest:     0,
-        // Fees are charged on the actual form date (day items are issued),
-        // NOT on startDate — the grace period only applies to weekly installments.
-        meeting_date: formDate.toISOString().slice(0, 10),
-        notes:        fee.notes,
-        // Fees are auto-calculated system charges — always approved regardless of who records.
-        // Only the loan itself requires BM/Admin sign-off.
-        status:       'approved'
-      };
-      const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
-      if(feeErr) toast(`Fee record for ${row.client_name}: ${feeErr.message}`, 'warn');
-      else state.data.repayments.unshift(feeData);
+      for(const fee of adminFees){
+        const feeRow = {
+          business_id:  state.staff.business_id || null,
+          loan_id:      loanData.id,
+          member_id:    memberId,
+          group_id:     groupId || null,
+          recorded_by:  state.staff.id,
+          amount:       fee.amount,
+          principal:    fee.amount,
+          interest:     0,
+          meeting_date: formDate.toISOString().slice(0, 10),
+          notes:        fee.notes,
+          status:       'approved'
+        };
+        const { data: feeData, error: feeErr } = await sb.from('pb_repayments').insert(feeRow).select().single();
+        if(feeErr) toast(`Fee record for ${row.client_name}: ${feeErr.message}`, 'warn');
+        else state.data.repayments.unshift(feeData);
+      }
     }
+    // If recorded by storekeeper/loan officer: no fees recorded now.
+    // approveSoldItemsLoan() will record the 3% fees when BM/Admin approves.
   }
 
   closeModal(); render();
