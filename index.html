@@ -564,6 +564,7 @@ const PAGE_ACCESS = {
   meeting:        ['branch_manager','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
+  repayment_approvals: ['branch_manager','ceo','admin','supervisor'],
   loans:          ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   arrears:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   calculator:     'ALL',
@@ -998,6 +999,7 @@ function navItems(){
   const isLegacyAdmin = state.staff.role === 'admin';
   // Branch manager can access meeting recorder (oversight role)
   const canSeeMeeting = isLegacyAdmin || r === 'branch_manager' || p.can_record_savings || p.can_record_repayments;
+  const pendRepApprovals = state.data.repayments.filter(r=>r.status==='pending'&&isClientRepayment(r)).length;
   const pendApprovals = pendingApprovalsCount();
   const items = [
     { k:'dashboard',      label:'Dashboard',        icon:dashIcon() },
@@ -1006,7 +1008,8 @@ function navItems(){
     { k:'members',        label:'Members',          icon:memberIcon() },
     { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: canSeeMeeting },
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
-    { k:'repayments',     label:'Repayments',       icon:repaymentsIcon() },
+    { k:'repayments',          label:'Repayments',          icon:repaymentsIcon() },
+    { k:'repayment_approvals', label:`Repayment Approvals${pendRepApprovals?` <span class="badge b-red" style="margin-left:6px">${pendRepApprovals}</span>`:''}`, icon:repaymentsIcon() },
     { k:'loans',          label:'Active Loans',     icon:loanIcon() },
     { k:'arrears',        label:'Due & Arrears',    icon: ic('<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>') },
     { k:'calculator',     label:'Loan Calculator',  icon:calcIcon() },
@@ -1103,7 +1106,7 @@ function renderShell(){
 function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
-    savings:'Savings', repayments:'Repayments',
+    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
@@ -1129,7 +1132,7 @@ function toggleSidebar(force){
 function renderPage(){
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments,
+    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -4313,7 +4316,7 @@ function approveOrder(o){
   const requiresDeposit = principal > 20000;
   const depositAmount = requiresDeposit ? Math.round(principal * 0.25) : 0;
 
-  // === 3% Application Fee + 3% Insurance Cover ===
+  // === Optional 3% fees — approver decides based on item type ===
   const applicationFee = Math.round(principal * 0.03 * 100) / 100;
   const insuranceFee   = Math.round(principal * 0.03 * 100) / 100;
 
@@ -4325,10 +4328,22 @@ function approveOrder(o){
       <table class="summary-table">
         ${assetSummaryRows}
         <tr><td>Total loan principal</td><td><b>${KES(principal)}</b></td></tr>
-        <tr><td style="color:var(--warning)">⚠ 3% Application Fee</td><td style="color:var(--warning)"><b>${KES(applicationFee)}</b></td></tr>
-        <tr><td style="color:var(--warning)">⚠ 3% Insurance Cover</td><td style="color:var(--warning)"><b>${KES(insuranceFee)}</b></td></tr>
         <tr><td style="font-size:11px;color:var(--text-muted)">Member savings (5× limit: ${KES(maxAllowedLoan)})</td><td style="font-size:11px;color:var(--text-muted)">${KES(memberTotalSavings)}</td></tr>
       </table>
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin:12px 0;font-size:13px">
+        <div style="font-weight:700;margin-bottom:8px">Upfront Fees (optional — for foodstuffs & building materials)</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="chk-app-fee" value="${applicationFee}" />
+            <span>3% Application Fee — <b>${KES(applicationFee)}</b> (deducted upfront)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="chk-ins-fee" value="${insuranceFee}" />
+            <span>3% Insurance Cover — <b>${KES(insuranceFee)}</b> (deducted upfront)</span>
+          </label>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:8px">If not checked, the client repays all charges gradually through weekly installments.</div>
+      </div>
       ${requiresDeposit ? `
       <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:12px 14px;margin:12px 0;font-size:13px">
         <div style="font-weight:700;color:var(--warning);margin-bottom:4px">⚠️ Deposit Required</div>
@@ -4373,9 +4388,7 @@ function approveOrder(o){
           return toast('The maximum allowed loan term is 48 weeks. Please increase the weekly payment or reduce the weeks.','error');
         }
         const end = new Date(start); end.setDate(end.getDate() + 7*r.weeks);
-        // Use primary asset for loan record fields
         const primaryLine = resolvedLines[0];
-        // Derive the correct officer from the member's group assignment.
         const memberGroup = state.data.groups.find(g => g.id === member.group_id);
         const resolvedOfficerId = memberGroup?.officer_id || o.recorded_by || null;
         const loan = {
@@ -4392,7 +4405,6 @@ function approveOrder(o){
           return toast('Loan save failed: '+loanErr.message,'error');
         }
 
-        // === Fix 5: Deduct stock for each asset line individually ===
         for(const line of resolvedLines){
           await sb.from('pb_inventory').update({ stock: line.asset.stock - line.quantity }).eq('id', line.asset.id);
           line.asset.stock -= line.quantity;
@@ -4405,7 +4417,7 @@ function approveOrder(o){
 
         const interestRatio = r.totalPayable > 0 ? (r.totalPayable - principal) / r.totalPayable : 0;
 
-        // === Fix 4: Insert deposit repayment if principal > 20,000 ===
+        // 25% deposit for loans > KES 20,000
         if(requiresDeposit && depositAmount > 0){
           const depositInterest = +(depositAmount * interestRatio).toFixed(2);
           const depositPrincipal = +(depositAmount - depositInterest).toFixed(2);
@@ -4422,41 +4434,38 @@ function approveOrder(o){
           else { state.data.repayments.unshift(depData); audit('deposit_repayment','pb_repayments',loanData.id,null,dep); }
         }
 
-        // === Auto-deduct 3% Application Fee ===
-        if(applicationFee > 0){
-          const appFeeInterest = +(applicationFee * interestRatio).toFixed(2);
-          const appFeePrincipal = +(applicationFee - appFeeInterest).toFixed(2);
-          const appFeeRow = {
+        // Optional upfront fees — only if approver checked the boxes
+        const chargeAppFee = document.getElementById('chk-app-fee')?.checked;
+        const chargeInsFee = document.getElementById('chk-ins-fee')?.checked;
+
+        if(chargeAppFee && applicationFee > 0){
+          const feeRow = {
             business_id: state.staff.business_id || null,
             loan_id: loanData.id, member_id: member.id, group_id: member.group_id,
             recorded_by: state.staff.id,
-            amount: applicationFee, principal: appFeePrincipal, interest: appFeeInterest,
+            amount: applicationFee, principal: applicationFee, interest: 0,
             meeting_date: $('sd').value,
-            notes: 'Auto-deducted 3% Application Fee', status: 'approved'
+            notes: 'Upfront 3% Application Fee (approver selected)', status: 'approved'
           };
-          const { data: appFeeData, error: appFeeErr } = await sb.from('pb_repayments').insert(appFeeRow).select().single();
-          if(appFeeErr) toast('Application fee record failed: '+appFeeErr.message,'warn');
-          else { state.data.repayments.unshift(appFeeData); }
+          const { data: feeData } = await sb.from('pb_repayments').insert(feeRow).select().single();
+          if(feeData) state.data.repayments.unshift(feeData);
         }
 
-        // === Auto-deduct 3% Insurance Cover ===
-        if(insuranceFee > 0){
-          const insFeeInterest = +(insuranceFee * interestRatio).toFixed(2);
-          const insFeePrincipal = +(insuranceFee - insFeeInterest).toFixed(2);
-          const insFeeRow = {
+        if(chargeInsFee && insuranceFee > 0){
+          const feeRow = {
             business_id: state.staff.business_id || null,
             loan_id: loanData.id, member_id: member.id, group_id: member.group_id,
             recorded_by: state.staff.id,
-            amount: insuranceFee, principal: insFeePrincipal, interest: insFeeInterest,
+            amount: insuranceFee, principal: insuranceFee, interest: 0,
             meeting_date: $('sd').value,
-            notes: 'Auto-deducted 3% Insurance Cover', status: 'approved'
+            notes: 'Upfront 3% Insurance Cover (approver selected)', status: 'approved'
           };
-          const { data: insFeeData, error: insFeeErr } = await sb.from('pb_repayments').insert(insFeeRow).select().single();
-          if(insFeeErr) toast('Insurance cover record failed: '+insFeeErr.message,'warn');
-          else { state.data.repayments.unshift(insFeeData); }
+          const { data: feeData } = await sb.from('pb_repayments').insert(feeRow).select().single();
+          if(feeData) state.data.repayments.unshift(feeData);
         }
 
-        closeModal(); render(); toast('Loan issued and stock deducted'+(requiresDeposit?' — deposit recorded':'')+' — application fee & insurance recorded.','success');
+        closeModal(); render();
+        toast(`Loan issued successfully${requiresDeposit?' — 25% deposit recorded':''}${chargeAppFee||chargeInsFee?' — selected fees recorded':''}.`,'success');
       }}
     ]
   });
@@ -6986,6 +6995,133 @@ function repDateRange(){
     return { start: _repCustomStart||today, end: _repCustomEnd||today };
   }
   return { start: today, end: today };
+}
+
+function pageRepaymentApprovals(){
+  const pending = state.data.repayments.filter(r =>
+    r.status === 'pending' && isClientRepayment(r)
+  );
+
+  // Group by group for easier review
+  const byGroup = {};
+  pending.forEach(r => {
+    const grp = state.data.groups.find(g=>g.id===r.group_id);
+    const key = grp?.name || '— No group';
+    if(!byGroup[key]) byGroup[key] = [];
+    byGroup[key].push(r);
+  });
+
+  const groupKeys = Object.keys(byGroup).sort();
+
+  $('page').innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Repayment Approvals</h1>
+        <div class="desc">${pending.length} repayment${pending.length!==1?'s':''} pending approval · Grouped by group for easy review</div>
+      </div>
+      <div class="actions">
+        ${pending.length > 0 ? `<button class="btn btn-primary" onclick="approveAllRepayments()">✓ Approve All (${pending.length})</button>` : ''}
+      </div>
+    </div>
+
+    ${pending.length === 0 ? `
+      <div class="card" style="padding:32px;text-align:center">
+        <div style="font-size:32px;margin-bottom:12px">✅</div>
+        <h3>All repayments are approved</h3>
+        <p class="muted">No pending repayments at this time.</p>
+      </div>` :
+
+    groupKeys.map(grpName => {
+      const reps = byGroup[grpName];
+      const groupTotal = reps.reduce((a,r)=>a+Number(r.amount||0),0);
+      return `
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head">
+          <h3>${grpName} <span class="badge b-yellow" style="margin-left:6px">${reps.length} pending</span></h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:13px;color:var(--text-muted)">Total: <b>${KES(groupTotal)}</b></span>
+            <button class="btn btn-sm btn-primary" onclick="approveGroupRepayments('${grpName}')">✓ Approve group</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto"><table class="tbl">
+          <thead><tr>
+            <th>Member</th><th>Asset / Loan</th><th>Date</th>
+            <th class="num">Amount</th><th>Recorded by</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${reps.map(r => {
+              const mem = state.data.members.find(m=>m.id===r.member_id);
+              const loan = state.data.loans.find(l=>l.id===r.loan_id);
+              const rec  = state.data.staff.find(s=>s.id===r.recorded_by);
+              return `<tr>
+                <td><b>${mem?.full_name||'—'}</b></td>
+                <td style="font-size:12px;color:var(--text-muted)">${loan?.asset_name||'—'}</td>
+                <td>${fmtDate(r.meeting_date)}</td>
+                <td class="num"><b>${KES(r.amount)}</b></td>
+                <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
+                <td>
+                  <button class="btn btn-sm btn-primary" onclick="approveOneRepayment('${r.id}',this)">✓</button>
+                  <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectOneRepayment('${r.id}',this)">✕</button>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+    }).join('')}
+  `;
+}
+
+async function approveOneRepayment(id, btn){
+  const r = state.data.repayments.find(x=>x.id===id);
+  if(!r || r.status==='approved') return;
+  if(btn){ btn.disabled=true; btn.textContent='…'; }
+  if(!(await ensureFreshToken())) return;
+  const { error } = await sb.from('pb_repayments').update({ status:'approved' }).eq('id', id);
+  if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
+  r.status = 'approved';
+  render();
+  toast('Repayment approved.','success');
+}
+
+async function rejectOneRepayment(id, btn){
+  const r = state.data.repayments.find(x=>x.id===id);
+  if(!r) return;
+  confirmDialog('Reject this repayment? It will be marked as rejected and will not count toward the loan balance.', async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_repayments').update({ status:'rejected' }).eq('id', id);
+    if(error) return toast(error.message,'error');
+    r.status = 'rejected';
+    render();
+    toast('Repayment rejected.','warn');
+  },{ title:'Reject Repayment', danger:true });
+}
+
+async function approveGroupRepayments(groupName){
+  if(!(await ensureFreshToken())) return;
+  const ids = state.data.repayments
+    .filter(r => r.status==='pending' && isClientRepayment(r) && (state.data.groups.find(g=>g.id===r.group_id)?.name||'— No group')===groupName)
+    .map(r=>r.id);
+  if(!ids.length) return toast('No pending repayments for this group.','warn');
+  const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
+  if(error) return toast(error.message,'error');
+  state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+  render();
+  toast(`${ids.length} repayment(s) for ${groupName} approved.`,'success');
+}
+
+async function approveAllRepayments(){
+  confirmDialog(`Approve ALL ${state.data.repayments.filter(r=>r.status==='pending'&&isClientRepayment(r)).length} pending repayments at once?`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const ids = state.data.repayments
+      .filter(r=>r.status==='pending' && isClientRepayment(r))
+      .map(r=>r.id);
+    const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+    render();
+    toast(`${ids.length} repayment(s) approved.`,'success');
+  },{ title:'Approve All Repayments' });
 }
 
 function pageRepayments(){
