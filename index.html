@@ -565,6 +565,7 @@ const PAGE_ACCESS = {
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   repayment_approvals: ['branch_manager','ceo','admin','supervisor'],
+  savings_approvals:   ['branch_manager','ceo','admin','supervisor'],
   loans:          ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   arrears:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   calculator:     'ALL',
@@ -999,6 +1000,7 @@ function navItems(){
   const isLegacyAdmin = state.staff.role === 'admin';
   // Branch manager can access meeting recorder (oversight role)
   const canSeeMeeting = isLegacyAdmin || r === 'branch_manager' || p.can_record_savings || p.can_record_repayments;
+  const pendSavApprovals = state.data.savings.filter(s=>s.status==='pending').length;
   const pendRepApprovals = state.data.repayments.filter(r=>r.status==='pending'&&isClientRepayment(r)).length;
   const pendApprovals = pendingApprovalsCount();
   const items = [
@@ -1010,6 +1012,7 @@ function navItems(){
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
     { k:'repayments',          label:'Repayments',          icon:repaymentsIcon() },
     { k:'repayment_approvals', label:`Repayment Approvals${pendRepApprovals?` <span class="badge b-red" style="margin-left:6px">${pendRepApprovals}</span>`:''}`, icon:repaymentsIcon() },
+    { k:'savings_approvals',   label:`Savings Approvals${pendSavApprovals?` <span class="badge b-red" style="margin-left:6px">${pendSavApprovals}</span>`:''}`,   icon:savingsIcon() },
     { k:'loans',          label:'Active Loans',     icon:loanIcon() },
     { k:'arrears',        label:'Due & Arrears',    icon: ic('<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>') },
     { k:'calculator',     label:'Loan Calculator',  icon:calcIcon() },
@@ -1106,7 +1109,7 @@ function renderShell(){
 function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
-    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals',
+    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
@@ -1132,7 +1135,7 @@ function toggleSidebar(force){
 function renderPage(){
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals,
+    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -6995,6 +6998,129 @@ function repDateRange(){
     return { start: _repCustomStart||today, end: _repCustomEnd||today };
   }
   return { start: today, end: today };
+}
+
+function pageSavingsApprovals(){
+  const pending = state.data.savings.filter(s => s.status === 'pending');
+
+  const byGroup = {};
+  pending.forEach(s => {
+    const grp = state.data.groups.find(g=>g.id===s.group_id);
+    const key = grp?.name || '— No group';
+    if(!byGroup[key]) byGroup[key] = [];
+    byGroup[key].push(s);
+  });
+
+  const groupKeys = Object.keys(byGroup).sort();
+
+  $('page').innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Savings Approvals</h1>
+        <div class="desc">${pending.length} savings entr${pending.length!==1?'ies':'y'} pending approval · Grouped by group</div>
+      </div>
+      <div class="actions">
+        ${pending.length > 0 ? `<button class="btn btn-primary" onclick="approveAllSavings()">✓ Approve All (${pending.length})</button>` : ''}
+      </div>
+    </div>
+
+    ${pending.length === 0 ? `
+      <div class="card" style="padding:32px;text-align:center">
+        <div style="font-size:32px;margin-bottom:12px">✅</div>
+        <h3>All savings entries are approved</h3>
+        <p class="muted">No pending savings at this time.</p>
+      </div>` :
+
+    groupKeys.map(grpName => {
+      const entries = byGroup[grpName];
+      const groupTotal = entries.reduce((a,s)=>a+Number(s.amount||0),0);
+      return `
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head">
+          <h3>${grpName} <span class="badge b-yellow" style="margin-left:6px">${entries.length} pending</span></h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:13px;color:var(--text-muted)">Total: <b>${KES(groupTotal)}</b></span>
+            <button class="btn btn-sm btn-primary" onclick="approveGroupSavings('${grpName.replace(/'/g,"\\'")}')">✓ Approve group</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto"><table class="tbl">
+          <thead><tr>
+            <th>Member</th><th>Date</th>
+            <th class="num">Amount</th><th>Notes</th><th>Recorded by</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${entries.map(s => {
+              const mem = state.data.members.find(m=>m.id===s.member_id);
+              const rec = state.data.staff.find(st=>st.id===s.recorded_by);
+              return `<tr>
+                <td><b>${mem?.full_name||'—'}</b></td>
+                <td>${fmtDate(s.meeting_date)}</td>
+                <td class="num"><b>${KES(s.amount)}</b></td>
+                <td style="font-size:12px;color:var(--text-muted)">${s.notes||'—'}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
+                <td>
+                  <button class="btn btn-sm btn-primary" onclick="approveOneSaving('${s.id}',this)">✓</button>
+                  <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectOneSaving('${s.id}',this)">✕</button>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+    }).join('')}
+  `;
+}
+
+async function approveOneSaving(id, btn){
+  const s = state.data.savings.find(x=>x.id===id);
+  if(!s || s.status==='approved') return;
+  if(btn){ btn.disabled=true; btn.textContent='…'; }
+  if(!(await ensureFreshToken())) return;
+  const { error } = await sb.from('pb_savings').update({ status:'approved' }).eq('id', id);
+  if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
+  s.status = 'approved';
+  render();
+  toast('Savings entry approved.','success');
+}
+
+async function rejectOneSaving(id, btn){
+  const s = state.data.savings.find(x=>x.id===id);
+  if(!s) return;
+  confirmDialog('Reject this savings entry? It will not count toward the member\'s savings total.', async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_savings').update({ status:'rejected' }).eq('id', id);
+    if(error) return toast(error.message,'error');
+    s.status = 'rejected';
+    render();
+    toast('Savings entry rejected.','warn');
+  },{ title:'Reject Savings Entry', danger:true });
+}
+
+async function approveGroupSavings(groupName){
+  if(!(await ensureFreshToken())) return;
+  const ids = state.data.savings
+    .filter(s => s.status==='pending' &&
+      (state.data.groups.find(g=>g.id===s.group_id)?.name||'— No group')===groupName)
+    .map(s=>s.id);
+  if(!ids.length) return toast('No pending savings for this group.','warn');
+  const { error } = await sb.from('pb_savings').update({ status:'approved' }).in('id', ids);
+  if(error) return toast(error.message,'error');
+  state.data.savings.filter(s=>ids.includes(s.id)).forEach(s=>s.status='approved');
+  render();
+  toast(`${ids.length} savings entr${ids.length!==1?'ies':'y'} for ${groupName} approved.`,'success');
+}
+
+async function approveAllSavings(){
+  const total = state.data.savings.filter(s=>s.status==='pending').length;
+  confirmDialog(`Approve ALL ${total} pending savings entries at once?`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const ids = state.data.savings.filter(s=>s.status==='pending').map(s=>s.id);
+    const { error } = await sb.from('pb_savings').update({ status:'approved' }).in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.savings.filter(s=>ids.includes(s.id)).forEach(s=>s.status='approved');
+    render();
+    toast(`${ids.length} savings entr${ids.length!==1?'ies':'y'} approved.`,'success');
+  },{ title:'Approve All Savings' });
 }
 
 function pageRepaymentApprovals(){
