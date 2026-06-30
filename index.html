@@ -1638,12 +1638,16 @@ function dashArrFilter(){
     for (let w = 1; w <= 1040; w++) {
       const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
       const ds = d.toISOString().slice(0,10);
-      if (ds > today) { nextDueDate = ds; break; }
+      // >= today so a payment due TODAY is captured, not skipped to next week
+      if (ds >= today) { nextDueDate = ds; break; }
     }
 
     let category = 'ontrack';
-    if (arrears > 0) category = 'arrears';
-    else if (nextDueDate === today) category = 'duetoday';
+    // Due Today takes priority so officers can act BEFORE it becomes arrears —
+    // even if there's a small earlier arrears balance, today's due payment
+    // still needs to be flagged separately for proactive collection.
+    if (nextDueDate === today) category = 'duetoday';
+    else if (arrears > 0) category = 'arrears';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
 
     return { l, arrears, nextDueDate, category };
@@ -3073,12 +3077,14 @@ function pageArrears(){
     for (let w = 1; w <= 1040; w++) {
       const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
       const ds = d.toISOString().slice(0,10);
-      if (ds > today) { nextDueDate = ds; break; }
+      // >= today so a payment due TODAY is captured, not skipped to next week
+      if (ds >= today) { nextDueDate = ds; break; }
     }
 
     let category = 'ontrack';
-    if (arrears > 0) category = 'arrears';
-    else if (nextDueDate === today) category = 'duetoday';
+    // Due Today takes priority so officers can collect BEFORE it becomes arrears
+    if (nextDueDate === today) category = 'duetoday';
+    else if (arrears > 0) category = 'arrears';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
 
     return { loan: l, member: mem, group: g, officer: off, paid, arrears, nextDueDate, expectedInstallment: weekly, category };
@@ -3100,6 +3106,12 @@ function pageArrears(){
   $('page').innerHTML = `
     <div class="page-head">
       <div><h1>Due & Arrears</h1><div class="desc">Track missed payments and upcoming collections.</div></div>
+      ${report.filter(r=>r.category==='duetoday').length > 0 ? `
+      <div class="actions">
+        <button class="btn btn-primary" onclick="state._arrearsTab='duetoday';pageArrears()" style="background:var(--warning);border-color:var(--warning)">
+          🔔 ${report.filter(r=>r.category==='duetoday').length} Due Today — Collect Now
+        </button>
+      </div>` : ''}
     </div>
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
@@ -3127,7 +3139,8 @@ function pageArrears(){
             <option value="">All Officers</option>
             ${officersWithLoans.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
           </select>` : ''}
-        <button class="btn btn-sm btn-outline" onclick="exportArrearsCollectionSheet()" title="Download Arrears Collection Sheet as Excel">📋 Arrears Collection Sheet</button>
+        <button class="btn btn-sm btn-outline" onclick="state._arrearsTab='duetoday';exportArrearsCollectionSheet()" title="Download today's due collections only">🔔 Today's Collection Sheet</button>
+        <button class="btn btn-sm btn-outline" onclick="exportArrearsCollectionSheet()" title="Download current tab as Excel">📋 Export Current View</button>
       </div>
     </div>
 
@@ -3183,11 +3196,13 @@ function exportArrearsCollectionSheet(){
     for (let w = 1; w <= 1040; w++) {
       const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
       const ds = d.toISOString().slice(0,10);
-      if (ds > today) { nextDueDate = ds; break; }
+      // >= today so a payment due TODAY is captured, not skipped to next week
+      if (ds >= today) { nextDueDate = ds; break; }
     }
     let category = 'ontrack';
-    if (arrears > 0) category = 'arrears';
-    else if (nextDueDate === today) category = 'duetoday';
+    // Due Today takes priority so officers can collect BEFORE it becomes arrears
+    if (nextDueDate === today) category = 'duetoday';
+    else if (arrears > 0) category = 'arrears';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
     return { loan: l, member: mem, group: g, officer: off, paid, arrears, nextDueDate, expectedInstallment: weekly, category };
   });
