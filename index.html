@@ -448,6 +448,14 @@ setInterval(async ()=>{
   }
 }, KEEPALIVE_MS);
 
+setInterval(async ()=>{
+  if(state.session && state.staff?.role === 'admin'){
+    const wasLocked = !!state.billing?.locked;
+    await loadBillingStatus({ silent:true });
+    if(wasLocked !== !!state.billing?.locked || shouldShowBillingReminder()) render();
+  }
+}, 60000);
+
 /* =====================================================================
  * STATE
  * ===================================================================== */
@@ -462,6 +470,7 @@ const state = {
     loans: [], orders: [], savings: [], repayments: [], meetings: [],
     suppliers: [], purchases: [], purchaseLines: [], reconciliations: [], expenses: [], audit: []
   },
+  billing: { status:'unknown', paid:false, cycleMonth:null, checkedAt:null, locked:false, reminder:false, pending:false },
   loading: true
 };
 
@@ -691,6 +700,11 @@ async function ensureFreshToken(){
 
 async function afterLogin(offline){
   await loadSettings();
+  await loadBillingStatus({ silent:true });
+  if(isSubscriptionLocked()){
+    render();
+    return;
+  }
   if(!offline) await smartLoadAll();
   await audit('login', 'auth', state.staff.id);
   flushQueue();
@@ -843,9 +857,119 @@ function groupSavingsTotal(groupId){
  * ===================================================================== */
 const $ = id => document.getElementById(id);
 
+/* =====================================================================
+ * MONTHLY ADMIN BILLING LOCK
+ * ===================================================================== */
+function billingTodayParts(){
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone:'Africa/Nairobi', year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(new Date());
+  const pick = t => parts.find(p=>p.type===t)?.value;
+  return { year: pick('year'), month: pick('month'), day: Number(pick('day')||1) };
+}
+function billingMonthISO(){ const d = billingTodayParts(); return `${d.year}-${d.month}-01`; }
+function isAdminBillingUser(){ return !!state.staff && state.staff.role === 'admin'; }
+function isSubscriptionLocked(){ return isAdminBillingUser() && !!state.billing?.locked; }
+function shouldShowBillingReminder(){ return isAdminBillingUser() && !!state.billing?.reminder; }
+function billingReminderMinimized(){ return sessionStorage.getItem('wp_billing_reminder_minimized') === state.billing?.cycleMonth; }
+function minimizeBillingReminder(){ sessionStorage.setItem('wp_billing_reminder_minimized', state.billing?.cycleMonth || billingMonthISO()); render(); }
+function showBillingReminder(){ sessionStorage.removeItem('wp_billing_reminder_minimized'); render(); }
+async function loadBillingStatus({ silent=false } = {}){
+  if(!isAdminBillingUser()){
+    state.billing = { status:'not_applicable', paid:true, cycleMonth:billingMonthISO(), checkedAt:new Date().toISOString(), locked:false, reminder:false, pending:false };
+    return state.billing;
+  }
+  const cycleMonth = billingMonthISO();
+  const day = billingTodayParts().day;
+  const cached = lsGet('billing_status', null);
+  if(!navigator.onLine){
+    const cachedPaid = cached && cached.cycleMonth === cycleMonth && cached.paid;
+    state.billing = { status: cachedPaid ? 'paid' : 'offline_unverified', paid: !!cachedPaid, cycleMonth, checkedAt:new Date().toISOString(), locked: !cachedPaid && day >= 3, reminder: !cachedPaid && day < 3, pending:false };
+    return state.billing;
+  }
+  const { data, error } = await sb.from('pb_billing_cycles').select('status,paid_at,paid_until,receipt_number,phone').eq('business_id', state.staff.business_id).eq('billing_month', cycleMonth).maybeSingle();
+  if(error){
+    if(!silent) toast('Could not check subscription payment status. Please try again.', 'error');
+    const cachedPaid = cached && cached.cycleMonth === cycleMonth && cached.paid;
+    state.billing = { status: cachedPaid ? 'paid' : 'unknown', paid: !!cachedPaid, cycleMonth, checkedAt:new Date().toISOString(), locked: !cachedPaid && day >= 3, reminder: !cachedPaid && day < 3, pending:false };
+    return state.billing;
+  }
+  const paid = data?.status === 'paid';
+  const pending = data?.status === 'pending';
+  state.billing = { status: data?.status || 'unpaid', paid, cycleMonth, checkedAt:new Date().toISOString(), locked: !paid && day >= 3, reminder: !paid && day < 3, pending, receiptNumber: data?.receipt_number || null, paidUntil: data?.paid_until || null, phone: data?.phone || null };
+  lsSet('billing_status', state.billing);
+  return state.billing;
+}
+function billingDueDateLabel(){ const d = billingTodayParts(); return new Date(`${d.year}-${d.month}-03T00:00:00+03:00`).toLocaleDateString('en-KE', { day:'2-digit', month:'short', year:'numeric' }); }
+function billingMessage(){
+  if(state.billing?.pending) return 'Payment prompt was sent. Complete it on the phone, then click Check payment.';
+  if(state.billing?.locked) return 'Admin access is locked because this month subscription is unpaid.';
+  return `Subscription payment is due. Please pay before ${billingDueDateLabel()} to avoid admin lock.`;
+}
+function renderBillingPaymentForm({ locked=false } = {}){
+  return `<form id="billing-pay-form" style="margin-top:14px">
+    <div class="field" style="margin-bottom:10px"><label>Phone number for payment prompt</label><input id="billing-phone" name="phone" placeholder="07XXXXXXXX" autocomplete="tel" required /><div class="helper">The admin enters the Safaricom number to receive the payment prompt.</div></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" type="submit">${locked?'Pay KES 3,000 to reopen':'Pay KES 3,000'}</button><button class="btn btn-outline" type="button" onclick="refreshBillingStatus()">Check payment</button><button class="btn btn-ghost" type="button" onclick="signOut()">Sign out</button></div>
+  </form>`;
+}
+function attachBillingPaymentForm(){
+  const form = $('billing-pay-form');
+  if(!form) return;
+  form.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const phone = $('billing-phone').value.trim();
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Sending prompt';
+    const { data, error } = await sb.functions.invoke('start-billing-payment', { body:{ phone } });
+    if(error || !data?.ok){
+      toast(data?.error || error?.message || 'Payment prompt failed.', 'error');
+      btn.disabled = false; btn.innerHTML = state.billing?.locked ? 'Pay KES 3,000 to reopen' : 'Pay KES 3,000';
+      return;
+    }
+    toast(data.message || 'Payment prompt sent. Complete it on the phone.', 'success');
+    await loadBillingStatus({ silent:true });
+    render();
+  });
+}
+async function refreshBillingStatus(){
+  await loadBillingStatus();
+  if(state.billing.paid) toast('Payment confirmed. Admin access is open.', 'success');
+  else if(state.billing.pending) toast('Payment is still pending. Complete the phone prompt, then check again.', 'info');
+  else toast('Payment has not been confirmed yet.', state.billing.locked ? 'warn' : 'info');
+  render();
+}
+function renderBillingReminder(){
+  if(!shouldShowBillingReminder()) return '';
+  if(billingReminderMinimized()){
+    return `<button onclick="showBillingReminder()" style="position:fixed;right:18px;bottom:18px;z-index:80;border:none;border-radius:999px;background:var(--warning);color:#fff;font-weight:800;padding:11px 16px;box-shadow:var(--shadow-lg);cursor:pointer">Subscription due - KES 3,000</button>`;
+  }
+  return `<div style="position:fixed;inset:0;z-index:75;background:rgba(15,23,42,.45);backdrop-filter:blur(2px);display:grid;place-items:center;padding:20px">
+    <div class="card card-pad" style="width:100%;max-width:560px;border-top:4px solid var(--warning);box-shadow:var(--shadow-lg)">
+      <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start">
+        <div><h2 style="margin:0 0 6px;font-size:20px">Subscription payment reminder</h2><div class="muted" style="font-size:13px;line-height:1.5">${billingMessage()}</div></div>
+        <div style="font-weight:800;color:var(--danger);white-space:nowrap">KES 3,000</div>
+      </div>
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin:14px 0 0">
+        <div style="display:flex;justify-content:space-between;padding:5px 0"><span class="muted">Lock date</span><strong>${billingDueDateLabel()}</strong></div>
+        <div style="display:flex;justify-content:space-between;padding:5px 0"><span class="muted">Paybill</span><strong>4024241</strong></div>
+        <div style="display:flex;justify-content:space-between;padding:5px 0"><span class="muted">Reference</span><strong>RUDDERDATA</strong></div>
+      </div>
+      ${renderBillingPaymentForm({ locked:false })}
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-outline" onclick="minimizeBillingReminder()">Minimize reminder</button></div>
+    </div>
+  </div>`;
+}
+function renderSubscriptionLock(){
+  const app = $('app');
+  app.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:var(--bg);padding:24px"><div class="card card-pad" style="width:100%;max-width:520px;border-top:4px solid var(--danger)"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="width:38px;height:38px;border-radius:8px;background:var(--danger-50);color:var(--danger);display:grid;place-items:center;font-weight:800">!</div><div><h2 style="margin:0;font-size:20px">Admin access locked</h2><div class="muted" style="font-size:12px">Wamama Pamoja Enterprise</div></div></div><p class="muted" style="line-height:1.6;margin-top:0">${billingMessage()}</p><div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:14px 0"><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Amount due</span><strong>KES 3,000</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Paybill</span><strong>4024241</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Reference</span><strong>RUDDERDATA</strong></div></div>${renderBillingPaymentForm({ locked:true })}</div></div>`;
+  attachBillingPaymentForm();
+}
 function render(){
   if(!state.session){ renderAuth(); return; }
+  if(isSubscriptionLocked()){ renderSubscriptionLock(); return; }
   renderShell();
+  if(shouldShowBillingReminder()){
+    const app = $('app');
+    if(app){ app.insertAdjacentHTML('beforeend', renderBillingReminder()); attachBillingPaymentForm(); }
+  }
 }
 
 /* =====================================================================
@@ -1123,7 +1247,7 @@ function go(view, ctx=null){
     toast('You do not have access to that section.','error');
     return;
   }
-  state.view = view; state.viewCtx = ctx; toggleSidebar(false); renderShell();
+  state.view = view; state.viewCtx = ctx; toggleSidebar(false); render();
 }
 function toggleSidebar(force){
   const s = $('sidebar'), sc = $('scrim');
@@ -7822,6 +7946,8 @@ function exportAccountingReport(){
     const ok = await loadStaff();
     if(!ok){ await sb.auth.signOut(); state.session=null; render(); return; }
     await loadSettings();
+    await loadBillingStatus({ silent:true });
+    if(isSubscriptionLocked()){ render(); return; }
     await smartLoadAll();
     setupRealtime();
     flushQueue();
