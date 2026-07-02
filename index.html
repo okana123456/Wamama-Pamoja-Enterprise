@@ -824,6 +824,44 @@ function memberSavings(memberId){
 function memberLoan(memberId){
   return state.data.loans.find(l=>l.member_id===memberId && l.status==='active');
 }
+function cleanMemberText(v){
+  return String(v||'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+function canManageMemberDuplicates(){
+  const r = state.staff?.app_role || state.staff?.role || '';
+  return state.staff?.role === 'admin' || ['ceo','admin','branch_manager'].includes(r) || can('approve_group');
+}
+function memberDuplicateMatches(member){
+  if(!member) return [];
+  const id = cleanMemberText(member.national_id);
+  const phone = normalisePhone(member.phone||'');
+  const name = cleanMemberText(member.full_name);
+  return state.data.members.filter(other => {
+    if(other.id === member.id) return false;
+    const sameId = id && cleanMemberText(other.national_id) === id;
+    const samePhone = phone && phone.length >= 9 && normalisePhone(other.phone||'') === phone;
+    const sameNameInGroup = name && cleanMemberText(other.full_name) === name && other.group_id === member.group_id;
+    return sameId || samePhone || sameNameInGroup;
+  });
+}
+function isDuplicateMember(member){
+  return memberDuplicateMatches(member).length > 0;
+}
+function memberLinkedCounts(memberId){
+  return {
+    savings: state.data.savings.filter(s=>s.member_id===memberId).length,
+    repayments: state.data.repayments.filter(r=>r.member_id===memberId).length,
+    loans: state.data.loans.filter(l=>l.member_id===memberId).length,
+    orders: state.data.orders.filter(o=>o.member_id===memberId).length,
+    guarantors: state.data.guarantors.filter(g=>g.member_id===memberId).length
+  };
+}
+function isSafeEmptyDuplicateMember(member){
+  if(!member || member.status !== 'inactive' || !isDuplicateMember(member)) return false;
+  const c = memberLinkedCounts(member.id);
+  const financialLinks = c.savings + c.repayments + c.loans + c.orders;
+  return financialLinks === 0 && memberSavings(member.id) === 0;
+}
 function loanPaid(loanId){
   return state.data.repayments.filter(r=>r.loan_id===loanId && r.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
 }
@@ -2247,6 +2285,9 @@ function pageMembers(){
   if(filterStatus !== 'all') list = list.filter(m=>m.status===filterStatus);
   const q = (state._memberSearch||'').toLowerCase();
   if(q) list = list.filter(m => (m.full_name||'').toLowerCase().includes(q) || (m.national_id||'').includes(q) || (m.phone||'').includes(q));
+  const duplicateCount = list.filter(isDuplicateMember).length;
+  const removableDuplicateCount = list.filter(isSafeEmptyDuplicateMember).length;
+  if(state._memberDuplicatesOnly) list = list.filter(isDuplicateMember);
 
   const pendingCount = state.data.members.filter(m => m.status==='pending' &&
     ((isAdmin||canApprove) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
@@ -2282,6 +2323,8 @@ function pageMembers(){
         <option value="pending" ${filterStatus==='pending'?'selected':''}>Pending approval</option>
         <option value="inactive" ${filterStatus==='inactive'?'selected':''}>Inactive</option>
       </select>
+      <button class="btn ${state._memberDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="toggleMemberDuplicatesOnly()">Duplicates only${duplicateCount?` (${duplicateCount})`:''}</button>
+      ${canManageMemberDuplicates() && removableDuplicateCount ? `<button class="btn btn-outline" onclick="removeEmptyDuplicateMembers()">Remove empty duplicates (${removableDuplicateCount})</button>` : ''}
     </div>
     <div class="table-wrap">
       <table class="tbl">
@@ -2294,6 +2337,8 @@ function pageMembers(){
             const g  = state.data.groups.find(x=>x.id===m.group_id);
             const sv = memberSavings(m.id);
             const ln = memberLoan(m.id);
+            const isDup = isDuplicateMember(m);
+            const safeDup = isSafeEmptyDuplicateMember(m);
             const isPending  = m.status === 'pending';
             const isInactive = m.status === 'inactive';
             const statusBadge = isPending
@@ -2306,6 +2351,8 @@ function pageMembers(){
             return `<tr style="cursor:pointer;${isPending?'opacity:.85':''}" onclick="state._memberProfileTab='overview'; go('memberProfile', {memberId: '${m.id}'})">
               <td>
                 <b>${m.full_name}</b>
+                ${isDup ? `<span class="badge b-yellow" style="margin-left:6px">Duplicate</span>` : ''}
+                ${safeDup ? `<span class="badge b-grey" style="margin-left:4px">Empty</span>` : ''}
                 <div class="muted" style="font-size:11px">${m.phone||''}</div>
               </td>
               <td>${m.national_id||'—'}</td>
@@ -2333,9 +2380,11 @@ function pageMembers(){
 function memberActions(ev, id){
   const m = state.data.members.find(x=>x.id===id);
   const isAdmin = state.staff.role==='admin';
+  const canRemoveDuplicate = canManageMemberDuplicates() && isSafeEmptyDuplicateMember(m);
   showActMenu(ev, [
     { label:'View profile', onClick: ()=>{ go('memberProfile', { memberId: id }); } },
     { label:'Edit details', onClick: ()=>openMemberEdit(m) },
+    ...(canRemoveDuplicate ? [{ label:'Delete empty duplicate', danger:true, onClick: ()=>deleteEmptyDuplicateMember(id) }] : []),
     'sep',
     ...(isAdmin ? [{ label:'Deactivate member', danger:true, onClick: ()=>confirmDialog(`Deactivate "${m.full_name}"? They will no longer appear in active member lists.`, async()=>{
       const { error } = await sb.from('pb_members').update({ status:'inactive' }).eq('id',id);
@@ -2343,6 +2392,63 @@ function memberActions(ev, id){
       m.status='inactive'; audit('deactivate','pb_members',id); render(); toast('Member deactivated','success');
     }, { title:'Deactivate member', danger:true }) }] : [])
   ]);
+}
+function toggleMemberDuplicatesOnly(){
+  state._memberDuplicatesOnly = !state._memberDuplicatesOnly;
+  state._membersPage = 0;
+  pageMembers();
+}
+async function deleteDuplicateMemberRecords(ids){
+  if(!ids.length) return { ok:true, count:0 };
+  if(!(await ensureFreshToken())) return { ok:false, message:'Session expired. Please sign in again.' };
+
+  const safeIds = ids.filter(id => {
+    const member = state.data.members.find(m=>m.id===id);
+    return member && isSafeEmptyDuplicateMember(member);
+  });
+  if(safeIds.length !== ids.length){
+    return { ok:false, message:'Some selected records are no longer safe to remove. Refresh and try again.' };
+  }
+
+  const oldMembers = state.data.members.filter(m=>safeIds.includes(m.id));
+  const linkedGuarantors = state.data.guarantors.filter(g=>safeIds.includes(g.member_id));
+  if(linkedGuarantors.length){
+    const { error: guarantorError } = await sb.from('pb_guarantors').delete().in('member_id', safeIds);
+    if(guarantorError) return { ok:false, message:guarantorError.message };
+  }
+
+  const { error } = await sb.from('pb_members').delete().in('id', safeIds);
+  if(error) return { ok:false, message:error.message };
+
+  state.data.guarantors = state.data.guarantors.filter(g=>!safeIds.includes(g.member_id));
+  state.data.members = state.data.members.filter(m=>!safeIds.includes(m.id));
+  oldMembers.forEach(m => audit('delete_empty_duplicate_member','pb_members',m.id,m,null));
+  return { ok:true, count:safeIds.length };
+}
+async function deleteEmptyDuplicateMember(id){
+  const member = state.data.members.find(m=>m.id===id);
+  if(!member) return;
+  if(!canManageMemberDuplicates()) return toast('You do not have permission to remove duplicate clients.','error');
+  if(!isSafeEmptyDuplicateMember(member)){
+    return toast('This client cannot be removed automatically because it has savings, a loan, repayments, or is not an inactive duplicate.','error');
+  }
+  confirmDialog(`Delete the empty duplicate record for "${member.full_name}"? This only removes the inactive duplicate and its next-of-kin records. The real client account with savings or loans is kept.`, async()=>{
+    const result = await deleteDuplicateMemberRecords([id]);
+    if(!result.ok) return toast(result.message || 'Could not remove duplicate client.','error');
+    render();
+    toast('Empty duplicate client removed.','success');
+  }, { title:'Delete empty duplicate', danger:true });
+}
+async function removeEmptyDuplicateMembers(){
+  if(!canManageMemberDuplicates()) return toast('You do not have permission to remove duplicate clients.','error');
+  const ids = state.data.members.filter(isSafeEmptyDuplicateMember).map(m=>m.id);
+  if(!ids.length) return toast('No empty inactive duplicates found.','warn');
+  confirmDialog(`Remove ${ids.length} empty inactive duplicate client record${ids.length===1?'':'s'}? This will not remove any client with savings, repayments, loans, or order history.`, async()=>{
+    const result = await deleteDuplicateMemberRecords(ids);
+    if(!result.ok) return toast(result.message || 'Could not remove duplicate clients.','error');
+    render();
+    toast(`${result.count} empty duplicate client record${result.count===1?'':'s'} removed.`, 'success');
+  }, { title:'Remove empty duplicates', danger:true });
 }
 
 /* ----- Member registration wizard (4 steps) ----- */
