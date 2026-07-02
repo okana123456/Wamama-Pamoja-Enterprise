@@ -920,7 +920,14 @@ function attachBillingPaymentForm(){
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Sending prompt';
     const { data, error } = await sb.functions.invoke('start-billing-payment', { body:{ phone } });
     if(error || !data?.ok){
-      toast(data?.error || error?.message || 'Payment prompt failed.', 'error');
+      let msg = data?.error || error?.message || 'Payment prompt failed.';
+      if(error?.context){
+        try {
+          const body = await error.context.json();
+          msg = body?.error || body?.message || msg;
+        } catch {}
+      }
+      toast(msg, 'error');
       btn.disabled = false; btn.innerHTML = state.billing?.locked ? 'Pay KES 3,000 to reopen' : 'Pay KES 3,000';
       return;
     }
