@@ -563,6 +563,13 @@ function can(action){
   return allowed.includes('*') || allowed.includes(action);
 }
 
+function canCreateClientOrders(){
+  const r = state.staff?.app_role || state.staff?.role || 'officer';
+  return state.staff?.role === 'admin' ||
+    ['ceo','admin','branch_manager','inventory_officer','storekeeper'].includes(r) ||
+    !!state.perms?.can_submit_orders;
+}
+
 /* Phase B — page-level visibility map.
    Only 'ceo' and 'admin' implicitly see all pages.
    branch_manager has its own explicit allow-list below.              */
@@ -597,6 +604,7 @@ function canView(page){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
+  if((page === 'orders' || page === 'sold_items') && canCreateClientOrders()) return true;
   const acl = PAGE_ACCESS[page];
   if(acl === 'ALL') return true;
   if(!acl) return false;
@@ -4252,6 +4260,7 @@ function pageOrders(){
   const isAdmin = state.staff.role==='admin';
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canSeeAll = isAdmin || r==='ceo' || r==='branch_manager' || r==='inventory_officer' || r==='storekeeper';
+  const canCreate = canCreateClientOrders();
   const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
   const tab = state._orderTab || 'pending';
 
@@ -4262,7 +4271,7 @@ function pageOrders(){
     <div class="page-head">
       <div><h1>Orders</h1><div class="desc">Member asset orders awaiting approval and fulfilment.</div></div>
       <div class="actions">
-        ${(canSeeAll || state.perms?.can_submit_orders) ? `<button class="btn btn-primary" onclick="openOrderForm()">New order</button>`:''}
+        ${canCreate ? `<button class="btn btn-primary" onclick="openOrderForm()">New order</button>`:''}
       </div>
     </div>
     <div class="tabs">
@@ -4385,6 +4394,10 @@ function _updateOrderTotalSummary(){
 }
 
 function openOrderForm(){
+  if(!canCreateClientOrders()){
+    toast('You do not have permission to create client orders.', 'error');
+    return;
+  }
   _orderLines = [{ asset_id:'', asset_name:'', loan_price:0, stock:0, quantity:1 }];
   modal({
     title:'New member order',
@@ -5051,7 +5064,7 @@ async function editPerms(id){
   const flags = [
     ['can_record_savings','Record savings'],
     ['can_record_repayments','Record loan repayments'],
-    ['can_submit_orders','Submit member orders'],
+    ['can_submit_orders','Create client orders / sold items forms'],
     ['can_approve_orders','Approve / reject orders'],
     ['can_view_reports','View financial reports'],
     ['can_manage_inventory','Manage inventory'],
@@ -5598,6 +5611,7 @@ let _soldItems = []; // rows in the current form session
 function pageSoldItems(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canDelete = r === 'admin' || r === 'ceo' || r === 'branch_manager';
+  const canCreate = canCreateClientOrders();
   const isAdmin = state.staff.role === 'admin';
 
   /* --- History of past sold-item forms recorded as orders with source:'sold_items' --- */
@@ -5612,7 +5626,7 @@ function pageSoldItems(){
         <div class="desc">Record items issued to clients on credit. Interest: 2%/month · Charges: 12% of principal (all fees included).</div>
       </div>
       <div class="actions">
-        <button class="btn btn-primary" onclick="openSoldItemsForm()">📋 New Form</button>
+        ${canCreate ? `<button class="btn btn-primary" onclick="openSoldItemsForm()">New Form</button>` : ''}
       </div>
     </div>
 
@@ -5650,6 +5664,10 @@ function pageSoldItems(){
 }
 
 function openSoldItemsForm(){
+  if(!canCreateClientOrders()){
+    toast('You do not have permission to create sold-items client orders.', 'error');
+    return;
+  }
   _soldItems = Array.from({length:10}, (_,i) => ({ sr: i+1, client_name:'', phone:'', product:'', loan_amount:'', loan_term:'', loan_no:'' }));
 
   modal({
