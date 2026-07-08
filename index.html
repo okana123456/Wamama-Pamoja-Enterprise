@@ -311,8 +311,12 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
    Loan officers do NOT self-register — the admin creates them in Staff & Permissions. */
 const BUSINESS_REGISTRATION_KEY = 'BFADMIN2026';
 let BIZ_ID = 'pb_default';
-const SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000;
-const KEEPALIVE_MS = 30 * 60 * 1000;
+const SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000;
+const KEEPALIVE_MS = 15 * 60 * 1000;
+const CACHEABLE_DATA_KEYS = new Set([
+  'groups', 'members', 'staff', 'inventory', 'loans', 'orders',
+  'meetings', 'suppliers', 'purchases', 'purchaseLines', 'settings'
+]);
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -353,6 +357,15 @@ function lsSet(k, v){
   }
 }
 function lsDel(k){ localStorage.removeItem(sk(k)); }
+function cacheDataKey(key, value){
+  if(CACHEABLE_DATA_KEYS.has(key)) lsSet(key, value);
+}
+function readCachedDataKey(key){
+  return CACHEABLE_DATA_KEYS.has(key) ? lsGet(key, []) : [];
+}
+function clearLegacyHeavyCache(){
+  ['savings','repayments','guarantors','reconciliations','expenses','audit'].forEach(lsDel);
+}
 
 /* ----- Crypto / hash for offline auth ----- */
 async function sha256(s){
@@ -707,6 +720,7 @@ async function ensureFreshToken(){
 }
 
 async function afterLogin(offline){
+  clearLegacyHeavyCache();
   await loadSettings();
   await loadBillingStatus({ silent:true });
   if(isSubscriptionLocked()){
@@ -765,14 +779,14 @@ async function smartLoadAll(){
   results.forEach((r,i) => {
     if(!r.error){
       state.data[map[tables[i]]] = r.data || [];
-      lsSet(map[tables[i]], r.data || []);
+      cacheDataKey(map[tables[i]], r.data || []);
     } else {
       if(!jwtBroken && r.error.message && /jwt|unauthorized|401/i.test(r.error.message)){
         jwtBroken = true;
         toast('Authentication error loading data. Please sign in again.', 'error');
         sb.auth.signOut().then(()=>{ state.session=null; state.staff=null; state.perms=null; render(); });
       }
-      state.data[map[tables[i]]] = lsGet(map[tables[i]], []);
+      state.data[map[tables[i]]] = readCachedDataKey(map[tables[i]]);
     }
   });
   // Fix 1: Reconstruct purchase items from purchase lines after page reload
@@ -787,28 +801,49 @@ async function smartLoadAll(){
 
 /* ----- Realtime ----- */
 let rtChan = null;
+let realtimeRenderTimer = null;
+function scheduleRealtimeRender(){
+  if(realtimeRenderTimer) return;
+  realtimeRenderTimer = setTimeout(() => {
+    realtimeRenderTimer = null;
+    render();
+  }, 160);
+}
+function handleRealtimeChange(payload){
+  if(payload.table === 'pb_settings'){
+    state.settings = payload.new;
+    lsSet('settings', state.settings);
+    scheduleRealtimeRender();
+    return;
+  }
+  const tbl = payload.table;
+  const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_staff:'staff', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
+  const key = map[tbl]; if(!key) return;
+  const arr = state.data[key];
+  if(payload.eventType === 'INSERT'){ if(!arr.find(x=>x.id===payload.new.id)) arr.unshift(payload.new); }
+  else if(payload.eventType === 'UPDATE'){ const i = arr.findIndex(x=>x.id===payload.new.id); if(i>=0) arr[i] = payload.new; }
+  else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
+  cacheDataKey(key, arr);
+  if(['dashboard','members','groups','meeting','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
+}
 function setupRealtime(){
   if(rtChan) sb.removeChannel(rtChan);
-  rtChan = sb.channel('pb_changes')
-    .on('postgres_changes', { event:'*', schema:'public' }, payload => {
-      // Fix 2: Live-sync settings changes so all connected users see new rates immediately
-      if(payload.table === 'pb_settings'){
-        state.settings = payload.new;
-        lsSet('settings', state.settings);
-        render();
-        return;
-      }
-      const tbl = payload.table;
-      const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_staff:'staff', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
-      const key = map[tbl]; if(!key) return;
-      const arr = state.data[key];
-      if(payload.eventType === 'INSERT'){ if(!arr.find(x=>x.id===payload.new.id)) arr.unshift(payload.new); }
-      else if(payload.eventType === 'UPDATE'){ const i = arr.findIndex(x=>x.id===payload.new.id); if(i>=0) arr[i] = payload.new; }
-      else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
-      lsSet(key, arr);
-      if(['dashboard','members','groups','meeting','loans','inventory'].includes(state.view)) render();
-    })
-    .subscribe();
+  const businessId = state.staff?.business_id || '';
+  const businessFilter = businessId ? `business_id=eq.${businessId}` : null;
+  rtChan = sb.channel(`pb_changes_${businessId || 'default'}`);
+  if(businessId){
+    rtChan.on('postgres_changes', { event:'*', schema:'public', table:'pb_settings', filter:`id=eq.biz_${businessId}` }, handleRealtimeChange);
+  }
+  [
+    'pb_groups','pb_members','pb_guarantors','pb_inventory','pb_loans','pb_orders',
+    'pb_savings','pb_repayments','pb_meetings','pb_suppliers','pb_staff',
+    'pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'
+  ].forEach(table => {
+    const opts = { event:'*', schema:'public', table };
+    if(businessFilter) opts.filter = businessFilter;
+    rtChan.on('postgres_changes', opts, handleRealtimeChange);
+  });
+  rtChan.subscribe();
 }
 
 /* ----- Audit ----- */
