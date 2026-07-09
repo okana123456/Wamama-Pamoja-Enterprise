@@ -63,7 +63,7 @@ from affected a
 where not exists (
   select 1
   from public.pb_loan_6pct_fix_backup_20260709 b
-  where b.loan_id = a.loan_id
+  where b.loan_id = a.loan_id::text
 );
 
 with affected as (
