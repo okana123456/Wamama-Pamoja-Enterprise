@@ -4026,6 +4026,13 @@ function computeSchedule(principal, weekly, method, startDate){
     return { weeks: w, totalInterest, totalPayable, suggestedWeekly: totalPayable/Math.max(1,w), rows };
   }
 }
+const LOAN_SERVICE_CHARGE_RATE = 0.06;
+function loanServiceCharge(principal){
+  return Math.round((Number(principal)||0) * LOAN_SERVICE_CHARGE_RATE * 100) / 100;
+}
+function loanTotalWithServiceCharge(schedule, principal){
+  return Math.round(((Number(schedule?.totalPayable)||0) + loanServiceCharge(principal)) * 100) / 100;
+}
 
 /* =====================================================================
  * PAGE: INVENTORY
@@ -4652,6 +4659,7 @@ function approveOrder(o){
   const depositAmount = requiresDeposit ? Math.round(principal * 0.25) : 0;
 
   // === Optional 3% fees — approver decides based on item type ===
+  const serviceCharge = loanServiceCharge(principal);
   const applicationFee = Math.round(principal * 0.03 * 100) / 100;
   const insuranceFee   = Math.round(principal * 0.03 * 100) / 100;
 
@@ -4663,6 +4671,7 @@ function approveOrder(o){
       <table class="summary-table">
         ${assetSummaryRows}
         <tr><td>Total loan principal</td><td><b>${KES(principal)}</b></td></tr>
+        <tr><td>6% service charge included in repayments</td><td><b>${KES(serviceCharge)}</b></td></tr>
         <tr><td style="font-size:11px;color:var(--text-muted)">Member savings (5× limit: ${KES(maxAllowedLoan)})</td><td style="font-size:11px;color:var(--text-muted)">${KES(memberTotalSavings)}</td></tr>
       </table>
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin:12px 0;font-size:13px">
@@ -4718,11 +4727,13 @@ function approveOrder(o){
         const start = new Date($('sd').value);
         if(weekly <= 0) return toast('Weekly installment must be greater than zero.','error');
         const r = computeSchedule(principal, weekly, 'flat', start);
-        const effectiveWeeks = weeksInput > 0 ? weeksInput : r.weeks;
-        if(effectiveWeeks > 48 || r.weeks > 48){
+        const totalPayableWithCharge = loanTotalWithServiceCharge(r, principal);
+        const serviceChargeWeeks = weekly > 0 ? Math.ceil(totalPayableWithCharge / weekly) : r.weeks;
+        const effectiveWeeks = weeksInput > 0 ? weeksInput : serviceChargeWeeks;
+        if(effectiveWeeks > 48 || serviceChargeWeeks > 48){
           return toast('The maximum allowed loan term is 48 weeks. Please increase the weekly payment or reduce the weeks.','error');
         }
-        const end = new Date(start); end.setDate(end.getDate() + 7*r.weeks);
+        const end = new Date(start); end.setDate(end.getDate() + 7*serviceChargeWeeks);
         const primaryLine = resolvedLines[0];
         const memberGroup = state.data.groups.find(g => g.id === member.group_id);
         const resolvedOfficerId = memberGroup?.officer_id || o.recorded_by || null;
@@ -4731,7 +4742,7 @@ function approveOrder(o){
           member_id: member.id, group_id: member.group_id, officer_id: resolvedOfficerId,
           order_id: o.id, asset_id: primaryLine.asset.id, asset_name: o.asset_name,
           asset_quantity: resolvedLines.reduce((a,l)=>a+l.quantity,0),
-          loan_value: principal, weekly_installment: weekly, total_payable: r.totalPayable,
+          loan_value: principal, weekly_installment: weekly, total_payable: totalPayableWithCharge,
           start_date: $('sd').value, expected_end_date: end.toISOString().slice(0,10), status:'active'
         };
         const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loan).select().single();
@@ -4750,7 +4761,7 @@ function approveOrder(o){
         state.data.loans.unshift(loanData);
         audit('loan_issue','pb_loans',loanData.id,null,loan);
 
-        const interestRatio = r.totalPayable > 0 ? (r.totalPayable - principal) / r.totalPayable : 0;
+        const interestRatio = totalPayableWithCharge > 0 ? (totalPayableWithCharge - principal) / totalPayableWithCharge : 0;
 
         // 25% deposit for loans > KES 20,000
         if(requiresDeposit && depositAmount > 0){
@@ -4812,7 +4823,7 @@ function approveOrder(o){
       if(weeks > 0){
         const rate = state.settings?.monthly_interest_rate || 2.5;
         const weeklyRate = (rate / 100) / 4;
-        const totalPayable = principal * (1 + weeklyRate * weeks);
+        const totalPayable = (principal * (1 + weeklyRate * weeks)) + loanServiceCharge(principal);
         const wi = Math.ceil(totalPayable / weeks);
         $('wi').value = wi;
       }
@@ -4825,7 +4836,8 @@ function approveOrder(o){
       if(weekly > 0){
         const s = new Date($('sd').value||todayISO());
         const r = computeSchedule(principal, weekly, 'flat', s);
-        $('al-weeks').value = r.weeks;
+        const totalPayable = loanTotalWithServiceCharge(r, principal);
+        $('al-weeks').value = Math.ceil(totalPayable / weekly);
       }
       _updating = false;
       updSummary();
@@ -4835,8 +4847,11 @@ function approveOrder(o){
       if(!w){ $('al-out').innerHTML = ''; return; }
       const s = new Date($('sd').value||todayISO());
       const r = computeSchedule(principal, w, 'flat', s);
-      const over52 = r.weeks > 48;
-      $('al-out').innerHTML = `Total payable ${KES(r.totalPayable)} · Total interest ${KES(r.totalInterest)} · ${r.weeks} weeks${over52 ? ' <span class="danger-text">(exceeds 48-week limit)</span>' : ''}`;
+      const service = loanServiceCharge(principal);
+      const totalPayable = loanTotalWithServiceCharge(r, principal);
+      const weeks = Math.ceil(totalPayable / w);
+      const over52 = weeks > 48;
+      $('al-out').innerHTML = `Total payable ${KES(totalPayable)} incl. 6% charge ${KES(service)} - Total interest ${KES(r.totalInterest)} - ${weeks} weeks${over52 ? ' <span class="danger-text">(exceeds 48-week limit)</span>' : ''}`;
     };
     $('al-weeks').addEventListener('input', updFromWeeks);
     $('wi').addEventListener('input', updFromInstallment);
