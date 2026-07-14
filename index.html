@@ -1403,6 +1403,17 @@ function findDuplicatePendingLoanIds(rows){
     (l.start_date||l.created_at||'').slice(0,10)
   ]));
 }
+function findDuplicatePendingRepaymentIds(rows){
+  const pending = (rows||[]).filter(r=>r.status==='pending' && isClientRepayment(r));
+  return keepFirstDuplicateIds(pending, r=>duplicateKey([
+    r.member_id,
+    r.loan_id,
+    r.group_id,
+    Number(r.amount||0).toFixed(2),
+    (r.meeting_date||r.created_at||'').slice(0,10),
+    r.recorded_by || ''
+  ]));
+}
 async function rejectDuplicatePendingSavings(){
   const ids = findDuplicatePendingSavingIds(state.data.savings||[]);
   if(!ids.length) return toast('No duplicate pending savings found.','warn');
@@ -1433,6 +1444,19 @@ async function rejectDuplicatePendingLoans(){
     render();
     toast(`${ids.length} duplicate loan${ids.length!==1?'s':''} rejected.`, 'success');
   },{ title:'Reject duplicate loans', danger:true });
+}
+async function rejectDuplicatePendingRepayments(){
+  const ids = findDuplicatePendingRepaymentIds(state.data.repayments||[]);
+  if(!ids.length) return toast('No duplicate pending repayments found.','warn');
+  confirmDialog(`Reject ${ids.length} duplicate pending repayment${ids.length!==1?'s':''}? The first matching repayment will be kept.`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_repayments').update({ status:'rejected' }).in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='rejected');
+    audit('bulk_reject_duplicate_repayments','pb_repayments',null,null,{ count:ids.length, ids });
+    render();
+    toast(`${ids.length} duplicate repayment${ids.length!==1?'s':''} rejected.`, 'success');
+  },{ title:'Reject duplicate repayments', danger:true });
 }
 function pageApprovals(){
   const d = state.data || {};
@@ -7553,6 +7577,7 @@ function pageRepaymentApprovals(){
   const pending = state.data.repayments.filter(r =>
     r.status === 'pending' && isClientRepayment(r)
   );
+  const duplicateIds = findDuplicatePendingRepaymentIds(pending);
 
   // Group by group for easier review
   const byGroup = {};
@@ -7569,6 +7594,7 @@ function pageRepaymentApprovals(){
     <div class="page-head">
       <div>
         <h1>Repayment Approvals</h1>
+        ${duplicateIds.length > 0 ? `<div style="margin:8px 0 4px"><button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingRepayments()">Reject duplicate repayments (${duplicateIds.length})</button></div>` : ''}
         <div class="desc">${pending.length} repayment${pending.length!==1?'s':''} pending approval · Grouped by group for easy review</div>
       </div>
       <div class="actions">
@@ -7605,6 +7631,7 @@ function pageRepaymentApprovals(){
               const mem = state.data.members.find(m=>m.id===r.member_id);
               const loan = state.data.loans.find(l=>l.id===r.loan_id);
               const rec  = state.data.staff.find(s=>s.id===r.recorded_by);
+              const isDup = duplicateIds.includes(r.id);
               return `<tr>
                 <td><b>${mem?.full_name||'—'}</b></td>
                 <td style="font-size:12px;color:var(--text-muted)">${loan?.asset_name||'—'}</td>
