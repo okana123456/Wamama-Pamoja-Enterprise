@@ -1368,6 +1368,72 @@ function renderPage(){
 }
 
 /* Phase B — Approvals queue: groups, savings, repayments, orders, members awaiting sign-off. */
+function duplicateKey(parts){
+  return parts.map(v=>String(v||'').trim().toLowerCase()).join('|');
+}
+function keepFirstDuplicateIds(rows, keyFn){
+  const seen = new Map();
+  const dupIds = [];
+  rows.forEach(row=>{
+    const key = keyFn(row);
+    if(!key) return;
+    if(seen.has(key)) dupIds.push(row.id);
+    else seen.set(key, row.id);
+  });
+  return dupIds;
+}
+function findDuplicatePendingSavingIds(rows){
+  const pending = (rows||[]).filter(s=>s.status==='pending');
+  return keepFirstDuplicateIds(pending, s=>duplicateKey([
+    s.member_id,
+    s.group_id,
+    Number(s.amount||0).toFixed(2),
+    (s.meeting_date||s.created_at||'').slice(0,10),
+    s.recorded_by || ''
+  ]));
+}
+function findDuplicatePendingLoanIds(rows){
+  const pending = (rows||[]).filter(l=>l.status==='pending');
+  return keepFirstDuplicateIds(pending, l=>duplicateKey([
+    l.member_id,
+    l.group_id,
+    l.order_id || '',
+    l.asset_name || '',
+    Number(l.loan_value||0).toFixed(2),
+    (l.start_date||l.created_at||'').slice(0,10)
+  ]));
+}
+async function rejectDuplicatePendingSavings(){
+  const ids = findDuplicatePendingSavingIds(state.data.savings||[]);
+  if(!ids.length) return toast('No duplicate pending savings found.','warn');
+  confirmDialog(`Reject ${ids.length} duplicate pending savings entr${ids.length!==1?'ies':'y'}? The first matching entry will be kept.`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_savings').update({ status:'rejected' }).in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.savings.filter(s=>ids.includes(s.id)).forEach(s=>s.status='rejected');
+    audit('bulk_reject_duplicate_savings','pb_savings',null,null,{ count:ids.length, ids });
+    render();
+    toast(`${ids.length} duplicate savings entr${ids.length!==1?'ies':'y'} rejected.`, 'success');
+  },{ title:'Reject duplicate savings', danger:true });
+}
+async function rejectDuplicatePendingLoans(){
+  const soldPending = (state.data.loans||[]).filter(l => l.status === 'pending' &&
+    l.order_id && (state.data.orders||[]).find(o => o.id === l.order_id && (()=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } })())
+  );
+  const ids = findDuplicatePendingLoanIds(soldPending);
+  if(!ids.length) return toast('No duplicate pending loans found.','warn');
+  confirmDialog(`Reject ${ids.length} duplicate pending loan${ids.length!==1?'s':''}? The first matching loan will be kept.`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const { error } = await sb.from('pb_loans').update({ status:'cancelled' }).in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.loans.filter(l=>ids.includes(l.id)).forEach(l=>l.status='cancelled');
+    await sb.from('pb_repayments').update({ status:'cancelled' }).in('loan_id', ids).eq('status','pending');
+    state.data.repayments.filter(r=>ids.includes(r.loan_id) && r.status==='pending').forEach(r=>r.status='cancelled');
+    audit('bulk_reject_duplicate_loans','pb_loans',null,null,{ count:ids.length, ids });
+    render();
+    toast(`${ids.length} duplicate loan${ids.length!==1?'s':''} rejected.`, 'success');
+  },{ title:'Reject duplicate loans', danger:true });
+}
 function pageApprovals(){
   const d = state.data || {};
   const sections = [];
@@ -1396,9 +1462,11 @@ function pageApprovals(){
     const list = (d.loans||[]).filter(l => l.status === 'pending' &&
       l.order_id && (d.orders||[]).find(o => o.id === l.order_id && (()=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } })())
     );
+    const duplicateIds = findDuplicatePendingLoanIds(list);
     sections.push({title:'Sold Items Loans awaiting approval', count:list.length, rows: list.map(l=>{
       const mem = (d.members||[]).find(x=>x.id===l.member_id);
       const g   = (d.groups||[]).find(x=>x.id===l.group_id);
+      const isDup = duplicateIds.includes(l.id);
       return `<tr>
         <td><b>${mem?.full_name||l.asset_name||'—'}</b><div class="muted" style="font-size:11px">${l.asset_name}</div></td>
         <td>${g?.name||'—'}</td>
@@ -1410,7 +1478,8 @@ function pageApprovals(){
           <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectSoldItemsLoan('${l.id}')">Reject</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="6" class="muted" style="padding:16px;text-align:center">No pending sold items loans</td></tr>`,
-    head:'<th>Client / Asset</th><th>Group</th><th class="num">Principal</th><th class="num">Weekly</th><th>Start date</th><th></th>'});
+    head:'<th>Client / Asset</th><th>Group</th><th class="num">Principal</th><th class="num">Weekly</th><th>Start date</th><th></th>',
+    action: duplicateIds.length ? `<button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingLoans()">Reject duplicate loans (${duplicateIds.length})</button>` : ''});
   }
 
   if(can('approve_group')){
@@ -1426,11 +1495,14 @@ function pageApprovals(){
   }
   if(can('approve_savings')){
     const list = (d.savings||[]).filter(s=>s.status==='pending');
+    const duplicateIds = findDuplicatePendingSavingIds(list);
     sections.push({title:'Pending savings entries', count:list.length, rows: list.slice(0,50).map(s=>{
       const m = (d.members||[]).find(x=>x.id===s.member_id);
+      const isDup = duplicateIds.includes(s.id);
       return `<tr><td>${m?m.full_name:'—'}</td><td>${KES(s.amount||0)}</td><td>${(s.meeting_date||s.created_at||'').slice(0,10)}</td>
         <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="go('savings')">Review in Savings →</button></td></tr>`;
-    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending savings</td></tr>`, head:'<th>Member</th><th>Amount</th><th>Date</th><th></th>'});
+    }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending savings</td></tr>`, head:'<th>Member</th><th>Amount</th><th>Date</th><th></th>',
+    action: duplicateIds.length ? `<button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingSavings()">Reject duplicate savings (${duplicateIds.length})</button>` : ''});
   }
   if(can('approve_repayment')){
     const list = (d.repayments||[]).filter(r=>r.status==='pending');
@@ -1454,7 +1526,7 @@ function pageApprovals(){
     </div>
     ${sections.map(s=>`
       <div class="card" style="margin-bottom:16px">
-        <div class="card-head"><h3>${s.title} ${s.count?`<span class="badge b-yellow" style="margin-left:6px">${s.count}</span>`:''}</h3></div>
+        <div class="card-head"><h3>${s.title} ${s.count?`<span class="badge b-yellow" style="margin-left:6px">${s.count}</span>`:''}</h3>${s.action||''}</div>
         <div style="overflow-x:auto"><table class="tbl"><thead><tr>${s.head}</tr></thead><tbody>${s.rows}</tbody></table></div>
       </div>`).join('')}
     ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
@@ -7354,6 +7426,7 @@ function repDateRange(){
 
 function pageSavingsApprovals(){
   const pending = state.data.savings.filter(s => s.status === 'pending');
+  const duplicateIds = findDuplicatePendingSavingIds(pending);
 
   const byGroup = {};
   pending.forEach(s => {
@@ -7369,6 +7442,7 @@ function pageSavingsApprovals(){
     <div class="page-head">
       <div>
         <h1>Savings Approvals</h1>
+        ${duplicateIds.length > 0 ? `<div style="margin:8px 0 4px"><button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingSavings()">Reject duplicate savings (${duplicateIds.length})</button></div>` : ''}
         <div class="desc">${pending.length} savings entr${pending.length!==1?'ies':'y'} pending approval · Grouped by group</div>
       </div>
       <div class="actions">
