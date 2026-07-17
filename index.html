@@ -749,6 +749,23 @@ async function loadSettings(){
   lsSet('settings', state.settings);
 }
 
+async function fetchBusinessTableRows(table){
+  const pageSize = 1000;
+  const maxRows = 50000;
+  const rows = [];
+  for(let from = 0; from < maxRows; from += pageSize){
+    let query = sb.from(table).select('*').range(from, from + pageSize - 1);
+    if (state.staff && state.staff.business_id) {
+      query = query.eq('business_id', state.staff.business_id);
+    }
+    const { data, error } = await query;
+    if(error) return { data: rows, error };
+    rows.push(...(data || []));
+    if(!data || data.length < pageSize) break;
+  }
+  return { data: rows, error: null };
+}
+
 async function smartLoadAll(){
   // Refresh the token before bulk fetching to avoid 401s on expired sessions
   if(navigator.onLine){
@@ -768,13 +785,7 @@ async function smartLoadAll(){
   state.loading = true; render();
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
-  const results = await Promise.all(tables.map(t => {
-    let query = sb.from(t).select('*').limit(5000);
-    if (state.staff && state.staff.business_id) {
-      query = query.eq('business_id', state.staff.business_id);
-    }
-    return query;
-  }));
+  const results = await Promise.all(tables.map(t => fetchBusinessTableRows(t)));
   let jwtBroken = false;
   results.forEach((r,i) => {
     if(!r.error){
