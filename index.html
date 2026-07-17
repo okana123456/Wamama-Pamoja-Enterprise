@@ -7460,11 +7460,22 @@ function repDateRange(){
 }
 
 function pageSavingsApprovals(){
-  const pending = state.data.savings.filter(s => s.status === 'pending');
+  const pending = state.data.savings
+    .filter(s => s.status === 'pending')
+    .sort((a,b)=>String(b.created_at||b.meeting_date||'').localeCompare(String(a.created_at||a.meeting_date||'')));
   const duplicateIds = findDuplicatePendingSavingIds(pending);
+  const pageSize = Number(state._savingsApprovalPageSize || 50);
+  const page = Math.max(0, Number(state._savingsApprovalPage || 0));
+  const totalPages = Math.max(1, Math.ceil(pending.length / pageSize));
+  if(page >= totalPages){
+    state._savingsApprovalPage = totalPages - 1;
+    return pageSavingsApprovals();
+  }
+  const pageStart = page * pageSize;
+  const pageRows = pending.slice(pageStart, pageStart + pageSize);
 
   const byGroup = {};
-  pending.forEach(s => {
+  pageRows.forEach(s => {
     const grp = state.data.groups.find(g=>g.id===s.group_id);
     const key = grp?.name || '— No group';
     if(!byGroup[key]) byGroup[key] = [];
@@ -7481,6 +7492,10 @@ function pageSavingsApprovals(){
         <div class="desc">${pending.length} savings entr${pending.length!==1?'ies':'y'} pending approval · Grouped by group</div>
       </div>
       <div class="actions">
+        ${pending.length > 0 ? `
+          <select class="input" style="width:auto;min-width:110px" onchange="state._savingsApprovalPageSize=Number(this.value);state._savingsApprovalPage=0;pageSavingsApprovals()">
+            ${[50,100,200].map(n=>`<option value="${n}" ${pageSize===n?'selected':''}>${n} rows</option>`).join('')}
+          </select>` : ''}
         ${pending.length > 0 ? `<button class="btn btn-primary" onclick="approveAllSavings()">✓ Approve All (${pending.length})</button>` : ''}
       </div>
     </div>
@@ -7529,6 +7544,14 @@ function pageSavingsApprovals(){
         </table></div>
       </div>`;
     }).join('')}
+    ${pending.length > pageSize ? `
+      <div class="card" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <div class="muted">Showing ${pageStart + 1}-${Math.min(pageStart + pageRows.length, pending.length)} of ${pending.length} pending savings</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" ${page<=0?'disabled':''} onclick="state._savingsApprovalPage=${page-1};pageSavingsApprovals()">Previous</button>
+          <button class="btn btn-outline" ${page>=totalPages-1?'disabled':''} onclick="state._savingsApprovalPage=${page+1};pageSavingsApprovals()">Next</button>
+        </div>
+      </div>` : ''}
   `;
 }
 
@@ -7585,14 +7608,23 @@ async function approveAllSavings(){
 }
 
 function pageRepaymentApprovals(){
-  const pending = state.data.repayments.filter(r =>
-    r.status === 'pending' && isClientRepayment(r)
-  );
+  const pending = state.data.repayments
+    .filter(r => r.status === 'pending' && isClientRepayment(r))
+    .sort((a,b)=>String(b.created_at||b.meeting_date||'').localeCompare(String(a.created_at||a.meeting_date||'')));
   const duplicateIds = findDuplicatePendingRepaymentIds(pending);
+  const pageSize = Number(state._repaymentApprovalPageSize || 50);
+  const page = Math.max(0, Number(state._repaymentApprovalPage || 0));
+  const totalPages = Math.max(1, Math.ceil(pending.length / pageSize));
+  if(page >= totalPages){
+    state._repaymentApprovalPage = totalPages - 1;
+    return pageRepaymentApprovals();
+  }
+  const pageStart = page * pageSize;
+  const pageRows = pending.slice(pageStart, pageStart + pageSize);
 
   // Group by group for easier review
   const byGroup = {};
-  pending.forEach(r => {
+  pageRows.forEach(r => {
     const grp = state.data.groups.find(g=>g.id===r.group_id);
     const key = grp?.name || '— No group';
     if(!byGroup[key]) byGroup[key] = [];
@@ -7609,6 +7641,10 @@ function pageRepaymentApprovals(){
         <div class="desc">${pending.length} repayment${pending.length!==1?'s':''} pending approval · Grouped by group for easy review</div>
       </div>
       <div class="actions">
+        ${pending.length > 0 ? `
+          <select class="input" style="width:auto;min-width:110px" onchange="state._repaymentApprovalPageSize=Number(this.value);state._repaymentApprovalPage=0;pageRepaymentApprovals()">
+            ${[50,100,200].map(n=>`<option value="${n}" ${pageSize===n?'selected':''}>${n} rows</option>`).join('')}
+          </select>` : ''}
         ${pending.length > 0 ? `<button class="btn btn-primary" onclick="approveAllRepayments()">✓ Approve All (${pending.length})</button>` : ''}
       </div>
     </div>
@@ -7659,6 +7695,14 @@ function pageRepaymentApprovals(){
         </table></div>
       </div>`;
     }).join('')}
+    ${pending.length > pageSize ? `
+      <div class="card" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <div class="muted">Showing ${pageStart + 1}-${Math.min(pageStart + pageRows.length, pending.length)} of ${pending.length} pending repayments</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" ${page<=0?'disabled':''} onclick="state._repaymentApprovalPage=${page-1};pageRepaymentApprovals()">Previous</button>
+          <button class="btn btn-outline" ${page>=totalPages-1?'disabled':''} onclick="state._repaymentApprovalPage=${page+1};pageRepaymentApprovals()">Next</button>
+        </div>
+      </div>` : ''}
   `;
 }
 
