@@ -7247,6 +7247,7 @@ let _savingsCustomStart = '', _savingsCustomEnd = '';
 let _savingsGroupFilter = '';
 let _savingsOfficerFilter = '';
 let _savingsDuplicatesOnly = false;
+let _savingsSearch = '';
 let _selectedSavingsIds = new Set();
 
 function savingsDateRange(){
@@ -7348,6 +7349,12 @@ function pageSavings(){
     if(!inRange(s)) return false;
     if(_savingsGroupFilter && s.group_id !== _savingsGroupFilter) return false;
     if(_savingsOfficerFilter && s.recorded_by !== _savingsOfficerFilter) return false;
+    if(_savingsSearch){
+      const mem = state.data.members.find(x=>x.id===s.member_id);
+      const grp = state.data.groups.find(x=>x.id===s.group_id);
+      const hay = [mem?.full_name, mem?.national_id, mem?.phone, grp?.name].join(' ').toLowerCase();
+      if(!hay.includes(_savingsSearch.toLowerCase())) return false;
+    }
     return true;
   });
   const duplicateIds = savingsLedgerDuplicateIds(filtered);
@@ -7385,6 +7392,7 @@ function pageSavings(){
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+      <input value="${_savingsSearch}" placeholder="Search member name, ID, phone, or group..." style="min-width:260px;flex:1;font-size:13px" oninput="_savingsSearch=this.value;pageSavings()" />
       <select style="max-width:220px;font-size:13px" onchange="_savingsGroupFilter=this.value;pageSavings()">
         <option value="">All Groups</option>
         ${groups.map(g=>`<option value="${g.id}" ${_savingsGroupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
@@ -7393,7 +7401,7 @@ function pageSavings(){
         <option value="">All Officers</option>
         ${officers.map(o=>`<option value="${o.id}" ${_savingsOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
       </select>` : ''}
-      ${(_savingsGroupFilter||_savingsOfficerFilter)?`<button class="btn btn-sm btn-ghost" onclick="_savingsGroupFilter='';_savingsOfficerFilter='';pageSavings()">✕ Clear filters</button>`:''}
+      ${(_savingsGroupFilter||_savingsOfficerFilter||_savingsSearch)?`<button class="btn btn-sm btn-ghost" onclick="_savingsGroupFilter='';_savingsOfficerFilter='';_savingsSearch='';pageSavings()">Clear filters</button>`:''}
     </div>
 
     ${bulkAllowed ? `
@@ -7401,7 +7409,7 @@ function pageSavings(){
         <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
           <div>
             <b>Savings cleanup tools</b>
-            <div class="muted" style="font-size:12px;margin-top:3px">Review wrong or duplicate entries, select them, then delete selected records in one action.</div>
+            <div class="muted" style="font-size:12px;margin-top:3px">A duplicate means the same member, same group, same savings date, and same amount. Different dates are treated as valid separate savings.</div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn btn-sm ${_savingsDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="_savingsDuplicatesOnly=!_savingsDuplicatesOnly;pageSavings()">Duplicates only (${duplicateIds.size})</button>
@@ -7410,7 +7418,7 @@ function pageSavings(){
             <button class="btn btn-sm btn-danger" onclick="bulkDeleteSelectedSavings()">Delete selected (${_selectedSavingsIds.size})</button>
           </div>
         </div>
-        <div class="muted" style="font-size:12px;margin-top:8px">${selectedVisible} selected in the current filters. Duplicate check keeps the first matching member/date/amount/group entry and marks the extra copies.</div>
+        <div class="muted" style="font-size:12px;margin-top:8px">${selectedVisible} selected in the current filters. When selecting duplicates, the first matching record is left unselected and only the extra copies are selected for review.</div>
       </div>
     ` : ''}
 
@@ -7501,6 +7509,12 @@ function exportSavingsFiltered(){
     if(!inRange(s)) return false;
     if(_savingsGroupFilter && s.group_id !== _savingsGroupFilter) return false;
     if(_savingsOfficerFilter && s.recorded_by !== _savingsOfficerFilter) return false;
+    if(_savingsSearch){
+      const mem = state.data.members.find(x=>x.id===s.member_id);
+      const grp = state.data.groups.find(x=>x.id===s.group_id);
+      const hay = [mem?.full_name, mem?.national_id, mem?.phone, grp?.name].join(' ').toLowerCase();
+      if(!hay.includes(_savingsSearch.toLowerCase())) return false;
+    }
     return true;
   });
   if(!filtered.length){ toast('No savings to export for the current filters.','warn'); return; }
