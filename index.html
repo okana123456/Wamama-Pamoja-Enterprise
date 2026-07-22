@@ -2182,8 +2182,9 @@ function pageOfficerDashboard(){
           ${myLoans.map(l=>{
             const mem = state.data.members.find(x=>x.id===l.member_id);
             const outstanding = Math.max(0, Number(l.total_payable||0) - loanPaid(l.id));
+            const isDup = false;
             return `<tr>
-              <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
+              <td><b>${mem?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow">Duplicate</span>`:''}<div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
               <td>${l.asset_name}</td>
               <td class="num">${KES(l.loan_value)}</td>
               <td class="num" style="color:var(--danger);font-weight:700">${KES(outstanding)}</td>
@@ -7245,6 +7246,8 @@ let _savingsDateFilter = 'month';
 let _savingsCustomStart = '', _savingsCustomEnd = '';
 let _savingsGroupFilter = '';
 let _savingsOfficerFilter = '';
+let _savingsDuplicatesOnly = false;
+let _selectedSavingsIds = new Set();
 
 function savingsDateRange(){
   const now = new Date();
@@ -7269,6 +7272,65 @@ function savingsDateRange(){
   return { start: today, end: today };
 }
 
+function canBulkManageSavings(){
+  return state.staff?.role === 'admin' || can('approve_savings');
+}
+
+function savingsLedgerDuplicateIds(rows){
+  const seen = new Map();
+  const dupIds = new Set();
+  [...(rows||[])].sort((a,b)=>String(a.created_at||a.id).localeCompare(String(b.created_at||b.id))).forEach(s=>{
+    const key = duplicateKey([
+      s.member_id,
+      s.group_id,
+      (s.meeting_date||'').slice(0,10),
+      Number(s.amount||0).toFixed(2)
+    ]);
+    if(!key) return;
+    if(seen.has(key)) dupIds.add(s.id);
+    else seen.set(key, s.id);
+  });
+  return dupIds;
+}
+
+function toggleSavingsSelection(id, checked){
+  if(checked) _selectedSavingsIds.add(id);
+  else _selectedSavingsIds.delete(id);
+  pageSavings();
+}
+
+function toggleAllVisibleSavings(checked){
+  document.querySelectorAll('[data-savings-row-check]').forEach(cb=>{
+    if(checked) _selectedSavingsIds.add(cb.value);
+    else _selectedSavingsIds.delete(cb.value);
+  });
+  pageSavings();
+}
+
+function selectDuplicateSavings(){
+  const ids = [...document.querySelectorAll('[data-savings-duplicate="1"]')].map(cb=>cb.value);
+  ids.forEach(id=>_selectedSavingsIds.add(id));
+  pageSavings();
+  toast(`${ids.length} duplicate savings entr${ids.length===1?'y':'ies'} selected.`, ids.length?'success':'warn');
+}
+
+async function bulkDeleteSelectedSavings(){
+  if(!canBulkManageSavings()) return toast('You do not have permission to bulk delete savings entries.','error');
+  const ids = [..._selectedSavingsIds];
+  if(!ids.length) return toast('Select at least one savings entry first.','warn');
+  confirmDialog(`Delete ${ids.length} selected savings entr${ids.length===1?'y':'ies'}? This cannot be undone. Please confirm you have reviewed the selected records.`, async()=>{
+    if(!(await ensureFreshToken())) return;
+    const oldRows = state.data.savings.filter(s=>ids.includes(s.id));
+    const { error } = await sb.from('pb_savings').delete().in('id', ids);
+    if(error) return toast(error.message,'error');
+    state.data.savings = state.data.savings.filter(s=>!ids.includes(s.id));
+    _selectedSavingsIds.clear();
+    audit('bulk_delete_savings','pb_savings',null,oldRows,null);
+    pageSavings();
+    toast(`${ids.length} savings entr${ids.length===1?'y':'ies'} deleted.`, 'warn');
+  },{ title:'Bulk Delete Savings', danger:true });
+}
+
 function pageSavings(){
   const isAdmin = state.staff.role === 'admin';
   const myGroupIds = isAdmin ? null : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
@@ -7288,6 +7350,11 @@ function pageSavings(){
     if(_savingsOfficerFilter && s.recorded_by !== _savingsOfficerFilter) return false;
     return true;
   });
+  const duplicateIds = savingsLedgerDuplicateIds(filtered);
+  if(_savingsDuplicatesOnly) filtered = filtered.filter(s=>duplicateIds.has(s.id));
+  const visibleIds = filtered.map(s=>s.id);
+  const selectedVisible = visibleIds.filter(id=>_selectedSavingsIds.has(id)).length;
+  const bulkAllowed = canBulkManageSavings();
 
   const groups = isAdmin
     ? state.data.groups
@@ -7329,9 +7396,28 @@ function pageSavings(){
       ${(_savingsGroupFilter||_savingsOfficerFilter)?`<button class="btn btn-sm btn-ghost" onclick="_savingsGroupFilter='';_savingsOfficerFilter='';pageSavings()">✕ Clear filters</button>`:''}
     </div>
 
+    ${bulkAllowed ? `
+      <div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--warning)">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+          <div>
+            <b>Savings cleanup tools</b>
+            <div class="muted" style="font-size:12px;margin-top:3px">Review wrong or duplicate entries, select them, then delete selected records in one action.</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-sm ${_savingsDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="_savingsDuplicatesOnly=!_savingsDuplicatesOnly;pageSavings()">Duplicates only (${duplicateIds.size})</button>
+            <button class="btn btn-sm btn-outline" onclick="selectDuplicateSavings()">Select duplicates</button>
+            <button class="btn btn-sm btn-outline" onclick="_selectedSavingsIds.clear();pageSavings()">Clear selection</button>
+            <button class="btn btn-sm btn-danger" onclick="bulkDeleteSelectedSavings()">Delete selected (${_selectedSavingsIds.size})</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:8px">${selectedVisible} selected in the current filters. Duplicate check keeps the first matching member/date/amount/group entry and marks the extra copies.</div>
+      </div>
+    ` : ''}
+
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
+          ${bulkAllowed?`<th style="width:34px"><input type="checkbox" ${visibleIds.length&&selectedVisible===visibleIds.length?'checked':''} onchange="toggleAllVisibleSavings(this.checked)" title="Select all visible savings"></th>`:''}
           <th>Date</th><th>Member</th><th>Group</th><th class="num">Amount</th><th>Status</th><th>Recorded By</th><th></th>
         </tr></thead>
         <tbody>
@@ -7340,17 +7426,19 @@ function pageSavings(){
             const grp = state.data.groups.find(x=>x.id===s.group_id);
             const rec = state.data.staff.find(x=>x.id===s.recorded_by);
             const isPending = s.status === 'pending';
-            return `<tr${isPending ? ' style="background:var(--warning-50)"' : ''}>
+            const isDup = duplicateIds.has(s.id);
+            return `<tr${isPending ? ' style="background:var(--warning-50)"' : isDup ? ' style="background:rgba(245,158,11,.08)"' : ''}>
+              ${bulkAllowed?`<td onclick="event.stopPropagation()"><input type="checkbox" data-savings-row-check data-savings-duplicate="${isDup?'1':'0'}" value="${s.id}" ${_selectedSavingsIds.has(s.id)?'checked':''} onchange="toggleSavingsSelection('${s.id}',this.checked)"></td>`:''}
               <td>${fmtDate(s.meeting_date)}</td>
               <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td class="num"><b>${KES(s.amount)}</b>${s.edit_notes?`<div class="muted" style="font-size:10px" title="${s.edit_notes}">✏ edited</div>`:''}
               </td>
-              <td>${isPending ? '<span class="badge b-yellow">Pending Admin Approval</span>' : '<span class="badge b-green">Approved</span>'}</td>
+              <td>${isPending ? '<span class="badge b-yellow">Pending Admin Approval</span>' : '<span class="badge b-green">Approved</span>'}${isDup?` <span class="badge b-yellow">Duplicate</span>`:''}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="savingsRowActions(event,'${s.id}')">···</button></td>
             </tr>`;
-          }).join('') : `<tr><td colspan="7"><div class="empty"><h4>No savings found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
+          }).join('') : `<tr><td colspan="${bulkAllowed?8:7}"><div class="empty"><h4>No savings found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
