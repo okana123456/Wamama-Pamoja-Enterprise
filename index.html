@@ -3899,8 +3899,9 @@ function openLoanRestructure(l){
         </div>
       </div>
       <div class="field">
-        <label>Effective date</label>
-        <input type="date" id="lr-date" value="${todayISO()}" onchange="lrUpdatePreview()" />
+        <label>First repayment start date</label>
+        <input type="date" id="lr-date" value="${(l.start_date||todayISO()).slice(0,10)}" onchange="lrUpdatePreview()" />
+        <div class="muted" style="font-size:12px;margin-top:4px">Use this to correct a wrong repayment date. Example: if the loan was issued on 21 July, the first repayment start date can be 28 July.</div>
       </div>
       <div class="field">
         <label>Reason for restructure</label>
@@ -3917,7 +3918,7 @@ function openLoanRestructure(l){
         const effectDate = document.getElementById('lr-date').value;
         const reason     = (document.getElementById('lr-reason').value||'').trim();
 
-        if(!effectDate) return toast('Please set an effective date.','error');
+        if(!effectDate) return toast('Please set the first repayment start date.','error');
 
         let finalWeekly, finalWeeks;
         if(method === 'weekly'){
@@ -3940,13 +3941,14 @@ function openLoanRestructure(l){
         endDate.setDate(endDate.getDate() + 7 * finalWeeks);
 
         if(!(await ensureFreshToken())) return;
-        const upd = { weekly_installment: finalWeekly, expected_end_date: endDate.toISOString().slice(0,10) };
+        const before = { weekly: l.weekly_installment, start_date: l.start_date, end: l.expected_end_date };
+        const upd = { start_date: effectDate, weekly_installment: finalWeekly, expected_end_date: endDate.toISOString().slice(0,10) };
         const { error } = await sb.from('pb_loans').update(upd).eq('id', l.id);
         if(error) return toast('Failed: '+error.message,'error');
         Object.assign(l, upd);
         audit('loan_restructure','pb_loans',l.id,
-          { weekly: l.weekly_installment, end: l.expected_end_date },
-          { weekly: finalWeekly, weeks: finalWeeks, end: upd.expected_end_date, reason }
+          before,
+          { start_date: effectDate, weekly: finalWeekly, weeks: finalWeeks, end: upd.expected_end_date, reason }
         );
         closeModal(); render();
         toast(`Loan restructured — new weekly: ${KES(finalWeekly)} for ${finalWeeks} weeks, ending ${fmtDate(upd.expected_end_date)}.`,'success');
