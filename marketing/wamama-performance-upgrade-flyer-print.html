@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wamama Pamoja Enterprise - Performance Upgrade Review</title>
+  <style>
+    :root {
+      --green: #113d35;
+      --teal: #08776f;
+      --orange: #c45200;
+      --gold: #ffd36b;
+      --paper: #f8f6ef;
+      --ink: #082f2d;
+      --muted: #4d5d59;
+      --line: #d6e2dd;
+      --note: #fff4d6;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #e9eee9;
+      color: var(--ink);
+      font-family: "Segoe UI", Arial, sans-serif;
+      line-height: 1.42;
+    }
+
+    .page {
+      width: 210mm;
+      min-height: 297mm;
+      margin: 24px auto;
+      background: var(--paper);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+    }
+
+    header {
+      background: var(--green);
+      color: white;
+      padding: 28px 34px 24px;
+      border-bottom: 8px solid #e07000;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+
+    .logo {
+      width: 62px;
+      height: 62px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: white;
+      color: var(--green);
+      font-size: 34px;
+      font-weight: 900;
+    }
+
+    .company {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+
+    .review {
+      font-size: 17px;
+      opacity: .95;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.1;
+      color: white;
+    }
+
+    .date {
+      color: var(--gold);
+      font-weight: 800;
+      font-size: 22px;
+      white-space: nowrap;
+    }
+
+    main {
+      padding: 30px 34px 36px;
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 26px;
+      line-height: 1.18;
+    }
+
+    .subtitle {
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 690px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+
+    .metric {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+      min-height: 94px;
+    }
+
+    .metric strong {
+      display: block;
+      color: var(--teal);
+      font-size: 32px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .metric span {
+      font-weight: 700;
+      color: #253b38;
+    }
+
+    .finding {
+      background: var(--note);
+      border: 2px solid #e0a82b;
+      border-radius: 16px;
+      padding: 24px 28px;
+      margin: 18px 0 28px;
+    }
+
+    .finding h3,
+    .coverage h3 {
+      margin: 0 0 16px;
+      font-size: 24px;
+    }
+
+    .finding p,
+    .coverage p {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+
+    .roles {
+      color: var(--ink);
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .emphasis {
+      color: var(--teal);
+      font-weight: 800;
+    }
+
+    .reason {
+      color: var(--orange);
+      font-weight: 900;
+    }
+
+    .coverage {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 24px 28px;
+    }
+
+    .fee {
+      color: var(--orange);
+      font-size: 22px;
+      font-weight: 900;
+      margin-top: 22px;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      background: var(--green);
+      color: white;
+      padding: 18px 34px;
+      font-size: 15px;
+    }
+
+    footer strong {
+      color: var(--gold);
+    }
+
+    @media print {
+      body { background: white; }
+      .page {
+        width: auto;
+        min-height: auto;
+        margin: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <section class="page">
+    <header>
+      <div class="brand">
+        <div class="logo">R</div>
+        <div>
+          <div class="company">Rudder Research and Data Analytics LTD</div>
+          <div class="review">Official System Usage &amp; Performance Review</div>
+        </div>
+      </div>
+      <div class="hero">
+        <h1>Wamama Pamoja Enterprise</h1>
+        <div class="date">July 2026</div>
+      </div>
+    </header>
+
+    <main>
+      <h2>Why the support package needs to move from KES 3,000 to KES 6,000 per month</h2>
+      <p class="subtitle">The system has already been placed on the upgraded performance setup this month at no extra cost for observation. The audit confirms the business has grown beyond the light-use package.</p>
+
+      <section class="metrics">
+        <div class="metric"><strong>1,221</strong><span>Active clients</span></div>
+        <div class="metric"><strong>1,049</strong><span>Active loans</span></div>
+        <div class="metric"><strong>13</strong><span>Active staff accounts</span></div>
+        <div class="metric"><strong>4,839</strong><span>Savings entries / 30 days</span></div>
+        <div class="metric"><strong>4,885</strong><span>Repayments / 30 days</span></div>
+        <div class="metric"><strong>331</strong><span>Orders / 30 days</span></div>
+      </section>
+
+      <section class="finding">
+        <h3>Key finding: the system now supports several departments</h3>
+        <p>We reviewed staff roles and permissions. The system is now being used by different operational roles including:</p>
+        <p class="roles">Admin • Branch Manager • Inventory Officer • Storekeeper • Loan Officers • Officers</p>
+        <p><strong>Some users have broad permissions across savings, repayments, orders, inventory, suppliers, and reports.</strong></p>
+        <p>This means the system is no longer being used by one or two people only. It is supporting several departments and daily field operations.</p>
+        <p class="emphasis">This wider role and permission load affects login, module access, approvals, reports, and daily database activity.</p>
+        <p class="reason">That is why the upgraded setup is now necessary for stability and continued speed.</p>
+      </section>
+
+      <section class="coverage">
+        <h3>What the upgraded monthly support covers</h3>
+        <p>Performance monitoring • Database optimization • Backups • Bug fixes</p>
+        <p>Approval and duplicate-entry support • Reports support • User and permissions support</p>
+        <p>Ongoing system maintenance and support for a growing business operation</p>
+        <div class="fee">Reviewed support fee from next month: KES 6,000/month</div>
+      </section>
+    </main>
+
+    <footer>
+      <div><strong>This month:</strong> upgraded setup provided as a free trial for observation.</div>
+      <div>admin@rudderdatanalytics.co.ke</div>
+      <div><strong>Rudder Research and Data Analytics LTD</strong></div>
+    </footer>
+  </section>
+</body>
+</html>

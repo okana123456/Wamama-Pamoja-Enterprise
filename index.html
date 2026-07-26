@@ -583,6 +583,50 @@ function canCreateClientOrders(){
     !!state.perms?.can_submit_orders;
 }
 
+function currentStaffRole(){
+  return state.staff?.app_role || state.staff?.role || 'officer';
+}
+
+function isSupervisorScoped(){
+  return currentStaffRole() === 'supervisor' && state.staff?.role !== 'admin';
+}
+
+function supervisorTeamName(){
+  return String(state.staff?.team_name || '').trim().toLowerCase();
+}
+
+function visibleOfficerIdsForCurrentStaff(){
+  if(!isSupervisorScoped()) return null;
+  const team = supervisorTeamName();
+  if(!team) return new Set([state.staff.id]);
+  return new Set(state.data.staff
+    .filter(s => s.id === state.staff.id || String(s.team_name || '').trim().toLowerCase() === team)
+    .map(s => s.id));
+}
+
+function applySupervisorDataScope(){
+  if(!isSupervisorScoped()) return;
+  const visibleOfficerIds = visibleOfficerIdsForCurrentStaff();
+  const groupIds = new Set(state.data.groups.filter(g => visibleOfficerIds.has(g.officer_id)).map(g => g.id));
+  const memberIds = new Set(state.data.members
+    .filter(m => visibleOfficerIds.has(m.officer_id) || groupIds.has(m.group_id))
+    .map(m => m.id));
+  const loanIds = new Set(state.data.loans
+    .filter(l => visibleOfficerIds.has(l.officer_id) || groupIds.has(l.group_id) || memberIds.has(l.member_id))
+    .map(l => l.id));
+
+  state.data.groups = state.data.groups.filter(g => groupIds.has(g.id));
+  state.data.members = state.data.members.filter(m => memberIds.has(m.id));
+  state.data.guarantors = state.data.guarantors.filter(g => memberIds.has(g.member_id));
+  state.data.loans = state.data.loans.filter(l => loanIds.has(l.id));
+  state.data.savings = state.data.savings.filter(s => visibleOfficerIds.has(s.recorded_by) || groupIds.has(s.group_id) || memberIds.has(s.member_id));
+  state.data.repayments = state.data.repayments.filter(r => visibleOfficerIds.has(r.recorded_by) || groupIds.has(r.group_id) || memberIds.has(r.member_id) || loanIds.has(r.loan_id));
+  state.data.meetings = state.data.meetings.filter(m => groupIds.has(m.group_id) || visibleOfficerIds.has(m.recorded_by));
+  state.data.orders = state.data.orders.filter(o => visibleOfficerIds.has(o.recorded_by) || groupIds.has(o.group_id) || memberIds.has(o.member_id));
+  state.data.reconciliations = state.data.reconciliations.filter(r => visibleOfficerIds.has(r.recorded_by) || visibleOfficerIds.has(r.staff_id) || groupIds.has(r.group_id));
+  state.data.expenses = state.data.expenses.filter(e => visibleOfficerIds.has(e.recorded_by) || visibleOfficerIds.has(e.staff_id));
+}
+
 /* Phase B — page-level visibility map.
    Only 'ceo' and 'admin' implicitly see all pages.
    branch_manager has its own explicit allow-list below.              */
@@ -806,6 +850,7 @@ async function smartLoadAll(){
     state.data.purchases.forEach(p => {
       p.items = state.data.purchaseLines.filter(l => l.purchase_id === p.id);
     });
+    applySupervisorDataScope();
     state.loading = false;
   }
 }
@@ -834,7 +879,8 @@ function handleRealtimeChange(payload){
   if(payload.eventType === 'INSERT'){ if(!arr.find(x=>x.id===payload.new.id)) arr.unshift(payload.new); }
   else if(payload.eventType === 'UPDATE'){ const i = arr.findIndex(x=>x.id===payload.new.id); if(i>=0) arr[i] = payload.new; }
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
-  cacheDataKey(key, arr);
+  applySupervisorDataScope();
+  cacheDataKey(key, state.data[key]);
   if(['dashboard','members','groups','meeting','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
@@ -5065,19 +5111,23 @@ function pageStaff(){
   $('page').innerHTML = `
     <div class="page-head">
       <div><h1>Staff & permissions</h1><div class="desc">All staff members who can sign in to the system.</div></div>
-      <div class="actions"><button class="btn btn-primary" onclick="openStaffForm()">Add staff member</button></div>
+      <div class="actions">
+        <button class="btn btn-outline" onclick="openOfficerBookTransfer()">Transfer officer book</button>
+        <button class="btn btn-primary" onclick="openStaffForm()">Add staff member</button>
+      </div>
     </div>
     <div class="table-wrap"><table class="tbl">
-      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Status</th><th>Permissions</th><th></th></tr></thead>
       <tbody>
         ${state.data.staff.map(s => `<tr>
           <td><b>${s.full_name}</b></td>
           <td>${s.email}</td>
           <td><span class="badge ${(ROLE_TO_LEGACY[s.role]||s.role)==='admin'?'b-blue':'b-grey'}">${ROLE_LABELS[s.role]||s.role}</span></td>
+          <td>${s.team_name ? `<span class="badge b-green">${s.team_name}</span>` : '<span class="muted">Not assigned</span>'}</td>
           <td><span class="badge ${s.status==='active'?'b-green':'b-red'}">${s.status}</span></td>
           <td>${(ROLE_TO_LEGACY[s.role]||s.role)==='admin'?'<span class="muted">Full access</span>':'<button class="btn btn-sm btn-outline" onclick="editPerms(\''+s.id+'\')">Manage</button>'}</td>
           <td><button class="act-btn" onclick="staffActions(event,'${s.id}')">···</button></td>
-        </tr>`).join('') || `<tr><td colspan="6"><div class="empty"><h4>No staff yet</h4><p>Add staff members to enable system operations.</p></div></td></tr>`}
+        </tr>`).join('') || `<tr><td colspan="7"><div class="empty"><h4>No staff yet</h4><p>Add staff members to enable system operations.</p></div></td></tr>`}
       </tbody>
     </table></div>
   `;
@@ -5093,6 +5143,110 @@ function staffActions(ev, id){
     }},
     { label:'Delete & Reset Auth', danger:true, onClick: ()=>confirmDeleteStaff(id) }
   ]);
+}
+
+function openOfficerBookTransfer(){
+  const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
+  if(officers.length < 2){ toast('You need at least two active officers to transfer a book.','warn'); return; }
+  const officerOptions = officers.map(o => `<option value="${o.id}">${o.full_name}${o.team_name ? ' - ' + o.team_name : ''}</option>`).join('');
+  modal({
+    title: 'Transfer officer book',
+    size: 'lg',
+    body: `
+      <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px;font-size:13px">
+        This transfers current responsibility from one officer to another. It updates groups, clients, active/defaulted loans, and open orders.
+        Old savings and repayment records remain under the officer who recorded them for audit history.
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label>Transfer from *</label>
+          <select id="book-from" onchange="updateBookTransferPreview()"><option value="">Select officer</option>${officerOptions}</select>
+        </div>
+        <div class="field">
+          <label>Transfer to *</label>
+          <select id="book-to" onchange="updateBookTransferPreview()"><option value="">Select officer</option>${officerOptions}</select>
+        </div>
+      </div>
+      <div id="book-transfer-preview" class="card card-pad" style="margin-top:12px;background:var(--surface-2)">
+        Select both officers to preview what will move.
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label>Reason / note</label>
+        <textarea id="book-note" rows="3" placeholder="Example: Officer left; portfolio reassigned to new officer."></textarea>
+      </div>
+    `,
+    actions: [
+      { label:'Cancel', cls:'btn-outline', onClick: closeModal },
+      { label:'Transfer book', cls:'btn-primary', onClick: transferOfficerBook }
+    ]
+  });
+}
+
+function updateBookTransferPreview(){
+  const fromId = document.getElementById('book-from')?.value || '';
+  const toId = document.getElementById('book-to')?.value || '';
+  const host = document.getElementById('book-transfer-preview');
+  if(!host) return;
+  if(!fromId || !toId){
+    host.innerHTML = 'Select both officers to preview what will move.';
+    return;
+  }
+  if(fromId === toId){
+    host.innerHTML = '<span class="danger-text">Please select two different officers.</span>';
+    return;
+  }
+  const groups = state.data.groups.filter(g => g.officer_id === fromId);
+  const groupIds = new Set(groups.map(g => g.id));
+  const members = state.data.members.filter(m => m.officer_id === fromId || groupIds.has(m.group_id));
+  const memberIds = new Set(members.map(m => m.id));
+  const loans = state.data.loans.filter(l => (l.officer_id === fromId || groupIds.has(l.group_id) || memberIds.has(l.member_id)) && !['completed','cancelled'].includes(l.status));
+  const orders = state.data.orders.filter(o => (o.recorded_by === fromId || groupIds.has(o.group_id) || memberIds.has(o.member_id)) && !['fulfilled','rejected','cancelled'].includes(o.status));
+  const from = state.data.staff.find(s => s.id === fromId);
+  const to = state.data.staff.find(s => s.id === toId);
+  host.innerHTML = `
+    <div style="font-weight:800;margin-bottom:8px">Preview: ${from?.full_name || 'Old officer'} to ${to?.full_name || 'New officer'}</div>
+    <div class="grid-4">
+      <div><div class="kpi">${groups.length}</div><div class="muted">Groups</div></div>
+      <div><div class="kpi">${members.length}</div><div class="muted">Clients</div></div>
+      <div><div class="kpi">${loans.length}</div><div class="muted">Open loans</div></div>
+      <div><div class="kpi">${orders.length}</div><div class="muted">Open orders</div></div>
+    </div>
+  `;
+}
+
+async function transferOfficerBook(){
+  const fromId = document.getElementById('book-from')?.value || '';
+  const toId = document.getElementById('book-to')?.value || '';
+  const note = document.getElementById('book-note')?.value || '';
+  if(!fromId || !toId){ toast('Select both officers.','warn'); return; }
+  if(fromId === toId){ toast('Transfer from and transfer to cannot be the same officer.','error'); return; }
+  if(!(await ensureFreshToken())) return;
+  const from = state.data.staff.find(s => s.id === fromId);
+  const to = state.data.staff.find(s => s.id === toId);
+  const ok = await confirmDialogPromise(`Transfer the current officer book from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}? This will be logged.`);
+  if(!ok) return;
+  const { data, error } = await sb.rpc('pb_transfer_officer_book', {
+    from_officer_id: fromId,
+    to_officer_id: toId,
+    transfer_note: note || null
+  });
+  if(error){ toast('Book transfer failed: ' + error.message, 'error'); return; }
+  await smartLoadAll();
+  audit('transfer_officer_book','pb_staff',fromId,{ from_officer_id:fromId },{ to_officer_id:toId, note, result:data });
+  closeModal();
+  render();
+  toast(`Book transferred from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}.`, 'success');
+}
+
+function confirmDialogPromise(message){
+  return new Promise(resolve => {
+    confirmDialog(message, () => resolve(true), { title:'Confirm transfer' });
+    setTimeout(() => {
+      const overlay = document.querySelector('.modal-backdrop, .modal-overlay');
+      const cancelBtn = Array.from(document.querySelectorAll('.modal-foot button')).find(b => /cancel/i.test(b.textContent || ''));
+      if(cancelBtn) cancelBtn.addEventListener('click', () => resolve(false), { once:true });
+    }, 30);
+  });
 }
 
 function confirmDeleteStaff(id){
@@ -5173,6 +5327,11 @@ function openStaffForm(s=null){
       <div class="field"><label>Email *</label><input type="email" name="email" value="${s?.email||''}" required ${s?'disabled':''} /></div>
       <div class="field"><label>Phone</label><input name="phone" value="${s?.phone||''}" /></div>
       ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The staff member can change this after first sign-in.</div></div>`:''}
+      <div class="field">
+        <label>Team / supervisor group</label>
+        <input name="team_name" value="${s?.team_name||''}" placeholder="Example: Team A or Team B" />
+        <div class="helper">Use the same team name for a supervisor and the officers under them. A supervisor only sees records for their own team. Branch manager still sees all teams.</div>
+      </div>
       <div class="field"><label>Role</label>
         <select name="role">
           <option value="ceo" ${currentRole==='ceo'?'selected':''}>Chief Executive Officer</option>
@@ -5192,7 +5351,7 @@ function openStaffForm(s=null){
         if(!(await ensureFreshToken())) return;
         const fd = new FormData($('sf')); const row = Object.fromEntries(fd);
         if(s){
-          const upd = { full_name: row.full_name, phone: row.phone||null, role: row.role };
+          const upd = { full_name: row.full_name, phone: row.phone||null, role: row.role, team_name: row.team_name||null };
           const { error } = await sb.from('pb_staff').update(upd).eq('id', s.id);
           if(error) return toast(error.message,'error');
           // Keep both the raw role and the legacy bucket in sync in memory
@@ -5206,7 +5365,7 @@ function openStaffForm(s=null){
         const { data, error } = await sbAdmin.auth.signUp({ email: row.email.toLowerCase(), password: row.password, options: { emailRedirectTo: authRedirectUrl() } });
         if(error) return toast(error.message,'error');
         const auth_user_id = data.user?.id || null;
-        const ins = { auth_user_id, business_id: state.staff.business_id || null, full_name: row.full_name, email: row.email.toLowerCase(), phone: row.phone||null, role: row.role, status:'active' };
+        const ins = { auth_user_id, business_id: state.staff.business_id || null, full_name: row.full_name, email: row.email.toLowerCase(), phone: row.phone||null, role: row.role, team_name: row.team_name||null, status:'active' };
         const { data: created, error: e2 } = await sb.from('pb_staff').insert(ins).select().single();
         if(e2) return toast(e2.message,'error');
         await sb.from('pb_permissions').insert({ staff_id: created.id });
