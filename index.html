@@ -5329,8 +5329,12 @@ function openStaffForm(s=null){
       ${!s ? `<div class="field"><label>Initial password *</label><input type="password" name="password" minlength="6" required /><div class="helper">The staff member can change this after first sign-in.</div></div>`:''}
       <div class="field">
         <label>Team / supervisor group</label>
-        <input name="team_name" value="${s?.team_name||''}" placeholder="Example: Team A or Team B" />
-        <div class="helper">Use the same team name for a supervisor and the officers under them. A supervisor only sees records for their own team. Branch manager still sees all teams.</div>
+        <select name="team_name">
+          <option value="" ${!s?.team_name?'selected':''}>Not assigned</option>
+          <option value="Team A" ${String(s?.team_name||'').trim().toLowerCase()==='team a'?'selected':''}>Team A</option>
+          <option value="Team B" ${String(s?.team_name||'').trim().toLowerCase()==='team b'?'selected':''}>Team B</option>
+        </select>
+        <div class="helper">Assign the supervisor and their officers to the same team. A supervisor only sees records for their own team. Branch manager still sees all teams.</div>
       </div>
       <div class="field"><label>Role</label>
         <select name="role">
