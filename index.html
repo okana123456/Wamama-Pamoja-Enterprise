@@ -5154,7 +5154,7 @@ function openOfficerBookTransfer(){
     size: 'lg',
     body: `
       <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px;font-size:13px">
-        This transfers current responsibility from one officer to another. It updates groups, clients, active/defaulted loans, and open orders.
+        This transfers current responsibility from one officer to another. You can move the whole book or split selected groups only.
         Old savings and repayment records remain under the officer who recorded them for audit history.
       </div>
       <div class="grid-2">
@@ -5171,6 +5171,15 @@ function openOfficerBookTransfer(){
         Select both officers to preview what will move.
       </div>
       <div class="field" style="margin-top:14px">
+        <label>Transfer option</label>
+        <select id="book-mode" onchange="updateBookTransferPreview()">
+          <option value="all">Transfer the whole officer book</option>
+          <option value="groups">Split portfolio: transfer selected groups only</option>
+        </select>
+        <div class="helper">Use selected groups when one officer's portfolio needs to be split to different officers.</div>
+      </div>
+      <div id="book-group-picker" style="display:none;margin-top:12px"></div>
+      <div class="field" style="margin-top:14px">
         <label>Reason / note</label>
         <textarea id="book-note" rows="3" placeholder="Example: Officer left; portfolio reassigned to new officer."></textarea>
       </div>
@@ -5185,8 +5194,12 @@ function openOfficerBookTransfer(){
 function updateBookTransferPreview(){
   const fromId = document.getElementById('book-from')?.value || '';
   const toId = document.getElementById('book-to')?.value || '';
+  const mode = document.getElementById('book-mode')?.value || 'all';
   const host = document.getElementById('book-transfer-preview');
+  const picker = document.getElementById('book-group-picker');
+  const selectedBefore = new Set(Array.from(document.querySelectorAll('.book-group-check:checked')).map(x => x.value));
   if(!host) return;
+  if(picker){ picker.style.display = 'none'; picker.innerHTML = ''; }
   if(!fromId || !toId){
     host.innerHTML = 'Select both officers to preview what will move.';
     return;
@@ -5195,7 +5208,24 @@ function updateBookTransferPreview(){
     host.innerHTML = '<span class="danger-text">Please select two different officers.</span>';
     return;
   }
-  const groups = state.data.groups.filter(g => g.officer_id === fromId);
+  let groups = state.data.groups.filter(g => g.officer_id === fromId);
+  if(mode === 'groups'){
+    if(picker){
+      picker.style.display = 'block';
+      picker.innerHTML = `
+        <div class="card card-pad" style="background:var(--surface)">
+          <div style="font-weight:800;margin-bottom:10px">Select groups to transfer</div>
+          <div style="max-height:220px;overflow:auto;display:grid;gap:8px">
+            ${groups.map(g => `<label class="checkbox-row" style="margin:0">
+              <input type="checkbox" class="book-group-check" value="${g.id}" ${selectedBefore.has(g.id)?'checked':''} onchange="updateBookTransferPreview()" />
+              <span>${g.name || 'Unnamed group'}${g.mpesa_code ? ' - ' + g.mpesa_code : ''}</span>
+            </label>`).join('') || '<span class="muted">This officer has no groups assigned.</span>'}
+          </div>
+        </div>
+      `;
+    }
+    groups = groups.filter(g => selectedBefore.has(g.id));
+  }
   const groupIds = new Set(groups.map(g => g.id));
   const members = state.data.members.filter(m => m.officer_id === fromId || groupIds.has(m.group_id));
   const memberIds = new Set(members.map(m => m.id));
@@ -5205,6 +5235,7 @@ function updateBookTransferPreview(){
   const to = state.data.staff.find(s => s.id === toId);
   host.innerHTML = `
     <div style="font-weight:800;margin-bottom:8px">Preview: ${from?.full_name || 'Old officer'} to ${to?.full_name || 'New officer'}</div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px">${mode === 'groups' ? 'Split mode: only selected groups will move.' : 'Whole book mode: all current responsibility will move.'}</div>
     <div class="grid-4">
       <div><div class="kpi">${groups.length}</div><div class="muted">Groups</div></div>
       <div><div class="kpi">${members.length}</div><div class="muted">Clients</div></div>
@@ -5218,16 +5249,22 @@ async function transferOfficerBook(){
   const fromId = document.getElementById('book-from')?.value || '';
   const toId = document.getElementById('book-to')?.value || '';
   const note = document.getElementById('book-note')?.value || '';
+  const mode = document.getElementById('book-mode')?.value || 'all';
+  const selectedGroupIds = mode === 'groups'
+    ? Array.from(document.querySelectorAll('.book-group-check:checked')).map(x => x.value)
+    : [];
   if(!fromId || !toId){ toast('Select both officers.','warn'); return; }
   if(fromId === toId){ toast('Transfer from and transfer to cannot be the same officer.','error'); return; }
+  if(mode === 'groups' && !selectedGroupIds.length){ toast('Select at least one group to transfer.','warn'); return; }
   if(!(await ensureFreshToken())) return;
   const from = state.data.staff.find(s => s.id === fromId);
   const to = state.data.staff.find(s => s.id === toId);
-  const ok = await confirmDialogPromise(`Transfer the current officer book from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}? This will be logged.`);
+  const ok = await confirmDialogPromise(`${mode === 'groups' ? 'Transfer the selected group portfolio' : 'Transfer the current officer book'} from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}? This will be logged.`);
   if(!ok) return;
   const { data, error } = await sb.rpc('pb_transfer_officer_book', {
     from_officer_id: fromId,
     to_officer_id: toId,
+    transfer_group_ids: selectedGroupIds,
     transfer_note: note || null
   });
   if(error){ toast('Book transfer failed: ' + error.message, 'error'); return; }

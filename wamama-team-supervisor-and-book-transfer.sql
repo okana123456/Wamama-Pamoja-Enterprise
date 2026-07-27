@@ -1,6 +1,6 @@
 -- Wamama Pamoja Enterprise
--- Team supervisor access + officer book transfer setup
--- Run this once in Supabase SQL Editor.
+-- Team supervisor access + flexible officer portfolio transfer
+-- Run this in Supabase SQL Editor to replace the earlier transfer function.
 
 alter table public.pb_staff
   add column if not exists team_name text;
@@ -20,9 +20,12 @@ create index if not exists idx_pb_loans_business_officer_status
 create index if not exists idx_pb_orders_business_recorded_status
   on public.pb_orders (business_id, recorded_by, status);
 
+-- This version uses text parameters because this project stores staff IDs as text.
+-- It also supports partial/split transfer using transfer_group_ids.
 create or replace function public.pb_transfer_officer_book(
-  from_officer_id uuid,
-  to_officer_id uuid,
+  from_officer_id text,
+  to_officer_id text,
+  transfer_group_ids text[] default array[]::text[],
   transfer_note text default null
 )
 returns jsonb
@@ -31,17 +34,18 @@ security definer
 set search_path = public
 as $$
 declare
-  v_business_id uuid;
+  v_business_id public.pb_staff.business_id%type;
   v_from_name text;
   v_to_name text;
   v_groups int := 0;
   v_members int := 0;
   v_loans int := 0;
   v_orders int := 0;
-  v_actor_id uuid;
+  v_actor_id public.pb_staff.id%type;
   v_actor_name text;
+  v_split_mode boolean := coalesce(array_length(transfer_group_ids, 1), 0) > 0;
 begin
-  if from_officer_id is null or to_officer_id is null then
+  if nullif(trim(from_officer_id), '') is null or nullif(trim(to_officer_id), '') is null then
     raise exception 'Both officers are required.';
   end if;
 
@@ -52,8 +56,9 @@ begin
   select business_id, full_name
     into v_business_id, v_from_name
   from public.pb_staff
-  where id = from_officer_id
-    and status = 'active';
+  where id::text = from_officer_id
+    and status = 'active'
+  limit 1;
 
   if v_business_id is null then
     raise exception 'The source officer was not found or is inactive.';
@@ -62,9 +67,10 @@ begin
   select full_name
     into v_to_name
   from public.pb_staff
-  where id = to_officer_id
+  where id::text = to_officer_id
     and business_id = v_business_id
-    and status = 'active';
+    and status = 'active'
+  limit 1;
 
   if v_to_name is null then
     raise exception 'The receiving officer was not found in the same business or is inactive.';
@@ -77,31 +83,74 @@ begin
     and business_id = v_business_id
   limit 1;
 
-  update public.pb_groups
-     set officer_id = to_officer_id
-   where business_id = v_business_id
-     and officer_id = from_officer_id;
-  get diagnostics v_groups = row_count;
+  if not v_split_mode then
+    update public.pb_groups
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and officer_id::text = from_officer_id;
+    get diagnostics v_groups = row_count;
 
-  update public.pb_members
-     set officer_id = to_officer_id
-   where business_id = v_business_id
-     and officer_id = from_officer_id;
-  get diagnostics v_members = row_count;
+    update public.pb_members
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and officer_id::text = from_officer_id;
+    get diagnostics v_members = row_count;
 
-  update public.pb_loans
-     set officer_id = to_officer_id
-   where business_id = v_business_id
-     and officer_id = from_officer_id
-     and coalesce(status, '') not in ('completed', 'cancelled');
-  get diagnostics v_loans = row_count;
+    update public.pb_loans
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and officer_id::text = from_officer_id
+       and coalesce(status, '') not in ('completed', 'cancelled');
+    get diagnostics v_loans = row_count;
 
-  update public.pb_orders
-     set recorded_by = to_officer_id
-   where business_id = v_business_id
-     and recorded_by = from_officer_id
-     and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled');
-  get diagnostics v_orders = row_count;
+    update public.pb_orders
+       set recorded_by = to_officer_id
+     where business_id = v_business_id
+       and recorded_by::text = from_officer_id
+       and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled');
+    get diagnostics v_orders = row_count;
+  else
+    update public.pb_groups
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and officer_id::text = from_officer_id
+       and id::text = any(transfer_group_ids);
+    get diagnostics v_groups = row_count;
+
+    update public.pb_members
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and group_id::text = any(transfer_group_ids);
+    get diagnostics v_members = row_count;
+
+    update public.pb_loans
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and coalesce(status, '') not in ('completed', 'cancelled')
+       and (
+         group_id::text = any(transfer_group_ids)
+         or member_id::text in (
+           select id::text from public.pb_members
+           where business_id = v_business_id
+             and group_id::text = any(transfer_group_ids)
+         )
+       );
+    get diagnostics v_loans = row_count;
+
+    update public.pb_orders
+       set recorded_by = to_officer_id
+     where business_id = v_business_id
+       and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled')
+       and (
+         group_id::text = any(transfer_group_ids)
+         or member_id::text in (
+           select id::text from public.pb_members
+           where business_id = v_business_id
+             and group_id::text = any(transfer_group_ids)
+         )
+       );
+    get diagnostics v_orders = row_count;
+  end if;
 
   insert into public.pb_audit_log (
     business_id,
@@ -117,9 +166,9 @@ begin
     v_business_id,
     v_actor_id,
     coalesce(v_actor_name, 'System'),
-    'transfer_officer_book',
+    case when v_split_mode then 'split_officer_portfolio' else 'transfer_officer_book' end,
     'pb_staff',
-    from_officer_id::text,
+    from_officer_id,
     jsonb_build_object(
       'from_officer_id', from_officer_id,
       'from_officer_name', v_from_name
@@ -127,6 +176,8 @@ begin
     jsonb_build_object(
       'to_officer_id', to_officer_id,
       'to_officer_name', v_to_name,
+      'split_mode', v_split_mode,
+      'group_ids', transfer_group_ids,
       'groups_transferred', v_groups,
       'members_transferred', v_members,
       'open_loans_transferred', v_loans,
@@ -137,6 +188,7 @@ begin
 
   return jsonb_build_object(
     'success', true,
+    'mode', case when v_split_mode then 'split_selected_groups' else 'whole_book' end,
     'from_officer', v_from_name,
     'to_officer', v_to_name,
     'groups_transferred', v_groups,
@@ -147,10 +199,7 @@ begin
 end;
 $$;
 
-grant execute on function public.pb_transfer_officer_book(uuid, uuid, text) to authenticated;
+grant execute on function public.pb_transfer_officer_book(text, text, text[], text) to authenticated;
 
--- Optional setup after running the script:
--- 1. Go to Staff & Permissions.
--- 2. Edit the two supervisors and enter Team A / Team B under "Team / supervisor group".
--- 3. Edit each loan officer/officer and enter the matching team name.
--- 4. Use "Transfer officer book" to move David Otieno's book to Griven Laban.
+-- If the earlier UUID version exists, leave it harmlessly in place.
+-- The app now calls this text version with transfer_group_ids.
