@@ -136,6 +136,11 @@ Required billing/payment secret names should be stored only in Supabase:
 
 Do not commit actual secret values to GitHub.
 
+Current Wamama monthly subscription fee: `KES 6,000`. The frontend constant
+`MONTHLY_SUBSCRIPTION_AMOUNT` and the Supabase secret `BILLING_AMOUNT` must both
+be `6000`. Existing paid billing cycles remain paid; the new amount applies to
+the next unpaid monthly cycle.
+
 ## 11. Files That Were Changed
 
 Files currently present in the Wamama working repository:

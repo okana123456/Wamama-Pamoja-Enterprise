@@ -998,6 +998,8 @@ const $ = id => document.getElementById(id);
 /* =====================================================================
  * MONTHLY ADMIN BILLING LOCK
  * ===================================================================== */
+const MONTHLY_SUBSCRIPTION_AMOUNT = 6000;
+const MONTHLY_SUBSCRIPTION_LABEL = `KES ${MONTHLY_SUBSCRIPTION_AMOUNT.toLocaleString('en-KE')}`;
 function billingTodayParts(){
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone:'Africa/Nairobi', year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(new Date());
   const pick = t => parts.find(p=>p.type===t)?.value;
@@ -1045,7 +1047,7 @@ function billingMessage(){
 function renderBillingPaymentForm({ locked=false } = {}){
   return `<form id="billing-pay-form" style="margin-top:14px">
     <div class="field" style="margin-bottom:10px"><label>Phone number for payment prompt</label><input id="billing-phone" name="phone" placeholder="07XXXXXXXX" autocomplete="tel" required /><div class="helper">The admin enters the Safaricom number to receive the payment prompt.</div></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" type="submit">${locked?'Pay KES 3,000 to reopen':'Pay KES 3,000'}</button><button class="btn btn-outline" type="button" onclick="refreshBillingStatus()">Check payment</button><button class="btn btn-ghost" type="button" onclick="signOut()">Sign out</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" type="submit">${locked?`Pay ${MONTHLY_SUBSCRIPTION_LABEL} to reopen`:`Pay ${MONTHLY_SUBSCRIPTION_LABEL}`}</button><button class="btn btn-outline" type="button" onclick="refreshBillingStatus()">Check payment</button><button class="btn btn-ghost" type="button" onclick="signOut()">Sign out</button></div>
   </form>`;
 }
 function attachBillingPaymentForm(){
@@ -1066,7 +1068,7 @@ function attachBillingPaymentForm(){
         } catch {}
       }
       toast(msg, 'error');
-      btn.disabled = false; btn.innerHTML = state.billing?.locked ? 'Pay KES 3,000 to reopen' : 'Pay KES 3,000';
+      btn.disabled = false; btn.innerHTML = state.billing?.locked ? `Pay ${MONTHLY_SUBSCRIPTION_LABEL} to reopen` : `Pay ${MONTHLY_SUBSCRIPTION_LABEL}`;
       return;
     }
     toast(data.message || 'Payment prompt sent. Complete it on the phone.', 'success');
@@ -1084,13 +1086,13 @@ async function refreshBillingStatus(){
 function renderBillingReminder(){
   if(!shouldShowBillingReminder()) return '';
   if(billingReminderMinimized()){
-    return `<button onclick="showBillingReminder()" style="position:fixed;right:18px;bottom:18px;z-index:80;border:none;border-radius:999px;background:var(--warning);color:#fff;font-weight:800;padding:11px 16px;box-shadow:var(--shadow-lg);cursor:pointer">Subscription due - KES 3,000</button>`;
+    return `<button onclick="showBillingReminder()" style="position:fixed;right:18px;bottom:18px;z-index:80;border:none;border-radius:999px;background:var(--warning);color:#fff;font-weight:800;padding:11px 16px;box-shadow:var(--shadow-lg);cursor:pointer">Subscription due - ${MONTHLY_SUBSCRIPTION_LABEL}</button>`;
   }
   return `<div style="position:fixed;inset:0;z-index:75;background:rgba(15,23,42,.45);backdrop-filter:blur(2px);display:grid;place-items:center;padding:20px">
     <div class="card card-pad" style="width:100%;max-width:560px;border-top:4px solid var(--warning);box-shadow:var(--shadow-lg)">
       <div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-start">
         <div><h2 style="margin:0 0 6px;font-size:20px">Subscription payment reminder</h2><div class="muted" style="font-size:13px;line-height:1.5">${billingMessage()}</div></div>
-        <div style="font-weight:800;color:var(--danger);white-space:nowrap">KES 3,000</div>
+        <div style="font-weight:800;color:var(--danger);white-space:nowrap">${MONTHLY_SUBSCRIPTION_LABEL}</div>
       </div>
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin:14px 0 0">
         <div style="display:flex;justify-content:space-between;padding:5px 0"><span class="muted">Lock date</span><strong>${billingDueDateLabel()}</strong></div>
@@ -1104,7 +1106,7 @@ function renderBillingReminder(){
 }
 function renderSubscriptionLock(){
   const app = $('app');
-  app.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:var(--bg);padding:24px"><div class="card card-pad" style="width:100%;max-width:520px;border-top:4px solid var(--danger)"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="width:38px;height:38px;border-radius:8px;background:var(--danger-50);color:var(--danger);display:grid;place-items:center;font-weight:800">!</div><div><h2 style="margin:0;font-size:20px">Admin access locked</h2><div class="muted" style="font-size:12px">Wamama Pamoja Enterprise</div></div></div><p class="muted" style="line-height:1.6;margin-top:0">${billingMessage()}</p><div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:14px 0"><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Amount due</span><strong>KES 3,000</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Paybill</span><strong>4024241</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Reference</span><strong>RUDDERDATA</strong></div></div>${renderBillingPaymentForm({ locked:true })}</div></div>`;
+  app.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:var(--bg);padding:24px"><div class="card card-pad" style="width:100%;max-width:520px;border-top:4px solid var(--danger)"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="width:38px;height:38px;border-radius:8px;background:var(--danger-50);color:var(--danger);display:grid;place-items:center;font-weight:800">!</div><div><h2 style="margin:0;font-size:20px">Admin access locked</h2><div class="muted" style="font-size:12px">Wamama Pamoja Enterprise</div></div></div><p class="muted" style="line-height:1.6;margin-top:0">${billingMessage()}</p><div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:14px 0"><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Amount due</span><strong>${MONTHLY_SUBSCRIPTION_LABEL}</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Paybill</span><strong>4024241</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Reference</span><strong>RUDDERDATA</strong></div></div>${renderBillingPaymentForm({ locked:true })}</div></div>`;
   attachBillingPaymentForm();
 }
 function render(){
