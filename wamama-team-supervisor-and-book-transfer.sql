@@ -44,6 +44,8 @@ declare
   v_actor_id public.pb_staff.id%type;
   v_actor_name text;
   v_split_mode boolean := coalesce(array_length(transfer_group_ids, 1), 0) > 0;
+  v_portfolio_group_ids text[] := array[]::text[];
+  v_requested_groups int := 0;
 begin
   if nullif(trim(from_officer_id), '') is null or nullif(trim(to_officer_id), '') is null then
     raise exception 'Both officers are required.';
@@ -76,6 +78,30 @@ begin
     raise exception 'The receiving officer was not found in the same business or is inactive.';
   end if;
 
+  -- Capture the source officer's groups before changing any assignments.
+  -- This also prevents stale selections from moving another officer's groups.
+  if v_split_mode then
+    select count(*) into v_requested_groups
+    from unnest(transfer_group_ids) as requested_group_id;
+
+    select coalesce(array_agg(g.id::text), array[]::text[])
+      into v_portfolio_group_ids
+    from public.pb_groups g
+    where g.business_id = v_business_id
+      and g.officer_id::text = from_officer_id
+      and g.id::text = any(transfer_group_ids);
+
+    if coalesce(array_length(v_portfolio_group_ids, 1), 0) <> v_requested_groups then
+      raise exception 'One or more selected groups are no longer assigned to the source officer. Refresh and select the groups again.';
+    end if;
+  else
+    select coalesce(array_agg(g.id::text), array[]::text[])
+      into v_portfolio_group_ids
+    from public.pb_groups g
+    where g.business_id = v_business_id
+      and g.officer_id::text = from_officer_id;
+  end if;
+
   select id, full_name
     into v_actor_id, v_actor_name
   from public.pb_staff
@@ -93,34 +119,10 @@ begin
     update public.pb_members
        set officer_id = to_officer_id
      where business_id = v_business_id
-       and officer_id::text = from_officer_id;
-    get diagnostics v_members = row_count;
-
-    update public.pb_loans
-       set officer_id = to_officer_id
-     where business_id = v_business_id
-       and officer_id::text = from_officer_id
-       and coalesce(status, '') not in ('completed', 'cancelled');
-    get diagnostics v_loans = row_count;
-
-    update public.pb_orders
-       set recorded_by = to_officer_id
-     where business_id = v_business_id
-       and recorded_by::text = from_officer_id
-       and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled');
-    get diagnostics v_orders = row_count;
-  else
-    update public.pb_groups
-       set officer_id = to_officer_id
-     where business_id = v_business_id
-       and officer_id::text = from_officer_id
-       and id::text = any(transfer_group_ids);
-    get diagnostics v_groups = row_count;
-
-    update public.pb_members
-       set officer_id = to_officer_id
-     where business_id = v_business_id
-       and group_id::text = any(transfer_group_ids);
+       and (
+         officer_id::text = from_officer_id
+         or group_id::text = any(v_portfolio_group_ids)
+       );
     get diagnostics v_members = row_count;
 
     update public.pb_loans
@@ -128,11 +130,12 @@ begin
      where business_id = v_business_id
        and coalesce(status, '') not in ('completed', 'cancelled')
        and (
-         group_id::text = any(transfer_group_ids)
+         officer_id::text = from_officer_id
+         or group_id::text = any(v_portfolio_group_ids)
          or member_id::text in (
            select id::text from public.pb_members
            where business_id = v_business_id
-             and group_id::text = any(transfer_group_ids)
+             and group_id::text = any(v_portfolio_group_ids)
          )
        );
     get diagnostics v_loans = row_count;
@@ -142,14 +145,60 @@ begin
      where business_id = v_business_id
        and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled')
        and (
-         group_id::text = any(transfer_group_ids)
+         recorded_by::text = from_officer_id
+         or group_id::text = any(v_portfolio_group_ids)
          or member_id::text in (
            select id::text from public.pb_members
            where business_id = v_business_id
-             and group_id::text = any(transfer_group_ids)
+             and group_id::text = any(v_portfolio_group_ids)
          )
        );
     get diagnostics v_orders = row_count;
+  else
+    update public.pb_groups
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and officer_id::text = from_officer_id
+       and id::text = any(v_portfolio_group_ids);
+    get diagnostics v_groups = row_count;
+
+    update public.pb_members
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and group_id::text = any(v_portfolio_group_ids);
+    get diagnostics v_members = row_count;
+
+    update public.pb_loans
+       set officer_id = to_officer_id
+     where business_id = v_business_id
+       and coalesce(status, '') not in ('completed', 'cancelled')
+       and (
+         group_id::text = any(v_portfolio_group_ids)
+         or member_id::text in (
+           select id::text from public.pb_members
+           where business_id = v_business_id
+             and group_id::text = any(v_portfolio_group_ids)
+         )
+       );
+    get diagnostics v_loans = row_count;
+
+    update public.pb_orders
+       set recorded_by = to_officer_id
+     where business_id = v_business_id
+       and coalesce(status, '') not in ('fulfilled', 'rejected', 'cancelled')
+       and (
+         group_id::text = any(v_portfolio_group_ids)
+         or member_id::text in (
+           select id::text from public.pb_members
+           where business_id = v_business_id
+             and group_id::text = any(v_portfolio_group_ids)
+         )
+       );
+    get diagnostics v_orders = row_count;
+  end if;
+
+  if (v_groups + v_members + v_loans + v_orders) = 0 then
+    raise exception 'No current groups, clients, open loans or open orders were found for this transfer.';
   end if;
 
   insert into public.pb_audit_log (
@@ -177,7 +226,7 @@ begin
       'to_officer_id', to_officer_id,
       'to_officer_name', v_to_name,
       'split_mode', v_split_mode,
-      'group_ids', transfer_group_ids,
+      'group_ids', v_portfolio_group_ids,
       'groups_transferred', v_groups,
       'members_transferred', v_members,
       'open_loans_transferred', v_loans,

@@ -5259,31 +5259,36 @@ async function transferOfficerBook(){
   if(!(await ensureFreshToken())) return;
   const from = state.data.staff.find(s => s.id === fromId);
   const to = state.data.staff.find(s => s.id === toId);
-  const ok = await confirmDialogPromise(`${mode === 'groups' ? 'Transfer the selected group portfolio' : 'Transfer the current officer book'} from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}? This will be logged.`);
-  if(!ok) return;
+  const confirmed = window.confirm(`${mode === 'groups' ? 'Transfer the selected group portfolio' : 'Transfer the current officer book'} from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}? This will be logged.`);
+  if(!confirmed) return;
+  const transferBtn = Array.from(document.querySelectorAll('.modal-foot button')).find(b => /transfer book/i.test(b.textContent || ''));
+  if(transferBtn){ transferBtn.disabled = true; transferBtn.textContent = 'Transferring...'; }
   const { data, error } = await sb.rpc('pb_transfer_officer_book', {
     from_officer_id: fromId,
     to_officer_id: toId,
     transfer_group_ids: selectedGroupIds,
     transfer_note: note || null
   });
-  if(error){ toast('Book transfer failed: ' + error.message, 'error'); return; }
+  if(error){
+    if(transferBtn){ transferBtn.disabled = false; transferBtn.textContent = 'Transfer book'; }
+    toast('Book transfer failed: ' + error.message, 'error');
+    return;
+  }
+  const result = Array.isArray(data) ? data[0] : data;
+  const moved = Number(result?.groups_transferred || 0)
+    + Number(result?.members_transferred || 0)
+    + Number(result?.open_loans_transferred || 0)
+    + Number(result?.open_orders_transferred || 0);
+  if(!result?.success || moved === 0){
+    if(transferBtn){ transferBtn.disabled = false; transferBtn.textContent = 'Transfer book'; }
+    toast('No records were transferred. Refresh the page, confirm the source officer still owns the selected groups, then try again.', 'warn');
+    return;
+  }
   await smartLoadAll();
-  audit('transfer_officer_book','pb_staff',fromId,{ from_officer_id:fromId },{ to_officer_id:toId, note, result:data });
+  audit('transfer_officer_book','pb_staff',fromId,{ from_officer_id:fromId },{ to_officer_id:toId, note, result });
   closeModal();
   render();
-  toast(`Book transferred from ${from?.full_name || 'old officer'} to ${to?.full_name || 'new officer'}.`, 'success');
-}
-
-function confirmDialogPromise(message){
-  return new Promise(resolve => {
-    confirmDialog(message, () => resolve(true), { title:'Confirm transfer' });
-    setTimeout(() => {
-      const overlay = document.querySelector('.modal-backdrop, .modal-overlay');
-      const cancelBtn = Array.from(document.querySelectorAll('.modal-foot button')).find(b => /cancel/i.test(b.textContent || ''));
-      if(cancelBtn) cancelBtn.addEventListener('click', () => resolve(false), { once:true });
-    }, 30);
-  });
+  toast(`Transfer complete: ${result.groups_transferred || 0} groups, ${result.members_transferred || 0} clients, ${result.open_loans_transferred || 0} open loans and ${result.open_orders_transferred || 0} open orders moved to ${to?.full_name || 'the new officer'}.`, 'success');
 }
 
 function confirmDeleteStaff(id){
