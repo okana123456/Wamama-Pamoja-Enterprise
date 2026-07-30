@@ -930,8 +930,11 @@ async function audit(action, entity=null, entity_id=null, oldV=null, newV=null){
 /* =====================================================================
  * DERIVED METRICS
  * ===================================================================== */
+function countsInBalance(row){
+  return !['pending','rejected','cancelled'].includes(String(row?.status || 'approved').toLowerCase());
+}
 function memberSavings(memberId){
-  return state.data.savings.filter(s=>s.member_id===memberId && s.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
+  return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 function memberLoan(memberId){
   return state.data.loans.find(l=>l.member_id===memberId && l.status==='active');
@@ -975,7 +978,27 @@ function isSafeEmptyDuplicateMember(member){
   return financialLinks === 0 && memberSavings(member.id) === 0;
 }
 function loanPaid(loanId){
-  return state.data.repayments.filter(r=>r.loan_id===loanId && r.status!=='pending').reduce((a,b)=>a + Number(b.amount||0), 0);
+  return state.data.repayments.filter(r=>r.loan_id===loanId && countsInBalance(r)).reduce((a,b)=>a + Number(b.amount||0), 0);
+}
+async function closeFullyPaidLoans(loanIds, opts={}){
+  const ids = [...new Set((loanIds||[]).filter(Boolean))];
+  let closed = 0;
+  for(const loanId of ids){
+    const ln = state.data.loans.find(l=>l.id===loanId);
+    if(!ln || ln.status !== 'active') continue;
+    const outstanding = Number(ln.total_payable||0) - loanPaid(ln.id);
+    if(outstanding <= 0.01){
+      const { error } = await sb.from('pb_loans').update({ status:'completed' }).eq('id', ln.id);
+      if(error){
+        if(!opts.silent) toast(`Could not close loan: ${error.message}`, 'error');
+        continue;
+      }
+      ln.status = 'completed';
+      closed++;
+      audit('auto_close_fully_paid_loan','pb_loans',ln.id,null,{ paid: loanPaid(ln.id), total_payable: Number(ln.total_payable||0) });
+    }
+  }
+  return closed;
 }
 // Global lock to prevent double-taps while a Supabase call is in flight
 let _processing = false;
@@ -2592,18 +2615,95 @@ function pageMembers(){
 function memberActions(ev, id){
   const m = state.data.members.find(x=>x.id===id);
   const isAdmin = state.staff.role==='admin';
+  const canManageStatus = isAdmin || can('approve_group');
+  const savingsBalance = memberSavings(id);
+  const activeLoan = memberLoan(id);
   const canRemoveDuplicate = canManageMemberDuplicates() && isSafeEmptyDuplicateMember(m);
   showActMenu(ev, [
     { label:'View profile', onClick: ()=>{ go('memberProfile', { memberId: id }); } },
     { label:'Edit details', onClick: ()=>openMemberEdit(m) },
+    ...(canManageStatus && m?.status === 'inactive' ? [{ label:'Activate member', onClick: ()=>activateMemberAccount(id) }] : []),
+    ...(canManageStatus && m?.status === 'active' && savingsBalance > 0 ? [{ label:'Refund savings and close account', danger:true, onClick: ()=>openSavingsRefundAndClose(id) }] : []),
     ...(canRemoveDuplicate ? [{ label:'Delete empty duplicate', danger:true, onClick: ()=>deleteEmptyDuplicateMember(id) }] : []),
     'sep',
-    ...(isAdmin ? [{ label:'Deactivate member', danger:true, onClick: ()=>confirmDialog(`Deactivate "${m.full_name}"? They will no longer appear in active member lists.`, async()=>{
+    ...(canManageStatus ? [{ label:'Deactivate member', danger:true, onClick: ()=>confirmDialog(`Deactivate "${m.full_name}"? They will no longer appear in active member lists.`, async()=>{
       const { error } = await sb.from('pb_members').update({ status:'inactive' }).eq('id',id);
       if(error) return toast(error.message,'error');
       m.status='inactive'; audit('deactivate','pb_members',id); render(); toast('Member deactivated','success');
     }, { title:'Deactivate member', danger:true }) }] : [])
   ]);
+}
+async function activateMemberAccount(id){
+  const m = state.data.members.find(x=>x.id===id);
+  if(!m) return;
+  if(!(await ensureFreshToken())) return;
+  const { error } = await sb.from('pb_members').update({ status:'active' }).eq('id', id);
+  if(error) return toast(error.message, 'error');
+  m.status = 'active';
+  audit('activate_member','pb_members',id,null,{ status:'active' });
+  render();
+  toast('Member account activated.', 'success');
+}
+function openSavingsRefundAndClose(id){
+  const m = state.data.members.find(x=>x.id===id);
+  if(!m) return;
+  const activeLoan = memberLoan(id);
+  if(activeLoan) return toast('This member still has an active loan. Close the loan first before refunding savings.', 'error');
+  const balance = memberSavings(id);
+  if(balance <= 0) return toast('This member has no savings balance to refund.', 'warn');
+  modal({
+    title: 'Refund savings and close account',
+    body: `
+      <div style="background:var(--danger-50);border:1px solid var(--danger);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px;font-size:13px">
+        <b>${m.full_name}</b><br>
+        Current savings balance: <b>${KES(balance)}</b><br>
+        This will record a savings refund and mark the member account as inactive.
+      </div>
+      <div class="field">
+        <label>Refund amount (KES)</label>
+        <input id="refund-amount" type="number" min="1" max="${balance}" step="0.01" value="${balance}" />
+      </div>
+      <div class="field">
+        <label>Refund date</label>
+        <input id="refund-date" type="date" value="${todayISO()}" />
+      </div>
+      <div class="field">
+        <label>Reason / notes</label>
+        <textarea id="refund-notes" rows="3" placeholder="Example: Member exited and savings were refunded."></textarea>
+      </div>
+    `,
+    actions:[
+      { label:'Cancel', cls:'btn-outline', onClick: closeModal },
+      { label:'Refund and close', cls:'btn-danger', onClick: async()=>{
+        if(!(await ensureFreshToken())) return;
+        const amount = Number(document.getElementById('refund-amount')?.value)||0;
+        const date = document.getElementById('refund-date')?.value || todayISO();
+        const notes = document.getElementById('refund-notes')?.value.trim() || 'Savings refund and member account closure';
+        if(amount <= 0) return toast('Enter a valid refund amount.', 'error');
+        if(amount > balance + 0.01) return toast(`Refund cannot exceed current savings balance of ${KES(balance)}.`, 'error');
+        const refundRow = {
+          business_id: state.staff.business_id || null,
+          member_id: m.id,
+          group_id: m.group_id || null,
+          meeting_date: date,
+          amount: -Math.abs(amount),
+          recorded_by: state.staff.id,
+          notes,
+          status: 'approved'
+        };
+        const { data, error } = await sb.from('pb_savings').insert(refundRow).select().single();
+        if(error) return toast(error.message, 'error');
+        const { error: memberError } = await sb.from('pb_members').update({ status:'inactive' }).eq('id', m.id);
+        if(memberError) return toast(memberError.message, 'error');
+        state.data.savings.unshift(data);
+        m.status = 'inactive';
+        audit('refund_savings_close_member','pb_members',m.id,null,{ refund_amount: amount, refund_saving_id: data.id, notes });
+        closeModal();
+        render();
+        toast('Savings refunded and member account closed.', 'success');
+      }}
+    ]
+  });
 }
 function toggleMemberDuplicatesOnly(){
   state._memberDuplicatesOnly = !state._memberDuplicatesOnly;
@@ -3068,6 +3168,8 @@ function pageMemberProfile(){
         <div class="desc">${g?.name||'—'} · ID ${m.national_id} · ${m.phone||''}</div>
       </div>
       <div class="actions">
+        ${(state.staff.role==='admin'||can('approve_group')) && m.status==='inactive' ? `<button class="btn btn-primary" onclick="activateMemberAccount('${m.id}')">Activate member</button>` : ''}
+        ${(state.staff.role==='admin'||can('approve_group')) && m.status==='active' && totalSv > 0 ? `<button class="btn btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="openSavingsRefundAndClose('${m.id}')">Refund savings and close</button>` : ''}
         <button class="btn btn-outline" onclick="openMemberEdit(state.data.members.find(x=>x.id==='${m.id}'))">Edit details</button>
       </div>
     </div>
@@ -3478,13 +3580,7 @@ async function submitMeeting(){
   }
   audit('meeting_submit', 'pb_meetings', meetingId, null, { savings: okSav, repayments: okRep });
 
-  for(const r of repRows){
-    const ln = state.data.loans.find(l=>l.id===r.loan_id);
-    if(ln && (Number(ln.total_payable) - loanPaid(ln.id)) <= 0){
-      await sb.from('pb_loans').update({ status:'completed' }).eq('id', ln.id);
-      ln.status='completed';
-    }
-  }
+  await closeFullyPaidLoans(repRows.map(r=>r.loan_id), { silent:true });
 
   toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${fail?' Failed: '+fail:''}`, fail?'warn':'success');
   state._meet = { groupId:'', date: todayISO(), entries:{} };
@@ -8043,8 +8139,9 @@ async function approveOneRepayment(id, btn){
   const { error } = await sb.from('pb_repayments').update({ status:'approved' }).eq('id', id);
   if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
   r.status = 'approved';
+  const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
-  toast('Repayment approved.','success');
+  toast(closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
 
 async function rejectOneRepayment(id, btn){
@@ -8066,11 +8163,13 @@ async function approveGroupRepayments(groupName){
     .filter(r => r.status==='pending' && isClientRepayment(r) && (state.data.groups.find(g=>g.id===r.group_id)?.name||'— No group')===groupName)
     .map(r=>r.id);
   if(!ids.length) return toast('No pending repayments for this group.','warn');
+  const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
   const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
   if(error) return toast(error.message,'error');
   state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+  const closed = await closeFullyPaidLoans(loanIds, { silent:true });
   render();
-  toast(`${ids.length} repayment(s) for ${groupName} approved.`,'success');
+  toast(`${ids.length} repayment(s) for ${groupName} approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
 }
 
 async function approveAllRepayments(){
@@ -8079,11 +8178,13 @@ async function approveAllRepayments(){
     const ids = state.data.repayments
       .filter(r=>r.status==='pending' && isClientRepayment(r))
       .map(r=>r.id);
+    const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
     const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
     if(error) return toast(error.message,'error');
     state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+    const closed = await closeFullyPaidLoans(loanIds, { silent:true });
     render();
-    toast(`${ids.length} repayment(s) approved.`,'success');
+    toast(`${ids.length} repayment(s) approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
   },{ title:'Approve All Repayments' });
 }
 
@@ -8448,11 +8549,8 @@ function openStandaloneRepayment(loanId, memberId){
         state.data.repayments.unshift(data);
         audit('standalone_repayment', 'pb_repayments', data.id, null, row);
 
-        // Auto-complete loan if fully paid
-        const newPaid = paid + amount;
-        if(newPaid >= Number(ln.total_payable)){
-          await sb.from('pb_loans').update({ status: 'completed' }).eq('id', ln.id);
-          ln.status = 'completed';
+        const closed = row.status === 'approved' ? await closeFullyPaidLoans([ln.id], { silent:true }) : 0;
+        if(closed){
           toast('Loan fully repaid and marked as completed!', 'success');
         } else {
           toast('Repayment recorded successfully.', 'success');
@@ -8591,9 +8689,10 @@ function openEditRepayment(repaymentId){
         rep.interest = interest;
         rep.edit_notes = reason;
         audit('edit_repayment', 'pb_repayments', repaymentId, { amount: oldAmount }, { amount, principal, interest, edit_notes: reason });
+        const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
         closeModal();
         render();
-        toast('Repayment entry updated successfully.', 'success');
+        toast(closed ? 'Repayment updated and loan closed.' : 'Repayment entry updated successfully.', 'success');
       }}
     ]
   });
