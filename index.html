@@ -591,6 +591,12 @@ function isSupervisorScoped(){
   return currentStaffRole() === 'supervisor' && state.staff?.role !== 'admin';
 }
 
+function canViewAllPortfolio(){
+  const role = currentStaffRole();
+  return state.staff?.role === 'admin' ||
+    ['ceo','admin','branch_manager','inventory_officer','storekeeper'].includes(role);
+}
+
 function supervisorTeamName(){
   return String(state.staff?.team_name || '').trim().toLowerCase();
 }
@@ -605,12 +611,12 @@ function visibleOfficerIdsForCurrentStaff(){
 }
 
 function visiblePortfolioGroupsForCurrentStaff(){
-  if(isSupervisorScoped()) return state.data.groups;
+  if(canViewAllPortfolio() || isSupervisorScoped()) return state.data.groups;
   return state.data.groups.filter(g => g.officer_id === state.staff.id);
 }
 
 function currentStaffCanSeePortfolioRecord(record){
-  if(isSupervisorScoped()) return true;
+  if(canViewAllPortfolio() || isSupervisorScoped()) return true;
   const groupIds = new Set(visiblePortfolioGroupsForCurrentStaff().map(g => g.id));
   return groupIds.has(record.group_id) || record.officer_id === state.staff.id ||
     record.recorded_by === state.staff.id || record.logged_by === state.staff.id;
@@ -646,7 +652,7 @@ const PAGE_ACCESS = {
   dashboard:      'ALL',
   groups:         ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   members:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
-  meeting:        ['branch_manager','loan_officer','officer'],
+  meeting:        ['branch_manager','supervisor','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   repayment_approvals: ['branch_manager','ceo','admin','supervisor'],
@@ -1305,7 +1311,7 @@ function navItems(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isLegacyAdmin = state.staff.role === 'admin';
   // Branch manager can access meeting recorder (oversight role)
-  const canSeeMeeting = isLegacyAdmin || r === 'branch_manager' || p.can_record_savings || p.can_record_repayments;
+  const canSeeMeeting = isLegacyAdmin || r === 'branch_manager' || r === 'supervisor' || p.can_record_savings || p.can_record_repayments;
   const pendSavApprovals = state.data.savings.filter(s=>s.status==='pending').length;
   const pendRepApprovals = state.data.repayments.filter(r=>r.status==='pending'&&isClientRepayment(r)).length;
   const pendApprovals = pendingApprovalsCount();
@@ -2286,7 +2292,7 @@ function pageOfficerDashboard(){
 function pageGroups(){
   const isAdmin = state.staff.role === 'admin';
   // Officers only see their own groups
-  let groups = (isAdmin || isSupervisorScoped()) ? state.data.groups : visiblePortfolioGroupsForCurrentStaff();
+  let groups = (canViewAllPortfolio() || isSupervisorScoped()) ? state.data.groups : visiblePortfolioGroupsForCurrentStaff();
 
   // Apply search filter
   const q = (state._groupSearch||'').toLowerCase();
@@ -2512,7 +2518,8 @@ function pageMembers(){
   const isAdmin = state.staff.role === 'admin';
   const canApprove = can('approve_group');
 
-  let list = (isAdmin || canApprove || isSupervisorScoped()) ? state.data.members : state.data.members.filter(m=>{
+  const canSeeAllPortfolio = canViewAllPortfolio();
+  let list = (canSeeAllPortfolio || canApprove || isSupervisorScoped()) ? state.data.members : state.data.members.filter(m=>{
     const g = state.data.groups.find(x=>x.id===m.group_id);
     return g?.officer_id === state.staff.id || m.officer_id === state.staff.id;
   });
@@ -2525,7 +2532,7 @@ function pageMembers(){
   if(state._memberDuplicatesOnly) list = list.filter(isDuplicateMember);
 
   const pendingCount = state.data.members.filter(m => m.status==='pending' &&
-    ((isAdmin||canApprove||isSupervisorScoped()) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
+    ((canSeeAllPortfolio||canApprove||isSupervisorScoped()) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
   ).length;
 
   const PAGE_SIZE = 15;
@@ -2550,7 +2557,7 @@ function pageMembers(){
       </div>
       <select id="mem-group" style="max-width:200px">
         <option value="">All groups</option>
-        ${state.data.groups.filter(g=>isAdmin||canApprove||isSupervisorScoped()||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
+        ${state.data.groups.filter(g=>canSeeAllPortfolio||canApprove||isSupervisorScoped()||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
       </select>
       <select id="mem-status" style="max-width:160px">
         <option value="all" ${filterStatus==='all'?'selected':''}>All statuses</option>
@@ -3388,8 +3395,7 @@ function pageMemberProfile(){
 function pageMeeting(){
   state._meet = state._meet || { groupId:'', date: todayISO(), entries:{} };
   const m = state._meet;
-  const isAdmin = state.staff.role === 'admin';
-  const myGroups = isAdmin ? state.data.groups : state.data.groups.filter(g=>g.officer_id === state.staff.id);
+  const myGroups = visiblePortfolioGroupsForCurrentStaff();
 
   $('page').innerHTML = `
     <div class="page-head">
@@ -3592,15 +3598,16 @@ async function submitMeeting(){
  * ===================================================================== */
 function pageArrears(){
   const isAdmin = state.staff.role === 'admin';
+  const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
-  const myGroupIds = isAdmin ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
+  const myGroupIds = portfolioView ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start: drStart, end: drEnd } = arrearDateRange();
 
   // Active loans matching visibility rules AND start_date within selected range
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (isAdmin || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -3639,9 +3646,9 @@ function pageArrears(){
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
   let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
-  if (isAdmin && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
+  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
 
-  const officersWithLoans = isAdmin
+  const officersWithLoans = (portfolioView || teamView)
     ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && report.some(r => r.loan.officer_id === s.id))
     : [];
 
@@ -3680,7 +3687,7 @@ function pageArrears(){
         ].map(([k, label]) => `<button class="${tab===k?'active':''}" onclick="state._arrearsTab='${k}';pageArrears()">${label}</button>`).join('')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        ${isAdmin && officersWithLoans.length ? `
+        ${(portfolioView || teamView) && officersWithLoans.length ? `
           <select style="max-width:200px" onchange="state._arrearsOfficerFilter=this.value;pageArrears()">
             <option value="">All Officers</option>
             ${officersWithLoans.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
@@ -3715,14 +3722,15 @@ function pageArrears(){
 }
 function exportArrearsCollectionSheet(){
   const isAdmin = state.staff.role === 'admin';
+  const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
-  const myGroupIds = isAdmin ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
+  const myGroupIds = portfolioView ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start: drStart, end: drEnd } = arrearDateRange();
 
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (isAdmin || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -3757,7 +3765,7 @@ function exportArrearsCollectionSheet(){
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
   let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
-  if (isAdmin && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
+  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
 
   if(!filtered.length){ toast('No records in current view to export.','warn'); return; }
 
@@ -3783,7 +3791,7 @@ function exportArrearsCollectionSheet(){
 function pageLoans(){
   const isAdmin = state.staff.role === 'admin';
   const r = state.staff?.app_role || state.staff?.role || 'officer';
-  const canSeeAll = r === 'ceo' || r === 'admin' || r === 'branch_manager' || r === 'supervisor';
+  const canSeeAll = canViewAllPortfolio() || r === 'supervisor';
   const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
 
   // Compute loan date range
@@ -3851,7 +3859,7 @@ function pageLoans(){
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         ${tab==='active' ? `<button class="btn btn-outline btn-sm" onclick="openCollectionSheetModal()" title="Export collection sheet as Excel">📋 Collection Sheet</button>` : ''}
-        ${isAdmin ? `
+        ${canSeeAll ? `
         <select style="max-width:200px" onchange="state._loanOfficerFilter=this.value; pageLoans()">
           <option value="">All Officers</option>
           ${state.data.staff.filter(s=>s.role==='officer'||s.role==='loan_officer').map(o=>`<option value="${o.id}" ${state._loanOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
@@ -3879,7 +3887,7 @@ function pageLoans(){
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
-          <th>Member</th><th>Group</th><th>Asset</th>${isAdmin?'<th>Officer</th>':''}<th>Start Date</th><th class="num">Loan value</th>
+          <th>Member</th><th>Group</th><th>Asset</th>${canSeeAll?'<th>Officer</th>':''}<th>Start Date</th><th class="num">Loan value</th>
           <th class="num">Weekly</th><th class="num">Paid</th><th class="num">Outstanding</th>
           <th>Status</th><th></th>
         </tr></thead>
@@ -3897,7 +3905,7 @@ function pageLoans(){
               <td><b>${m?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow" title="Duplicate loan detected — use ··· to delete">⚠ Duplicate</span>`:''}</td>
               <td>${grp?.name||'—'}</td>
               <td>${l.asset_name}</td>
-              ${isAdmin ? `<td style="font-size:12px;color:var(--text-muted)">${off?.full_name||'—'}</td>` : ''}
+              ${canSeeAll ? `<td style="font-size:12px;color:var(--text-muted)">${off?.full_name||'—'}</td>` : ''}
               <td>${fmtDate(l.start_date)}</td>
               <td class="num">${KES(l.loan_value)}</td>
               <td class="num">${KES(l.weekly_installment)}</td>
@@ -3906,7 +3914,7 @@ function pageLoans(){
               <td><span class="badge ${bcls}">${l.status}</span></td>
               <td><button class="act-btn" onclick="loanActions(event,'${l.id}')">···</button></td>
             </tr>`;
-          }).join('') || `<tr><td colspan="${isAdmin?11:10}"><div class="empty"><h4>No loans found</h4><p>Loans are created automatically when admins fulfill approved orders.</p></div></td></tr>`}
+          }).join('') || `<tr><td colspan="${canSeeAll?11:10}"><div class="empty"><h4>No loans found</h4><p>Loans are created automatically when admins fulfill approved orders.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
@@ -8190,8 +8198,9 @@ async function approveAllRepayments(){
 
 function pageRepayments(){
   const isAdmin = state.staff.role === 'admin';
+  const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
-  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
+  const myGroupIds = portfolioView ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
 
   const { start, end } = repDateRange();
   const inRange = r => {
@@ -8202,7 +8211,7 @@ function pageRepayments(){
   };
 
   let filtered = state.data.repayments.filter(r => {
-    if(!isAdmin && !teamView && !myGroupIds.includes(r.group_id)) return false;
+    if(!portfolioView && !teamView && !myGroupIds.includes(r.group_id)) return false;
     if(!inRange(r)) return false;
     if(_repGroupFilter && r.group_id !== _repGroupFilter) return false;
     if(_repOfficerFilter && r.recorded_by !== _repOfficerFilter) return false;
@@ -8215,7 +8224,7 @@ function pageRepayments(){
   const showFees   = state._repShowFees || false;
   const displayed  = showFees ? feeReps : clientReps;
 
-  const groups = (isAdmin || teamView)
+  const groups = (portfolioView || teamView)
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
   const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
@@ -8253,7 +8262,7 @@ function pageRepayments(){
         <option value="">All Groups</option>
         ${groups.map(g=>`<option value="${g.id}" ${_repGroupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
       </select>
-      ${isAdmin ? `<select style="max-width:220px;font-size:13px" onchange="_repOfficerFilter=this.value;pageRepayments()">
+      ${portfolioView ? `<select style="max-width:220px;font-size:13px" onchange="_repOfficerFilter=this.value;pageRepayments()">
         <option value="">All Officers</option>
         ${officers.map(o=>`<option value="${o.id}" ${_repOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
       </select>` : ''}
@@ -8335,8 +8344,9 @@ function repRowActions(ev, id){
 
 function exportRepaymentsFiltered(){
   const isAdmin = state.staff.role === 'admin';
+  const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
-  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
+  const myGroupIds = portfolioView ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start, end } = repDateRange();
   const inRange = r => {
     const d = (r.meeting_date||'').slice(0,10);
@@ -8345,7 +8355,7 @@ function exportRepaymentsFiltered(){
     return false;
   };
   const filtered = state.data.repayments.filter(r => {
-    if(!isAdmin && !teamView && !myGroupIds.includes(r.group_id)) return false;
+    if(!portfolioView && !teamView && !myGroupIds.includes(r.group_id)) return false;
     if(!inRange(r)) return false;
     if(_repGroupFilter && r.group_id !== _repGroupFilter) return false;
     if(_repOfficerFilter && r.recorded_by !== _repOfficerFilter) return false;
