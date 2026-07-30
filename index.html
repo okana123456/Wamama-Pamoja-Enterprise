@@ -604,6 +604,18 @@ function visibleOfficerIdsForCurrentStaff(){
     .map(s => s.id));
 }
 
+function visiblePortfolioGroupsForCurrentStaff(){
+  if(isSupervisorScoped()) return state.data.groups;
+  return state.data.groups.filter(g => g.officer_id === state.staff.id);
+}
+
+function currentStaffCanSeePortfolioRecord(record){
+  if(isSupervisorScoped()) return true;
+  const groupIds = new Set(visiblePortfolioGroupsForCurrentStaff().map(g => g.id));
+  return groupIds.has(record.group_id) || record.officer_id === state.staff.id ||
+    record.recorded_by === state.staff.id || record.logged_by === state.staff.id;
+}
+
 function applySupervisorDataScope(){
   if(!isSupervisorScoped()) return;
   const visibleOfficerIds = visibleOfficerIdsForCurrentStaff();
@@ -2140,7 +2152,8 @@ function pageInventoryDashboard(){
 
 function pageOfficerDashboard(){
   const me = state.staff;
-  const myGroups = state.data.groups.filter(g=>g.officer_id===me.id);
+  const teamView = isSupervisorScoped();
+  const myGroups = visiblePortfolioGroupsForCurrentStaff();
   const myMembers = state.data.members.filter(m=>myGroups.some(g=>g.id===m.group_id));
   const { start, end } = dashDateRange();
   const inRangeOff = (dateStr, createdAt) => {
@@ -2150,28 +2163,28 @@ function pageOfficerDashboard(){
     if(createdAt){ const cd = new Date(createdAt).toISOString().slice(0,10); if(cd >= start && cd <= end) return true; }
     return false;
   };
-  const mySavings = state.data.savings.filter(s=>s.recorded_by===me.id && inRangeOff(s.meeting_date, s.created_at) && s.status !== 'pending');
-  const myRepay = state.data.repayments.filter(r=>r.recorded_by===me.id && inRangeOff(r.meeting_date, r.created_at) && r.status !== 'pending' && isClientRepayment(r));
+  const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && s.status !== 'pending');
+  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && r.status !== 'pending' && isClientRepayment(r));
   const myGroupIds = new Set(myGroups.map(g=>g.id));
-  const myLoans = state.data.loans.filter(l=>l.status==='active' && (l.officer_id===me.id || myGroupIds.has(l.group_id)));
+  const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRp = myRepay.reduce((a,b)=>a+Number(b.amount||0),0);
   const myOutstandingBal = myLoans.reduce((a,l)=>a+(Number(l.total_payable||0)-loanPaid(l.id)),0);
   const myInterestEarned = myRepay.reduce((a,r)=>a+Number(r.interest||0),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
-  const myPendingSavings = state.data.savings.filter(s=>s.recorded_by===me.id && s.status==='pending');
-  const myPendingRepayments = state.data.repayments.filter(r=>r.recorded_by===me.id && r.status==='pending');
+  const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
+  const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending');
   const myPendingSavingsTotal = myPendingSavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const myPendingRepaymentsTotal = myPendingRepayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const todayStr = todayISO();
-  const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && l.officer_id===me.id && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
+  const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
 
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','Last month'],['3months','Last 3 months'],['custom','Custom']
   ];
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>My dashboard</h1><div class="desc">Your personal performance summary, ${me.full_name}.</div></div>
+      <div><h1>${teamView ? `${state.staff.team_name || 'Team'} dashboard` : 'My dashboard'}</h1><div class="desc">${teamView ? `Performance and portfolio for ${state.staff.team_name || 'your assigned team'}.` : `Your personal performance summary, ${me.full_name}.`}</div></div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
       ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_dashFilter===k?'btn-primary':'btn-outline'}" onclick="_dashFilter='${k}';pageDashboard()">${l}</button>`).join('')}
@@ -2180,10 +2193,10 @@ function pageOfficerDashboard(){
       <input type="date" value="${_dashCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_dashCustomEnd=this.value;pageDashboard()" />`:''}
     </div>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-      <div class="kpi k-primary"><div class="l">My groups</div><div class="v">${myGroups.length}</div></div>
+      <div class="kpi k-primary"><div class="l">${teamView ? 'Team groups' : 'My groups'}</div><div class="v">${myGroups.length}</div></div>
       <div class="kpi k-success"><div class="l">Savings recorded</div><div class="v">${KES(totalSv)}</div><div class="d">${mySavings.length} approved entries</div></div>
       <div class="kpi"><div class="l">Repayments recorded</div><div class="v">${KES(totalRp)}</div><div class="d">Interest ${KES(myInterestEarned)}</div></div>
-      <div class="kpi k-warn"><div class="l">Active loans I manage</div><div class="v">${myLoans.length}</div></div>
+      <div class="kpi k-warn"><div class="l">${teamView ? 'Team active loans' : 'Active loans I manage'}</div><div class="v">${myLoans.length}</div></div>
       <div class="kpi k-danger"><div class="l">Outstanding balance</div><div class="v">${KES(myOutstandingBal)}</div><div class="d">across my active loans</div></div>
       <div class="kpi k-primary"><div class="l">Loans Issued Today</div><div class="v">${KES(myLoansIssuedToday)}</div><div class="d">active loans started today</div></div>
       ${(myPendingSavings.length + myPendingRepayments.length) > 0 ? `
@@ -2194,7 +2207,7 @@ function pageOfficerDashboard(){
       </div>` : ''}
     </div>
     <div class="card" style="margin-top:16px">
-      <div class="card-head"><h3>My groups</h3><div class="sub">Savings &amp; repayments today = ${todayStr}</div></div>
+      <div class="card-head"><h3>${teamView ? 'Team groups' : 'My groups'}</h3><div class="sub">Savings &amp; repayments today = ${todayStr}</div></div>
       <div style="overflow-x:auto"><table class="tbl">
         <thead><tr>
           <th>Group</th><th class="num">Members</th><th class="num">Total savings</th>
@@ -2250,7 +2263,7 @@ function pageOfficerDashboard(){
 function pageGroups(){
   const isAdmin = state.staff.role === 'admin';
   // Officers only see their own groups
-  let groups = isAdmin ? state.data.groups : state.data.groups.filter(g=>g.officer_id===state.staff.id);
+  let groups = (isAdmin || isSupervisorScoped()) ? state.data.groups : visiblePortfolioGroupsForCurrentStaff();
 
   // Apply search filter
   const q = (state._groupSearch||'').toLowerCase();
@@ -2476,7 +2489,7 @@ function pageMembers(){
   const isAdmin = state.staff.role === 'admin';
   const canApprove = can('approve_group');
 
-  let list = (isAdmin || canApprove) ? state.data.members : state.data.members.filter(m=>{
+  let list = (isAdmin || canApprove || isSupervisorScoped()) ? state.data.members : state.data.members.filter(m=>{
     const g = state.data.groups.find(x=>x.id===m.group_id);
     return g?.officer_id === state.staff.id || m.officer_id === state.staff.id;
   });
@@ -2489,7 +2502,7 @@ function pageMembers(){
   if(state._memberDuplicatesOnly) list = list.filter(isDuplicateMember);
 
   const pendingCount = state.data.members.filter(m => m.status==='pending' &&
-    ((isAdmin||canApprove) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
+    ((isAdmin||canApprove||isSupervisorScoped()) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
   ).length;
 
   const PAGE_SIZE = 15;
@@ -2514,7 +2527,7 @@ function pageMembers(){
       </div>
       <select id="mem-group" style="max-width:200px">
         <option value="">All groups</option>
-        ${state.data.groups.filter(g=>isAdmin||canApprove||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
+        ${state.data.groups.filter(g=>isAdmin||canApprove||isSupervisorScoped()||g.officer_id===state.staff.id).map(g=>`<option value="${g.id}" ${filterGroup===g.id?'selected':''}>${g.name}</option>`).join('')}
       </select>
       <select id="mem-status" style="max-width:160px">
         <option value="all" ${filterStatus==='all'?'selected':''}>All statuses</option>
@@ -3483,14 +3496,15 @@ async function submitMeeting(){
  * ===================================================================== */
 function pageArrears(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start: drStart, end: drEnd } = arrearDateRange();
 
   // Active loans matching visibility rules AND start_date within selected range
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (isAdmin || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (isAdmin || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -3605,13 +3619,14 @@ function pageArrears(){
 }
 function exportArrearsCollectionSheet(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start: drStart, end: drEnd } = arrearDateRange();
 
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (isAdmin || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (isAdmin || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -6822,10 +6837,11 @@ async function deleteSoldItemsForm(orderId){
 
 function pageReconciliation(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
 
   const list = (state.data.reconciliations||[])
-    .filter(r => isAdmin || myGroupIds.includes(r.group_id) || r.logged_by === state.staff.id)
+    .filter(r => isAdmin || teamView || myGroupIds.includes(r.group_id) || r.logged_by === state.staff.id)
     .slice()
     .sort((a,b)=> new Date(b.meeting_date)-new Date(a.meeting_date));
 
@@ -6924,9 +6940,9 @@ function pageReconciliation(){
 
 function openReconForm(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroups = isAdmin
+  const myGroups = (isAdmin || isSupervisorScoped())
     ? state.data.groups
-    : state.data.groups.filter(g=>g.officer_id===state.staff.id);
+    : visiblePortfolioGroupsForCurrentStaff();
 
   modal({
     title:'Log chairperson remittance',
@@ -7543,7 +7559,8 @@ async function bulkDeleteSelectedSavings(){
 
 function pageSavings(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? null : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
 
   const { start, end } = savingsDateRange();
   const inRange = s => {
@@ -7554,7 +7571,7 @@ function pageSavings(){
   };
 
   let filtered = state.data.savings.filter(s => {
-    if(!isAdmin && !myGroupIds.includes(s.group_id)) return false;
+    if(!isAdmin && !teamView && !myGroupIds.includes(s.group_id)) return false;
     if(!inRange(s)) return false;
     if(_savingsGroupFilter && s.group_id !== _savingsGroupFilter) return false;
     if(_savingsOfficerFilter && s.recorded_by !== _savingsOfficerFilter) return false;
@@ -7572,7 +7589,7 @@ function pageSavings(){
   const selectedVisible = visibleIds.filter(id=>_selectedSavingsIds.has(id)).length;
   const bulkAllowed = canBulkManageSavings();
 
-  const groups = isAdmin
+  const groups = (isAdmin || teamView)
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
   const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
@@ -7705,7 +7722,8 @@ function savingsRowActions(ev, id){
 
 function exportSavingsFiltered(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? null : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start, end } = savingsDateRange();
   const inRange = s => {
     const d = (s.meeting_date||'').slice(0,10);
@@ -7714,7 +7732,7 @@ function exportSavingsFiltered(){
     return false;
   };
   const filtered = state.data.savings.filter(s => {
-    if(!isAdmin && !myGroupIds.includes(s.group_id)) return false;
+    if(!isAdmin && !teamView && !myGroupIds.includes(s.group_id)) return false;
     if(!inRange(s)) return false;
     if(_savingsGroupFilter && s.group_id !== _savingsGroupFilter) return false;
     if(_savingsOfficerFilter && s.recorded_by !== _savingsOfficerFilter) return false;
@@ -8071,7 +8089,8 @@ async function approveAllRepayments(){
 
 function pageRepayments(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? null : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
 
   const { start, end } = repDateRange();
   const inRange = r => {
@@ -8082,7 +8101,7 @@ function pageRepayments(){
   };
 
   let filtered = state.data.repayments.filter(r => {
-    if(!isAdmin && !myGroupIds.includes(r.group_id)) return false;
+    if(!isAdmin && !teamView && !myGroupIds.includes(r.group_id)) return false;
     if(!inRange(r)) return false;
     if(_repGroupFilter && r.group_id !== _repGroupFilter) return false;
     if(_repOfficerFilter && r.recorded_by !== _repOfficerFilter) return false;
@@ -8095,7 +8114,7 @@ function pageRepayments(){
   const showFees   = state._repShowFees || false;
   const displayed  = showFees ? feeReps : clientReps;
 
-  const groups = isAdmin
+  const groups = (isAdmin || teamView)
     ? state.data.groups
     : state.data.groups.filter(g => myGroupIds.includes(g.id));
   const officers = state.data.staff.filter(s => (s.role === 'officer' || s.role === 'loan_officer') && s.status === 'active');
@@ -8215,7 +8234,8 @@ function repRowActions(ev, id){
 
 function exportRepaymentsFiltered(){
   const isAdmin = state.staff.role === 'admin';
-  const myGroupIds = isAdmin ? null : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const teamView = isSupervisorScoped();
+  const myGroupIds = isAdmin ? null : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
   const { start, end } = repDateRange();
   const inRange = r => {
     const d = (r.meeting_date||'').slice(0,10);
@@ -8224,7 +8244,7 @@ function exportRepaymentsFiltered(){
     return false;
   };
   const filtered = state.data.repayments.filter(r => {
-    if(!isAdmin && !myGroupIds.includes(r.group_id)) return false;
+    if(!isAdmin && !teamView && !myGroupIds.includes(r.group_id)) return false;
     if(!inRange(r)) return false;
     if(_repGroupFilter && r.group_id !== _repGroupFilter) return false;
     if(_repOfficerFilter && r.recorded_by !== _repOfficerFilter) return false;
@@ -8307,7 +8327,7 @@ function downloadCollectionSheet(targetDate, officerFilter){
     const dayMatch = (g.meeting_day || '').toLowerCase() === dow.toLowerCase();
     if(!dayMatch) return false;
     if(officerFilter) return g.officer_id === officerFilter;
-    if(!isAdmin) return g.officer_id === state.staff.id;
+    if(!isAdmin && !isSupervisorScoped()) return g.officer_id === state.staff.id;
     return true;
   });
 
