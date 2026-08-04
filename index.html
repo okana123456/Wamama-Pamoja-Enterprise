@@ -990,18 +990,40 @@ async function closeFullyPaidLoans(loanIds, opts={}){
   const ids = [...new Set((loanIds||[]).filter(Boolean))];
   let closed = 0;
   for(const loanId of ids){
-    const ln = state.data.loans.find(l=>l.id===loanId);
-    if(!ln || ln.status !== 'active') continue;
-    const outstanding = Number(ln.total_payable||0) - loanPaid(ln.id);
-    if(outstanding <= 0.01){
-      const { error } = await sb.from('pb_loans').update({ status:'completed' }).eq('id', ln.id);
-      if(error){
-        if(!opts.silent) toast(`Could not close loan: ${error.message}`, 'error');
+    const localLoan = state.data.loans.find(l=>l.id===loanId);
+    const previousStatus = localLoan?.status;
+    const { data:freshLoan, error:loanError } = await sb.from('pb_loans')
+      .select('id,status,total_payable').eq('id',loanId).maybeSingle();
+    if(loanError || !freshLoan){
+      if(loanError && !opts.silent) toast(`Could not check loan: ${loanError.message}`, 'error');
+      continue;
+    }
+
+    // The database trigger normally closes the loan first. Reflect that result
+    // immediately in the browser even when its cached repayment list is stale.
+    if(freshLoan.status === 'completed'){
+      if(localLoan) localLoan.status = 'completed';
+      if(previousStatus === 'active') closed++;
+      continue;
+    }
+    if(freshLoan.status !== 'active') continue;
+
+    const { data:freshRepayments, error:repaymentError } = await sb.from('pb_repayments')
+      .select('amount,status').eq('loan_id',loanId);
+    if(repaymentError){
+      if(!opts.silent) toast(`Could not check repayments: ${repaymentError.message}`, 'error');
+      continue;
+    }
+    const paid=(freshRepayments||[]).filter(countsInBalance).reduce((sum,row)=>sum+Number(row.amount||0),0);
+    if(Number(freshLoan.total_payable||0)>0 && paid+0.01>=Number(freshLoan.total_payable||0)){
+      const { error:updateError } = await sb.from('pb_loans').update({ status:'completed' }).eq('id',loanId).eq('status','active');
+      if(updateError){
+        if(!opts.silent) toast(`Could not close loan: ${updateError.message}`, 'error');
         continue;
       }
-      ln.status = 'completed';
+      if(localLoan) localLoan.status = 'completed';
       closed++;
-      audit('auto_close_fully_paid_loan','pb_loans',ln.id,null,{ paid: loanPaid(ln.id), total_payable: Number(ln.total_payable||0) });
+      audit('auto_close_fully_paid_loan','pb_loans',loanId,null,{ paid, total_payable:Number(freshLoan.total_payable||0) });
     }
   }
   return closed;
@@ -3109,13 +3131,16 @@ function mpSavingMenu(ev, id, isPending){
   showActMenu(ev, items);
 }
 
-function mpApproveRepayment(id){
+async function mpApproveRepayment(id){
   const r = state.data.repayments.find(x=>x.id===id);
   if(!r) return;
-  sb.from('pb_repayments').update({status:'approved'}).eq('id',id).then(({error})=>{
-    if(error) return toast(error.message,'error');
-    r.status='approved'; render(); toast('Repayment approved.','success');
-  });
+  if(!(await ensureFreshToken())) return;
+  const {error}=await sb.from('pb_repayments').update({status:'approved'}).eq('id',id);
+  if(error) return toast(error.message,'error');
+  r.status='approved';
+  const closed=await closeFullyPaidLoans([r.loan_id],{silent:true});
+  render();
+  toast(closed?'Repayment approved and loan closed.':'Repayment approved.','success');
 }
 async function mpDeleteRepayment(id){
   confirmDialog('Delete this repayment entry? This cannot be undone.', async()=>{
@@ -8319,8 +8344,9 @@ function repRowActions(ev, id){
       const { error } = await sb.from('pb_repayments').update({ status: 'approved' }).eq('id', id);
       if(error) return toast(error.message, 'error');
       rep.status = 'approved';
+      const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
-      toast('Repayment entry approved.', 'success');
+      toast(closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
   if(canEdit){
