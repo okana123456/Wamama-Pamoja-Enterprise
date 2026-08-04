@@ -10,6 +10,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3/dist/jspdf.plugin.autotable.min.js"></script>
 <style>
 :root{
   --bg:#fffaf5; --surface:#ffffff; --surface-2:#fff5eb; --border:#ffe0c0;
@@ -8221,6 +8223,168 @@ async function approveAllRepayments(){
   },{ title:'Approve All Repayments' });
 }
 
+function statementHtml(value){
+  return String(value??'').replace(/[&<>"']/g,ch=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[ch]);
+}
+
+async function loadWamamaLoanStatement(loanId){
+  const { data:loan, error:loanError } = await sb.from('pb_loans')
+    .select('*').eq('business_id',state.staff.business_id).eq('id',loanId).maybeSingle();
+  if(loanError) throw loanError;
+  if(!loan) throw new Error('Loan not found.');
+
+  const { data:repayments, error:repaymentError } = await sb.from('pb_repayments')
+    .select('*').eq('business_id',state.staff.business_id).eq('loan_id',loanId)
+    .order('meeting_date',{ascending:true}).order('created_at',{ascending:true});
+  if(repaymentError) throw repaymentError;
+
+  const approved=(repayments||[]).filter(countsInBalance).sort((a,b)=>{
+    const dateCompare=String(a.meeting_date||'').localeCompare(String(b.meeting_date||''));
+    if(dateCompare) return dateCompare;
+    return String(a.created_at||a.id||'').localeCompare(String(b.created_at||b.id||''));
+  });
+  const totalPayable=Number(loan.total_payable||0);
+  let runningPaid=0;
+  const rows=approved.map((repayment,index)=>{
+    runningPaid+=Number(repayment.amount||0);
+    return {
+      ...repayment,
+      sequence:index+1,
+      totalPayable:index===0?totalPayable:null,
+      balanceAfter:Math.max(0,Number((totalPayable-runningPaid).toFixed(2)))
+    };
+  });
+  const member=state.data.members.find(m=>m.id===loan.member_id)||null;
+  const group=state.data.groups.find(g=>g.id===loan.group_id)||null;
+  return {loan,member,group,rows,totalPayable,totalPaid:runningPaid,balance:Math.max(0,Number((totalPayable-runningPaid).toFixed(2)))};
+}
+
+async function openWamamaRepaymentStatement(loanId){
+  try{
+    const statement=await loadWamamaLoanStatement(loanId);
+    const {loan,member,group,rows,totalPayable,totalPaid,balance}=statement;
+    const bodyRows=rows.map(row=>`
+      <tr>
+        <td>${fmtDate(row.meeting_date||row.created_at)}</td>
+        <td>${statementHtml(row.notes||'Manual repayment')}</td>
+        <td class="num">${row.totalPayable===null?'&mdash;':KES(row.totalPayable)}</td>
+        <td class="num"><b>${KES(row.amount)}</b></td>
+        <td class="num" style="font-weight:700;color:${row.balanceAfter<=0?'var(--success)':'var(--danger)'}">${row.balanceAfter<=0?'Cleared':KES(row.balanceAfter)}</td>
+      </tr>`).join('');
+
+    modal({
+      title:`Repayment Statement - ${statementHtml(member?.full_name||'Member')}`,
+      size:'lg',
+      body:`
+        <div class="card" style="padding:14px;margin-bottom:14px;background:var(--surface-2)">
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;font-size:13px">
+            <div><span class="muted">Member</span><br><b>${statementHtml(member?.full_name||'—')}</b></div>
+            <div><span class="muted">Group</span><br><b>${statementHtml(group?.name||'—')}</b></div>
+            <div><span class="muted">Loan asset</span><br><b>${statementHtml(loan.asset_name||'—')}</b></div>
+            <div><span class="muted">Loan status</span><br><b>${statementHtml(loan.status||'—')}</b></div>
+            <div><span class="muted">Total payable</span><br><b>${KES(totalPayable)}</b></div>
+            <div><span class="muted">Total repaid</span><br><b style="color:var(--success)">${KES(totalPaid)}</b></div>
+            <div><span class="muted">Current balance</span><br><b style="color:${balance<=0?'var(--success)':'var(--danger)'}">${balance<=0?'Cleared':KES(balance)}</b></div>
+            <div><span class="muted">Start date</span><br><b>${fmtDate(loan.start_date)}</b></div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr><th>Date</th><th>Description</th><th class="num">Total Loan</th><th class="num">Repayment</th><th class="num">Balance After</th></tr></thead>
+            <tbody>${bodyRows||'<tr><td colspan="5"><div class="empty"><p>No approved repayments recorded for this loan.</p></div></td></tr>'}</tbody>
+          </table>
+        </div>`,
+      actions:[
+        {label:'Close',cls:'btn-outline',onClick:closeModal},
+        {label:'Download PDF',cls:'btn-primary',onClick:()=>downloadWamamaRepaymentStatementPdf(loanId)}
+      ]
+    });
+  }catch(error){
+    toast(error.message||'Could not open the repayment statement.','error');
+  }
+}
+
+async function downloadWamamaRepaymentStatementPdf(loanId){
+  try{
+    const {loan,member,group,rows,totalPayable,totalPaid,balance}=await loadWamamaLoanStatement(loanId);
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+    const orange=[230,92,0];
+    const charcoal=[42,28,18];
+    const green=[19,122,63];
+    const red=[164,38,44];
+
+    doc.setFillColor(...orange);
+    doc.rect(0,0,210,31,'F');
+    doc.setTextColor(255,255,255);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(17);
+    doc.text('WAMAMA PAMOJA ENTERPRISE',14,13);
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(8.5);
+    doc.text('LOAN REPAYMENT STATEMENT',14,21);
+    doc.text(`Generated: ${fmtDate(todayISO())}`,196,17,{align:'right'});
+
+    doc.setFillColor(255,247,239);
+    doc.roundedRect(14,38,182,39,2,2,'F');
+    doc.setTextColor(...charcoal);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(11);
+    doc.text(String(member?.full_name||'Unknown member'),19,47);
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(8.5);
+    doc.text(`Group: ${group?.name||'-'}`,19,54);
+    doc.text(`Asset: ${loan.asset_name||'-'}`,19,61);
+    doc.text(`Start date: ${fmtDate(loan.start_date)}`,19,68);
+    doc.text(`Total payable: ${KES(totalPayable)}`,108,47);
+    doc.text(`Total repaid: ${KES(totalPaid)}`,108,54);
+    doc.text(`Current balance: ${KES(balance)}`,108,61);
+    doc.setFont('helvetica','bold');
+    doc.setTextColor(...(balance<=0?green:red));
+    doc.text(balance<=0?'PAID IN FULL':'BALANCE OUTSTANDING',108,69);
+
+    doc.autoTable({
+      startY:84,
+      head:[['Date','Description','Total Loan','Repayment','Balance After']],
+      body:rows.length?rows.map(row=>[
+        fmtDate(row.meeting_date||row.created_at),
+        row.notes||'Manual repayment',
+        row.totalPayable===null?'':KES(row.totalPayable),
+        KES(row.amount),
+        row.balanceAfter<=0?'CLEARED':KES(row.balanceAfter)
+      ]):[['-','No approved repayments recorded','-',KES(0),KES(balance)]],
+      theme:'grid',
+      styles:{font:'helvetica',fontSize:8,cellPadding:2.5,textColor:charcoal,lineColor:[232,215,200],lineWidth:.2},
+      headStyles:{fillColor:orange,textColor:[255,255,255],fontStyle:'bold'},
+      alternateRowStyles:{fillColor:[255,250,246]},
+      columnStyles:{0:{cellWidth:25},1:{cellWidth:57},2:{cellWidth:32,halign:'right'},3:{cellWidth:32,halign:'right'},4:{cellWidth:36,halign:'right',fontStyle:'bold'}},
+      didParseCell(data){
+        if(data.section==='body'&&data.column.index===4){
+          data.cell.styles.textColor=data.cell.raw==='CLEARED'?green:red;
+        }
+      },
+      didDrawPage(){
+        const pageHeight=doc.internal.pageSize.height;
+        doc.setDrawColor(225,215,205);
+        doc.line(14,pageHeight-15,196,pageHeight-15);
+        doc.setTextColor(110,95,85);
+        doc.setFont('helvetica','normal');
+        doc.setFontSize(7);
+        doc.text('Approved manual repayments recorded in Wamama Pamoja Enterprise.',14,pageHeight-9);
+        doc.text(`Page ${doc.internal.getNumberOfPages()}`,196,pageHeight-9,{align:'right'});
+      }
+    });
+
+    const safeName=String(member?.full_name||'Member').replace(/[^a-z0-9]+/gi,'_').replace(/^_|_$/g,'');
+    doc.save(`${safeName}_Loan_Repayment_Statement.pdf`);
+    toast('Repayment statement downloaded.','success');
+  }catch(error){
+    toast(error.message||'Could not generate the repayment statement.','error');
+  }
+}
+
 function pageRepayments(){
   const isAdmin = state.staff.role === 'admin';
   const portfolioView = canViewAllPortfolio();
@@ -8299,7 +8463,7 @@ function pageRepayments(){
         <thead><tr>
           <th>Date</th><th>Member</th><th>Group</th><th>Loan Asset</th>
           <th class="num">Total</th><th class="num">Principal</th><th class="num">Interest</th>
-          <th>Status</th><th>Recorded By</th><th></th>
+          <th>Status</th><th>Recorded By</th><th></th><th>Statement</th>
         </tr></thead>
         <tbody>
           ${clientReps.length ? clientReps.map(r => {
@@ -8321,8 +8485,9 @@ function pageRepayments(){
               <td>${isPending ? '<span class="badge b-yellow">Pending Approval</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : '<span class="badge b-green">Approved</span>'}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
+              <td>${ln?`<button class="btn btn-outline btn-sm" onclick="openWamamaRepaymentStatement('${ln.id}')">Statement</button>`:'&mdash;'}</td>
             </tr>`;
-          }).join('') : `<tr><td colspan="10"><div class="empty"><h4>No repayments found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
+          }).join('') : `<tr><td colspan="11"><div class="empty"><h4>No repayments found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
