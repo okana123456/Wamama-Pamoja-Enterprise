@@ -7736,6 +7736,117 @@ async function bulkDeleteSelectedSavings(){
   },{ title:'Bulk Delete Savings', danger:true });
 }
 
+async function loadWamamaSavingsStatement(memberId){
+  const member=state.data.members.find(m=>String(m.id)===String(memberId));
+  if(!member) throw new Error('Member not found.');
+  const {data:savings,error}=await sb.from('pb_savings')
+    .select('*').eq('business_id',state.staff.business_id).eq('member_id',memberId)
+    .order('meeting_date',{ascending:true}).order('created_at',{ascending:true});
+  if(error) throw error;
+  const approved=(savings||[]).filter(countsInBalance).sort((a,b)=>{
+    const dateCompare=String(a.meeting_date||'').localeCompare(String(b.meeting_date||''));
+    return dateCompare||String(a.created_at||a.id||'').localeCompare(String(b.created_at||b.id||''));
+  });
+  let runningBalance=0,totalDeposits=0,totalRefunds=0;
+  const rows=approved.map((entry,index)=>{
+    const amount=Number(entry.amount||0);
+    if(amount>=0) totalDeposits+=amount; else totalRefunds+=Math.abs(amount);
+    runningBalance=Number((runningBalance+amount).toFixed(2));
+    return {...entry,sequence:index+1,deposit:amount>0?amount:0,refund:amount<0?Math.abs(amount):0,runningBalance};
+  });
+  const group=state.data.groups.find(g=>String(g.id)===String(member.group_id))
+    ||state.data.groups.find(g=>rows.some(row=>String(row.group_id)===String(g.id)))||null;
+  return {member,group,rows,totalDeposits,totalRefunds,balance:Number((totalDeposits-totalRefunds).toFixed(2))};
+}
+
+async function openWamamaSavingsStatement(memberId){
+  try{
+    const {member,group,rows,totalDeposits,totalRefunds,balance}=await loadWamamaSavingsStatement(memberId);
+    const bodyRows=rows.map(row=>`<tr>
+      <td>${fmtDate(row.meeting_date||row.created_at)}</td>
+      <td>${statementHtml(row.notes||(row.refund?'Savings refund':'Savings deposit'))}</td>
+      <td class="num">${row.deposit?KES(row.deposit):'&mdash;'}</td>
+      <td class="num">${row.refund?KES(row.refund):'&mdash;'}</td>
+      <td class="num"><b>${KES(row.runningBalance)}</b></td>
+    </tr>`).join('');
+    modal({
+      title:`Savings Statement - ${statementHtml(member.full_name||'Member')}`,
+      size:'lg',
+      body:`<div class="card" style="padding:14px;margin-bottom:14px;background:var(--surface-2)">
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;font-size:13px">
+          <div><span class="muted">Member</span><br><b>${statementHtml(member.full_name||'&mdash;')}</b></div>
+          <div><span class="muted">Group</span><br><b>${statementHtml(group?.name||'&mdash;')}</b></div>
+          <div><span class="muted">Phone</span><br><b>${statementHtml(member.phone||'&mdash;')}</b></div>
+          <div><span class="muted">ID number</span><br><b>${statementHtml(member.national_id||'&mdash;')}</b></div>
+          <div><span class="muted">Total deposits</span><br><b style="color:var(--success)">${KES(totalDeposits)}</b></div>
+          <div><span class="muted">Total refunds</span><br><b style="color:var(--danger)">${KES(totalRefunds)}</b></div>
+          <div><span class="muted">Current savings balance</span><br><b>${KES(balance)}</b></div>
+          <div><span class="muted">Approved transactions</span><br><b>${rows.length}</b></div>
+        </div></div>
+        <div class="table-wrap"><table class="tbl">
+          <thead><tr><th>Date</th><th>Description</th><th class="num">Deposit</th><th class="num">Refund</th><th class="num">Balance</th></tr></thead>
+          <tbody>${bodyRows||'<tr><td colspan="5"><div class="empty"><p>No approved savings transactions recorded.</p></div></td></tr>'}</tbody>
+        </table></div>`,
+      actions:[
+        {label:'Close',cls:'btn-outline',onClick:closeModal},
+        {label:'Download PDF',cls:'btn-primary',onClick:()=>downloadWamamaSavingsStatementPdf(memberId)}
+      ]
+    });
+  }catch(error){ toast(error.message||'Could not open the savings statement.','error'); }
+}
+
+async function downloadWamamaSavingsStatementPdf(memberId){
+  try{
+    const {member,group,rows,totalDeposits,totalRefunds,balance}=await loadWamamaSavingsStatement(memberId);
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+    const orange=[230,92,0],charcoal=[42,28,18],green=[19,122,63],red=[164,38,44];
+    doc.setFillColor(...orange); doc.rect(0,0,210,31,'F');
+    doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(17);
+    doc.text('WAMAMA PAMOJA ENTERPRISE',14,13);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+    doc.text('MEMBER SAVINGS STATEMENT',14,21);
+    doc.text(`Generated: ${fmtDate(todayISO())}`,196,17,{align:'right'});
+    doc.setFillColor(255,247,239); doc.roundedRect(14,38,182,42,2,2,'F');
+    doc.setTextColor(...charcoal); doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text(String(member.full_name||'Unknown member'),19,47);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+    doc.text(`Group: ${group?.name||'-'}`,19,55);
+    doc.text(`Phone: ${member.phone||'-'}`,19,62);
+    doc.text(`ID number: ${member.national_id||'-'}`,19,69);
+    doc.text(`Account status: ${String(member.status||'-').toUpperCase()}`,19,76);
+    doc.text(`Total deposits: ${KES(totalDeposits)}`,108,47);
+    doc.text(`Total refunds: ${KES(totalRefunds)}`,108,55);
+    doc.setFont('helvetica','bold'); doc.setTextColor(...(balance>=0?green:red));
+    doc.text(`Current balance: ${KES(balance)}`,108,64);
+    doc.setTextColor(...charcoal); doc.setFont('helvetica','normal');
+    doc.text(`Approved transactions: ${rows.length}`,108,73);
+    doc.autoTable({
+      startY:87,
+      head:[['Date','Description','Deposit','Refund','Running Balance']],
+      body:rows.length?rows.map(row=>[
+        fmtDate(row.meeting_date||row.created_at),row.notes||(row.refund?'Savings refund':'Savings deposit'),
+        row.deposit?KES(row.deposit):'',row.refund?KES(row.refund):'',KES(row.runningBalance)
+      ]):[['-','No approved savings transactions','-','-',KES(0)]],
+      theme:'grid',
+      styles:{font:'helvetica',fontSize:8,cellPadding:2.5,textColor:charcoal,lineColor:[232,215,200],lineWidth:.2},
+      headStyles:{fillColor:orange,textColor:[255,255,255],fontStyle:'bold'},
+      alternateRowStyles:{fillColor:[255,250,246]},
+      columnStyles:{0:{cellWidth:25},1:{cellWidth:61},2:{cellWidth:31,halign:'right',textColor:green},3:{cellWidth:31,halign:'right',textColor:red},4:{cellWidth:34,halign:'right',fontStyle:'bold'}},
+      didDrawPage(){
+        const pageHeight=doc.internal.pageSize.height;
+        doc.setDrawColor(225,215,205); doc.line(14,pageHeight-15,196,pageHeight-15);
+        doc.setTextColor(110,95,85); doc.setFont('helvetica','normal'); doc.setFontSize(7);
+        doc.text('Approved savings deposits and refunds recorded in Wamama Pamoja Enterprise.',14,pageHeight-9);
+        doc.text(`Page ${doc.internal.getNumberOfPages()}`,196,pageHeight-9,{align:'right'});
+      }
+    });
+    const safeName=String(member.full_name||'Member').replace(/[^a-z0-9]+/gi,'_').replace(/^_|_$/g,'');
+    doc.save(`${safeName}_Savings_Statement.pdf`);
+    toast('Savings statement downloaded.','success');
+  }catch(error){ toast(error.message||'Could not generate the savings statement.','error'); }
+}
+
 function pageSavings(){
   const isAdmin = state.staff.role === 'admin';
   const teamView = isSupervisorScoped();
@@ -7831,7 +7942,7 @@ function pageSavings(){
       <table class="tbl">
         <thead><tr>
           ${bulkAllowed?`<th style="width:34px"><input type="checkbox" ${visibleIds.length&&selectedVisible===visibleIds.length?'checked':''} onchange="toggleAllVisibleSavings(this.checked)" title="Select all visible savings"></th>`:''}
-          <th>Date</th><th>Member</th><th>Group</th><th class="num">Amount</th><th>Status</th><th>Recorded By</th><th></th>
+          <th>Date</th><th>Member</th><th>Group</th><th class="num">Amount</th><th>Status</th><th>Recorded By</th><th></th><th>Statement</th>
         </tr></thead>
         <tbody>
           ${filtered.length ? filtered.map(s => {
@@ -7850,8 +7961,9 @@ function pageSavings(){
               <td>${isPending ? '<span class="badge b-yellow">Pending Admin Approval</span>' : '<span class="badge b-green">Approved</span>'}${isDup?` <span class="badge b-yellow">Duplicate</span>`:''}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="savingsRowActions(event,'${s.id}')">···</button></td>
+              <td>${mem?`<button class="btn btn-outline btn-sm" onclick="openWamamaSavingsStatement('${mem.id}')">Statement</button>`:'&mdash;'}</td>
             </tr>`;
-          }).join('') : `<tr><td colspan="${bulkAllowed?8:7}"><div class="empty"><h4>No savings found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
+          }).join('') : `<tr><td colspan="${bulkAllowed?9:8}"><div class="empty"><h4>No savings found</h4><p>Try adjusting the date or filters.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
