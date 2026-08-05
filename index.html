@@ -7847,6 +7847,24 @@ async function downloadWamamaSavingsStatementPdf(memberId){
   }catch(error){ toast(error.message||'Could not generate the savings statement.','error'); }
 }
 
+let _savingsSearchTimer=null;
+function handleSavingsSearchInput(input){
+  _savingsSearch=input.value;
+  const cursor=input.selectionStart??_savingsSearch.length;
+  if(_savingsSearchTimer) clearTimeout(_savingsSearchTimer);
+  _savingsSearchTimer=setTimeout(()=>{
+    _savingsSearchTimer=null;
+    pageSavings();
+    requestAnimationFrame(()=>{
+      const search=$('savings-search');
+      if(!search) return;
+      search.focus();
+      const nextCursor=Math.min(cursor,search.value.length);
+      search.setSelectionRange(nextCursor,nextCursor);
+    });
+  },120);
+}
+
 function pageSavings(){
   const isAdmin = state.staff.role === 'admin';
   const teamView = isSupervisorScoped();
@@ -7908,7 +7926,7 @@ function pageSavings(){
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
-      <input value="${_savingsSearch}" placeholder="Search member name, ID, phone, or group..." style="min-width:260px;flex:1;font-size:13px" oninput="_savingsSearch=this.value;pageSavings()" />
+      <input id="savings-search" value="${statementHtml(_savingsSearch)}" placeholder="Search member name, ID, phone, or group..." style="min-width:260px;flex:1;font-size:13px" oninput="handleSavingsSearchInput(this)" />
       <select style="max-width:220px;font-size:13px" onchange="_savingsGroupFilter=this.value;pageSavings()">
         <option value="">All Groups</option>
         ${groups.map(g=>`<option value="${g.id}" ${_savingsGroupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
