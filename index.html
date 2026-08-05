@@ -319,6 +319,47 @@ const CACHEABLE_DATA_KEYS = new Set([
   'groups', 'members', 'staff', 'inventory', 'loans', 'orders',
   'meetings', 'suppliers', 'purchases', 'purchaseLines', 'settings'
 ]);
+const FINANCIAL_CACHE_TABLES = new Set(['pb_savings','pb_repayments']);
+const FINANCIAL_CACHE_VERSION = 1;
+const FINANCIAL_FULL_SYNC_MS = 7 * 24 * 60 * 60 * 1000;
+const FINANCIAL_RECENT_DAYS = 14;
+
+function openFinancialCache(){
+  return new Promise((resolve,reject)=>{
+    const request=indexedDB.open('wamama-financial-cache',FINANCIAL_CACHE_VERSION);
+    request.onupgradeneeded=()=>{
+      const db=request.result;
+      if(!db.objectStoreNames.contains('tables')) db.createObjectStore('tables',{keyPath:'key'});
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error);
+  });
+}
+function financialCacheKey(table){
+  return `${state.staff?.business_id||'default'}:${state.staff?.id||'anonymous'}:${table}:v${FINANCIAL_CACHE_VERSION}`;
+}
+async function readFinancialCache(table){
+  try{
+    const db=await openFinancialCache();
+    return await new Promise((resolve,reject)=>{
+      const request=db.transaction('tables','readonly').objectStore('tables').get(financialCacheKey(table));
+      request.onsuccess=()=>resolve(request.result||null);
+      request.onerror=()=>reject(request.error);
+    });
+  }catch{return null;}
+}
+async function writeFinancialCache(table,rows,fullSyncAt){
+  try{
+    const db=await openFinancialCache();
+    await new Promise((resolve,reject)=>{
+      const request=db.transaction('tables','readwrite').objectStore('tables').put({
+        key:financialCacheKey(table), rows:rows||[], fullSyncAt:fullSyncAt||Date.now(), savedAt:Date.now()
+      });
+      request.onsuccess=()=>resolve();
+      request.onerror=()=>reject(request.error);
+    });
+  }catch{}
+}
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -469,7 +510,7 @@ setInterval(async ()=>{
     await loadBillingStatus({ silent:true });
     if(wasLocked !== !!state.billing?.locked || shouldShowBillingReminder()) render();
   }
-}, 60000);
+}, 5 * 60 * 1000);
 
 /* =====================================================================
  * STATE
@@ -838,6 +879,53 @@ async function fetchBusinessTableRows(table){
   return { data: rows, error: null };
 }
 
+async function fetchRecentFinancialRows(table, cached){
+  const cutoff=new Date(Date.now()-FINANCIAL_RECENT_DAYS*24*60*60*1000).toISOString();
+  let recentQuery=sb.from(table).select('*').gte('created_at',cutoff).order('created_at',{ascending:false});
+  let pendingQuery=sb.from(table).select('*').eq('status','pending');
+  if(state.staff?.business_id){
+    recentQuery=recentQuery.eq('business_id',state.staff.business_id);
+    pendingQuery=pendingQuery.eq('business_id',state.staff.business_id);
+  }
+  const [recentResult,pendingResult]=await Promise.all([recentQuery,pendingQuery]);
+  if(recentResult.error) return {data:cached.rows||[],error:recentResult.error,fromCache:true};
+  if(pendingResult.error) return {data:cached.rows||[],error:pendingResult.error,fromCache:true};
+
+  const cachedRows=cached.rows||[];
+  const oldPendingIds=cachedRows
+    .filter(row=>row.status==='pending' && String(row.created_at||'')<cutoff)
+    .map(row=>row.id).filter(Boolean);
+  let resolvedOldPending=[];
+  for(let i=0;i<oldPendingIds.length;i+=100){
+    let query=sb.from(table).select('*').in('id',oldPendingIds.slice(i,i+100));
+    if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+    const result=await query;
+    if(!result.error) resolvedOldPending.push(...(result.data||[]));
+  }
+
+  const merged=new Map();
+  cachedRows
+    .filter(row=>String(row.created_at||'')<cutoff && row.status!=='pending')
+    .forEach(row=>merged.set(row.id,row));
+  [...(recentResult.data||[]),...(pendingResult.data||[]),...resolvedOldPending]
+    .forEach(row=>merged.set(row.id,row));
+  return {data:[...merged.values()],error:null,fromCache:true};
+}
+
+async function loadBusinessTableOptimized(table){
+  if(!FINANCIAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
+  const cached=await readFinancialCache(table);
+  const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=FINANCIAL_FULL_SYNC_MS;
+  if(needsFull){
+    const result=await fetchBusinessTableRows(table);
+    if(!result.error) await writeFinancialCache(table,result.data,Date.now());
+    return result;
+  }
+  const result=await fetchRecentFinancialRows(table,cached);
+  if(!result.error) await writeFinancialCache(table,result.data,cached.fullSyncAt);
+  return result;
+}
+
 async function smartLoadAll(){
   // Refresh the token before bulk fetching to avoid 401s on expired sessions
   if(navigator.onLine){
@@ -857,7 +945,7 @@ async function smartLoadAll(){
   state.loading = true; render();
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
-  const results = await Promise.all(tables.map(t => fetchBusinessTableRows(t)));
+  const results = await Promise.all(tables.map(t => loadBusinessTableOptimized(t)));
   let jwtBroken = false;
   results.forEach((r,i) => {
     if(!r.error){
@@ -1860,7 +1948,7 @@ function dashDateRange(){
     return { start: iso(d), end: today };
   }
   if(_dashFilter==='month'){
-    const d = new Date(now); d.setMonth(d.getMonth()-1);
+    const d = new Date(now); d.setDate(1);
     return { start: iso(d), end: today };
   }
   if(_dashFilter==='3months'){
@@ -1885,7 +1973,7 @@ function arrearDateRange(){
     return { start: iso(d), end: today };
   }
   if(_arrearsFilter === 'month'){
-    const d = new Date(now); d.setMonth(d.getMonth()-1);
+    const d = new Date(now); d.setDate(1);
     return { start: iso(d), end: today };
   }
   if(_arrearsFilter === '3months'){
@@ -1950,7 +2038,7 @@ function pageDashboard(){
   }).sort((a,b)=>b.savings-a.savings);
 
   const filterBtns = [
-    ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','Last month'],['3months','Last 3 months'],['custom','Custom']
+    ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
   ];
 
   $('page').innerHTML = `
@@ -2242,7 +2330,7 @@ function pageOfficerDashboard(){
   const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
 
   const filterBtns = [
-    ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','Last month'],['3months','Last 3 months'],['custom','Custom']
+    ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
   ];
   $('page').innerHTML = `
     <div class="page-head">
@@ -3727,7 +3815,7 @@ function pageArrears(){
     : [];
 
   const filterBtns = [
-    ['all','All Time'],['week','Last 7 Days'],['month','Last Month'],['3months','Last 3 Months'],['6months','Last 6 Months'],['custom','Custom']
+    ['all','All Time'],['week','Last 7 Days'],['month','This Month'],['3months','Last 3 Months'],['6months','Last 6 Months'],['custom','Custom']
   ];
 
   $('page').innerHTML = `
@@ -7333,7 +7421,7 @@ function reconActions(ev, id){
 function pageAccounting(){
   const { start, end } = dashDateRange();
   const inRange = date => date >= start && date <= end;
-  const filterBtns = [['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','Last month'],['3months','Last 3 months'],['custom','Custom']];
+  const filterBtns = [['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']];
 
   // === INCOME ===
   const savingsInPeriod = state.data.savings.filter(s=>inRange(s.meeting_date||''));
@@ -7653,6 +7741,8 @@ let _savingsOfficerFilter = '';
 let _savingsDuplicatesOnly = false;
 let _savingsSearch = '';
 let _selectedSavingsIds = new Set();
+let _savingsLedgerPage = 0;
+const LEDGER_PAGE_SIZE = 100;
 
 function savingsDateRange(){
   const now = new Date();
@@ -7850,6 +7940,7 @@ async function downloadWamamaSavingsStatementPdf(memberId){
 let _savingsSearchTimer=null;
 function handleSavingsSearchInput(input){
   _savingsSearch=input.value;
+  _savingsLedgerPage=0;
   const cursor=input.selectionStart??_savingsSearch.length;
   if(_savingsSearchTimer) clearTimeout(_savingsSearchTimer);
   _savingsSearchTimer=setTimeout(()=>{
@@ -7896,6 +7987,9 @@ function pageSavings(){
   const visibleIds = filtered.map(s=>s.id);
   const selectedVisible = visibleIds.filter(id=>_selectedSavingsIds.has(id)).length;
   const bulkAllowed = canBulkManageSavings();
+  const totalPages=Math.max(1,Math.ceil(filtered.length/LEDGER_PAGE_SIZE));
+  _savingsLedgerPage=Math.min(Math.max(0,_savingsLedgerPage),totalPages-1);
+  const pageRows=filtered.slice(_savingsLedgerPage*LEDGER_PAGE_SIZE,(_savingsLedgerPage+1)*LEDGER_PAGE_SIZE);
 
   const groups = (isAdmin || teamView)
     ? state.data.groups
@@ -7917,25 +8011,25 @@ function pageSavings(){
     </div>
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
-      ${dateFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_savingsDateFilter===k?'btn-primary':'btn-outline'}" onclick="_savingsDateFilter='${k}';pageSavings()">${l}</button>`).join('')}
+      ${dateFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_savingsDateFilter===k?'btn-primary':'btn-outline'}" onclick="_savingsDateFilter='${k}';_savingsLedgerPage=0;pageSavings()">${l}</button>`).join('')}
       ${_savingsDateFilter==='custom'?`
-        <input type="date" value="${_savingsCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_savingsCustomStart=this.value;pageSavings()" />
+        <input type="date" value="${_savingsCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_savingsCustomStart=this.value;_savingsLedgerPage=0;pageSavings()" />
         <span class="muted" style="font-size:12px">to</span>
-        <input type="date" value="${_savingsCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_savingsCustomEnd=this.value;pageSavings()" />
+        <input type="date" value="${_savingsCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_savingsCustomEnd=this.value;_savingsLedgerPage=0;pageSavings()" />
       `:''}
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
       <input id="savings-search" value="${statementHtml(_savingsSearch)}" placeholder="Search member name, ID, phone, or group..." style="min-width:260px;flex:1;font-size:13px" oninput="handleSavingsSearchInput(this)" />
-      <select style="max-width:220px;font-size:13px" onchange="_savingsGroupFilter=this.value;pageSavings()">
+      <select style="max-width:220px;font-size:13px" onchange="_savingsGroupFilter=this.value;_savingsLedgerPage=0;pageSavings()">
         <option value="">All Groups</option>
         ${groups.map(g=>`<option value="${g.id}" ${_savingsGroupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
       </select>
-      ${isAdmin ? `<select style="max-width:220px;font-size:13px" onchange="_savingsOfficerFilter=this.value;pageSavings()">
+      ${isAdmin ? `<select style="max-width:220px;font-size:13px" onchange="_savingsOfficerFilter=this.value;_savingsLedgerPage=0;pageSavings()">
         <option value="">All Officers</option>
         ${officers.map(o=>`<option value="${o.id}" ${_savingsOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
       </select>` : ''}
-      ${(_savingsGroupFilter||_savingsOfficerFilter||_savingsSearch)?`<button class="btn btn-sm btn-ghost" onclick="_savingsGroupFilter='';_savingsOfficerFilter='';_savingsSearch='';pageSavings()">Clear filters</button>`:''}
+      ${(_savingsGroupFilter||_savingsOfficerFilter||_savingsSearch)?`<button class="btn btn-sm btn-ghost" onclick="_savingsGroupFilter='';_savingsOfficerFilter='';_savingsSearch='';_savingsLedgerPage=0;pageSavings()">Clear filters</button>`:''}
     </div>
 
     ${bulkAllowed ? `
@@ -7963,7 +8057,7 @@ function pageSavings(){
           <th>Date</th><th>Member</th><th>Group</th><th class="num">Amount</th><th>Status</th><th>Recorded By</th><th></th><th>Statement</th>
         </tr></thead>
         <tbody>
-          ${filtered.length ? filtered.map(s => {
+          ${pageRows.length ? pageRows.map(s => {
             const mem = state.data.members.find(x=>x.id===s.member_id);
             const grp = state.data.groups.find(x=>x.id===s.group_id);
             const rec = state.data.staff.find(x=>x.id===s.recorded_by);
@@ -7985,6 +8079,7 @@ function pageSavings(){
         </tbody>
       </table>
     </div>
+    ${filtered.length>LEDGER_PAGE_SIZE?`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px"><button class="btn btn-sm btn-outline" ${_savingsLedgerPage===0?'disabled':''} onclick="_savingsLedgerPage--;pageSavings()">Previous</button><span class="muted" style="font-size:12px">Page ${_savingsLedgerPage+1} of ${totalPages} &middot; ${filtered.length} entries</span><button class="btn btn-sm btn-outline" ${_savingsLedgerPage>=totalPages-1?'disabled':''} onclick="_savingsLedgerPage++;pageSavings()">Next</button></div>`:''}
   `;
 }
 
@@ -8073,6 +8168,7 @@ let _repDateFilter = 'month';
 let _repCustomStart = '', _repCustomEnd = '';
 let _repGroupFilter = '';
 let _repOfficerFilter = '';
+let _repLedgerPage = 0;
 
 function repDateRange(){
   const now = new Date();
@@ -8602,6 +8698,9 @@ function pageRepayments(){
   const feeReps    = filtered.filter(r => !isClientRepayment(r));
   const showFees   = state._repShowFees || false;
   const displayed  = showFees ? feeReps : clientReps;
+  const totalPages=Math.max(1,Math.ceil(displayed.length/LEDGER_PAGE_SIZE));
+  _repLedgerPage=Math.min(Math.max(0,_repLedgerPage),totalPages-1);
+  const pageRows=displayed.slice(_repLedgerPage*LEDGER_PAGE_SIZE,(_repLedgerPage+1)*LEDGER_PAGE_SIZE);
 
   const groups = (portfolioView || teamView)
     ? state.data.groups
@@ -8628,20 +8727,20 @@ function pageRepayments(){
     </div>
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
-      ${dateFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_repDateFilter===k?'btn-primary':'btn-outline'}" onclick="_repDateFilter='${k}';pageRepayments()">${l}</button>`).join('')}
+      ${dateFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_repDateFilter===k?'btn-primary':'btn-outline'}" onclick="_repDateFilter='${k}';_repLedgerPage=0;pageRepayments()">${l}</button>`).join('')}
       ${_repDateFilter==='custom'?`
-        <input type="date" value="${_repCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_repCustomStart=this.value;pageRepayments()" />
+        <input type="date" value="${_repCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_repCustomStart=this.value;_repLedgerPage=0;pageRepayments()" />
         <span class="muted" style="font-size:12px">to</span>
-        <input type="date" value="${_repCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_repCustomEnd=this.value;pageRepayments()" />
+        <input type="date" value="${_repCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_repCustomEnd=this.value;_repLedgerPage=0;pageRepayments()" />
       `:''}
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
-      <select style="max-width:220px;font-size:13px" onchange="_repGroupFilter=this.value;pageRepayments()">
+      <select style="max-width:220px;font-size:13px" onchange="_repGroupFilter=this.value;_repLedgerPage=0;pageRepayments()">
         <option value="">All Groups</option>
         ${groups.map(g=>`<option value="${g.id}" ${_repGroupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
       </select>
-      ${portfolioView ? `<select style="max-width:220px;font-size:13px" onchange="_repOfficerFilter=this.value;pageRepayments()">
+      ${portfolioView ? `<select style="max-width:220px;font-size:13px" onchange="_repOfficerFilter=this.value;_repLedgerPage=0;pageRepayments()">
         <option value="">All Officers</option>
         ${officers.map(o=>`<option value="${o.id}" ${_repOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
       </select>` : ''}
@@ -8656,7 +8755,7 @@ function pageRepayments(){
           <th>Status</th><th>Recorded By</th><th></th><th>Statement</th>
         </tr></thead>
         <tbody>
-          ${clientReps.length ? clientReps.map(r => {
+          ${pageRows.length ? pageRows.map(r => {
             const mem = state.data.members.find(x=>x.id===r.member_id);
             const grp = state.data.groups.find(x=>x.id===r.group_id);
             const ln = state.data.loans.find(x=>x.id===r.loan_id);
@@ -8681,6 +8780,7 @@ function pageRepayments(){
         </tbody>
       </table>
     </div>
+    ${displayed.length>LEDGER_PAGE_SIZE?`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px"><button class="btn btn-sm btn-outline" ${_repLedgerPage===0?'disabled':''} onclick="_repLedgerPage--;pageRepayments()">Previous</button><span class="muted" style="font-size:12px">Page ${_repLedgerPage+1} of ${totalPages} &middot; ${displayed.length} entries</span><button class="btn btn-sm btn-outline" ${_repLedgerPage>=totalPages-1?'disabled':''} onclick="_repLedgerPage++;pageRepayments()">Next</button></div>`:''}
   `;
 }
 
