@@ -3053,7 +3053,13 @@ function openMemberEdit(m){
         <div class="field"><label>Occupation</label><input name="occupation" value="${m.occupation||''}" /></div>
         <div class="field"><label>Address</label><input name="address" value="${m.address||''}" /></div>
         <div class="field"><label>Group</label>
-          <select name="group_id">${state.data.groups.map(g=>`<option value="${g.id}" ${m.group_id===g.id?'selected':''}}>${g.name}</option>`).join('')}</select>
+          <select name="group_id" required>
+            <option value="">Select group</option>
+            ${state.data.groups
+              .filter(g => g.status === 'active' || g.id === m.group_id)
+              .sort((a,b) => (a.name||'').localeCompare(b.name||''))
+              .map(g=>`<option value="${g.id}" ${m.group_id===g.id?'selected':''}>${g.name}${g.status!=='active'?' (inactive)':''}</option>`).join('')}
+          </select>
         </div>
       </div>
       <div class="divider"></div>
@@ -3070,9 +3076,36 @@ function openMemberEdit(m){
         if(!(await ensureFreshToken())) return;
         const fd = new FormData($('me')); const row = Object.fromEntries(fd);
         row.phone = normalisePhone(row.phone);
+        if(!row.group_id) return toast('Please select the member\'s group.','error');
+        const oldGroupId = m.group_id || null;
+        const selectedGroup = state.data.groups.find(g => g.id === row.group_id);
+        if(selectedGroup?.officer_id) row.officer_id = selectedGroup.officer_id;
         const { error } = await sb.from('pb_members').update(row).eq('id', m.id);
         if(error) return toast(error.message,'error');
         Object.assign(m, row);
+        if(oldGroupId !== row.group_id){
+          const { error: loanGroupError } = await sb.from('pb_loans')
+            .update({ group_id: row.group_id, ...(selectedGroup?.officer_id ? { officer_id:selectedGroup.officer_id } : {}) })
+            .eq('member_id', m.id)
+            .not('status', 'in', '(completed,cancelled)');
+          const { error: orderGroupError } = await sb.from('pb_orders')
+            .update({ group_id: row.group_id })
+            .eq('member_id', m.id)
+            .not('status', 'in', '(fulfilled,rejected,cancelled)');
+          if(loanGroupError || orderGroupError){
+            toast('Member group saved. Some linked open records could not be updated; refresh and contact support if a group is still missing.','warn');
+          } else {
+            state.data.loans.forEach(l => {
+              if(l.member_id===m.id && !['completed','cancelled'].includes(l.status)){
+                l.group_id=row.group_id;
+                if(selectedGroup?.officer_id) l.officer_id=selectedGroup.officer_id;
+              }
+            });
+            state.data.orders.forEach(o => {
+              if(o.member_id===m.id && !['fulfilled','rejected','cancelled'].includes(o.status)) o.group_id=row.group_id;
+            });
+          }
+        }
         // Upsert guarantor if any field is provided
         const gName = document.getElementById('me-g-name')?.value.trim();
         const gPhone = normalisePhone(document.getElementById('me-g-phone')?.value||''  );
@@ -3648,7 +3681,7 @@ function pageArrears(){
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(l.group_id || state.data.members.find(m=>m.id===l.member_id)?.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -3657,7 +3690,7 @@ function pageArrears(){
 
   const report = activeLoans.map(l => {
     const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = state.data.groups.find(x => x.id === l.group_id);
+    const g   = state.data.groups.find(x => x.id === (l.group_id || mem?.group_id));
     const off = state.data.staff.find(x => x.id === l.officer_id);
     const paid = loanPaid(l.id);
 
@@ -3771,7 +3804,7 @@ function exportArrearsCollectionSheet(){
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(l.group_id || state.data.members.find(m=>m.id===l.member_id)?.group_id) || l.officer_id === state.staff.id)
   );
 
   const today = todayISO();
@@ -3780,7 +3813,7 @@ function exportArrearsCollectionSheet(){
 
   const report = activeLoans.map(l => {
     const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = state.data.groups.find(x => x.id === l.group_id);
+    const g   = state.data.groups.find(x => x.id === (l.group_id || mem?.group_id));
     const off = state.data.staff.find(x => x.id === l.officer_id);
     const paid = loanPaid(l.id);
     const startDate = new Date(l.start_date);
@@ -8854,7 +8887,7 @@ function downloadCollectionSheet(targetDate, officerFilter){
   const matchedGroupIds = new Set(matchedGroups.map(g => g.id));
 
   const activeLoans = state.data.loans.filter(l =>
-    l.status === 'active' && matchedGroupIds.has(l.group_id)
+    l.status === 'active' && matchedGroupIds.has(l.group_id || state.data.members.find(m=>m.id===l.member_id)?.group_id)
   );
 
   if(!activeLoans.length){
@@ -8864,7 +8897,7 @@ function downloadCollectionSheet(targetDate, officerFilter){
 
   const rows = activeLoans.map(l => {
     const m = state.data.members.find(x => x.id === l.member_id);
-    const g = state.data.groups.find(x => x.id === l.group_id);
+    const g = state.data.groups.find(x => x.id === (l.group_id || m?.group_id));
     const off = state.data.staff.find(x => x.id === l.officer_id);
     const weekly = Number(l.weekly_installment) || 0;
     const totalPayable = Number(l.total_payable) || 0;
