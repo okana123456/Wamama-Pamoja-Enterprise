@@ -482,7 +482,7 @@ const state = {
   view: 'dashboard',
   data: {
     groups: [], members: [], guarantors: [], staff: [], inventory: [],
-    loans: [], orders: [], savings: [], repayments: [], meetings: [],
+    loans: [], orders: [], savings: [], repayments: [], excessPayments: [], meetings: [],
     suppliers: [], purchases: [], purchaseLines: [], reconciliations: [], expenses: [], audit: []
   },
   billing: { status:'unknown', paid:false, cycleMonth:null, checkedAt:null, locked:false, reminder:false, pending:false },
@@ -585,6 +585,12 @@ function canCreateClientOrders(){
     !!state.perms?.can_submit_orders;
 }
 
+function canManageExcessPayments(){
+  const role = state.staff?.app_role || state.staff?.role || 'officer';
+  return state.staff?.role === 'admin' || ['ceo','admin'].includes(role) ||
+    !!state.perms?.can_manage_excess_payments;
+}
+
 function currentStaffRole(){
   return state.staff?.app_role || state.staff?.role || 'officer';
 }
@@ -657,6 +663,7 @@ const PAGE_ACCESS = {
   meeting:        ['branch_manager','supervisor','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
+  excess_payments: [],
   repayment_approvals: ['branch_manager','ceo','admin','supervisor'],
   savings_approvals:   ['branch_manager','ceo','admin','supervisor'],
   loans:          ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
@@ -681,6 +688,7 @@ function canView(page){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
+  if(page === 'excess_payments' && canManageExcessPayments()) return true;
   if((page === 'orders' || page === 'sold_items') && canCreateClientOrders()) return true;
   const acl = PAGE_ACCESS[page];
   if(acl === 'ALL') return true;
@@ -847,8 +855,8 @@ async function smartLoadAll(){
     }
   }
   state.loading = true; render();
-  const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
-  const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
+  const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
+  const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
   const results = await Promise.all(tables.map(t => fetchBusinessTableRows(t)));
   let jwtBroken = false;
   results.forEach((r,i) => {
@@ -893,7 +901,7 @@ function handleRealtimeChange(payload){
     return;
   }
   const tbl = payload.table;
-  const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_staff:'staff', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
+  const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_staff:'staff', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
   const key = map[tbl]; if(!key) return;
   const arr = state.data[key];
   if(payload.eventType === 'INSERT'){ if(!arr.find(x=>x.id===payload.new.id)) arr.unshift(payload.new); }
@@ -901,7 +909,7 @@ function handleRealtimeChange(payload){
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
   applySupervisorDataScope();
   cacheDataKey(key, state.data[key]);
-  if(['dashboard','members','groups','meeting','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
+  if(['dashboard','members','groups','meeting','loans','inventory','repayments','excess_payments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
   if(rtChan) sb.removeChannel(rtChan);
@@ -913,7 +921,7 @@ function setupRealtime(){
   }
   [
     'pb_groups','pb_members','pb_guarantors','pb_inventory','pb_loans','pb_orders',
-    'pb_savings','pb_repayments','pb_meetings','pb_suppliers','pb_staff',
+    'pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_staff',
     'pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'
   ].forEach(table => {
     const opts = { event:'*', schema:'public', table };
@@ -1347,6 +1355,7 @@ function navItems(){
     { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: canSeeMeeting },
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
     { k:'repayments',          label:'Repayments',          icon:repaymentsIcon() },
+    { k:'excess_payments', label:`Excess Payments${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length?` <span class="badge b-red" style="margin-left:6px">${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length}</span>`:''}`, icon:repaymentsIcon(), extra:canManageExcessPayments() },
     { k:'repayment_approvals', label:`Repayment Approvals${pendRepApprovals?` <span class="badge b-red" style="margin-left:6px">${pendRepApprovals}</span>`:''}`, icon:repaymentsIcon() },
     { k:'savings_approvals',   label:`Savings Approvals${pendSavApprovals?` <span class="badge b-red" style="margin-left:6px">${pendSavApprovals}</span>`:''}`,   icon:savingsIcon() },
     { k:'loans',          label:'Active Loans',     icon:loanIcon() },
@@ -1445,7 +1454,7 @@ function renderShell(){
 function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
-    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
+    savings:'Savings', repayments:'Repayments', excess_payments:'Excess Payments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
@@ -1471,7 +1480,7 @@ function toggleSidebar(force){
 function renderPage(){
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
+    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, excess_payments: pageExcessPayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -3137,12 +3146,14 @@ async function mpApproveRepayment(id){
   const r = state.data.repayments.find(x=>x.id===id);
   if(!r) return;
   if(!(await ensureFreshToken())) return;
-  const {error}=await sb.from('pb_repayments').update({status:'approved'}).eq('id',id);
+  const {data:approvedRows,error}=await sb.from('pb_repayments').update({status:'approved'}).eq('id',id).select();
   if(error) return toast(error.message,'error');
-  r.status='approved';
+  if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
+  await refreshExcessRelatedData();
   const closed=await closeFullyPaidLoans([r.loan_id],{silent:true});
   render();
-  toast(closed?'Repayment approved and loan closed.':'Repayment approved.','success');
+  const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
+  toast(split?'Repayment approved; the amount above the loan balance was moved to Excess Payments.':closed?'Repayment approved and loan closed.':'Repayment approved.','success');
 }
 async function mpDeleteRepayment(id){
   confirmDialog('Delete this repayment entry? This cannot be undone.', async()=>{
@@ -3610,6 +3621,9 @@ async function submitMeeting(){
   for(const r of repRows){
     const res = await queuedInsert('pb_repayments', r);
     if(res.ok){ okRep++; if(!res.queued) state.data.repayments.unshift({ ...r, id:'tmp_'+Math.random() }); } else fail++;
+  }
+  if(repRows.length && navigator.onLine){
+    try{ await refreshExcessRelatedData(); }catch(error){ console.warn('Could not refresh excess allocation data',error); }
   }
   audit('meeting_submit', 'pb_meetings', meetingId, null, { savings: okSav, repayments: okRep });
 
@@ -5581,7 +5595,8 @@ async function editPerms(id){
     ['can_approve_orders','Approve / reject orders'],
     ['can_view_reports','View financial reports'],
     ['can_manage_inventory','Manage inventory'],
-    ['can_manage_suppliers','Manage suppliers and purchases']
+    ['can_manage_suppliers','Manage suppliers and purchases'],
+    ['can_manage_excess_payments','View and resolve excess payments']
   ];
   modal({
     title:`Permissions — ${s.full_name}`,
@@ -8171,12 +8186,14 @@ async function approveOneRepayment(id, btn){
   if(!r || r.status==='approved') return;
   if(btn){ btn.disabled=true; btn.textContent='…'; }
   if(!(await ensureFreshToken())) return;
-  const { error } = await sb.from('pb_repayments').update({ status:'approved' }).eq('id', id);
+  const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).eq('id', id).select();
   if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
-  r.status = 'approved';
+  if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
+  await refreshExcessRelatedData();
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
-  toast(closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
+  const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
+  toast(split?'Repayment approved; the excess was safely separated.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
 
 async function rejectOneRepayment(id, btn){
@@ -8199,9 +8216,10 @@ async function approveGroupRepayments(groupName){
     .map(r=>r.id);
   if(!ids.length) return toast('No pending repayments for this group.','warn');
   const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
-  const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
+  const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids).select();
   if(error) return toast(error.message,'error');
-  state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+  (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
+  await refreshExcessRelatedData();
   const closed = await closeFullyPaidLoans(loanIds, { silent:true });
   render();
   toast(`${ids.length} repayment(s) for ${groupName} approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
@@ -8214,9 +8232,10 @@ async function approveAllRepayments(){
       .filter(r=>r.status==='pending' && isClientRepayment(r))
       .map(r=>r.id);
     const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
-    const { error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids);
+    const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids).select();
     if(error) return toast(error.message,'error');
-    state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='approved');
+    (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
+    await refreshExcessRelatedData();
     const closed = await closeFullyPaidLoans(loanIds, { silent:true });
     render();
     toast(`${ids.length} repayment(s) approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
@@ -8258,13 +8277,15 @@ async function loadWamamaLoanStatement(loanId){
   });
   const member=state.data.members.find(m=>m.id===loan.member_id)||null;
   const group=state.data.groups.find(g=>g.id===loan.group_id)||null;
-  return {loan,member,group,rows,totalPayable,totalPaid:runningPaid,balance:Math.max(0,Number((totalPayable-runningPaid).toFixed(2)))};
+  const excessRows=(state.data.excessPayments||[]).filter(x=>String(x.loan_id)===String(loanId));
+  const excessTotal=excessRows.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
+  return {loan,member,group,rows,totalPayable,totalPaid:runningPaid,balance:Math.max(0,Number((totalPayable-runningPaid).toFixed(2))),excessRows,excessTotal};
 }
 
 async function openWamamaRepaymentStatement(loanId){
   try{
     const statement=await loadWamamaLoanStatement(loanId);
-    const {loan,member,group,rows,totalPayable,totalPaid,balance}=statement;
+    const {loan,member,group,rows,totalPayable,totalPaid,balance,excessTotal}=statement;
     const bodyRows=rows.map(row=>`
       <tr>
         <td>${fmtDate(row.meeting_date||row.created_at)}</td>
@@ -8288,6 +8309,7 @@ async function openWamamaRepaymentStatement(loanId){
             <div><span class="muted">Total repaid</span><br><b style="color:var(--success)">${KES(totalPaid)}</b></div>
             <div><span class="muted">Current balance</span><br><b style="color:${balance<=0?'var(--success)':'var(--danger)'}">${balance<=0?'Cleared':KES(balance)}</b></div>
             <div><span class="muted">Start date</span><br><b>${fmtDate(loan.start_date)}</b></div>
+            ${excessTotal>0?`<div><span class="muted">Excess payment held</span><br><b style="color:var(--warning)">${KES(excessTotal)}</b></div>`:''}
           </div>
         </div>
         <div class="table-wrap">
@@ -8308,7 +8330,7 @@ async function openWamamaRepaymentStatement(loanId){
 
 async function downloadWamamaRepaymentStatementPdf(loanId){
   try{
-    const {loan,member,group,rows,totalPayable,totalPaid,balance}=await loadWamamaLoanStatement(loanId);
+    const {loan,member,group,rows,totalPayable,totalPaid,balance,excessTotal}=await loadWamamaLoanStatement(loanId);
     const {jsPDF}=window.jspdf;
     const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
     const orange=[230,92,0];
@@ -8344,6 +8366,11 @@ async function downloadWamamaRepaymentStatementPdf(loanId){
     doc.setFont('helvetica','bold');
     doc.setTextColor(...(balance<=0?green:red));
     doc.text(balance<=0?'PAID IN FULL':'BALANCE OUTSTANDING',108,69);
+    if(excessTotal>0){
+      doc.setTextColor(...orange);
+      doc.setFont('helvetica','bold');
+      doc.text(`Excess held separately: ${KES(excessTotal)}`,19,74);
+    }
 
     doc.autoTable({
       startY:84,
@@ -8494,6 +8521,190 @@ function pageRepayments(){
   `;
 }
 
+let _excessStatusFilter='pending';
+let _excessSearch='';
+
+function excessStatusLabel(status){
+  return ({
+    pending:'Pending decision',
+    transferred_to_savings:'Moved to savings',
+    refunded:'Refunded',
+    applied_to_loan:'Applied to another loan'
+  })[status]||status;
+}
+
+function excessStatusBadge(status){
+  const cls=status==='pending'?'b-yellow':status==='refunded'?'b-red':'b-green';
+  return `<span class="badge ${cls}">${excessStatusLabel(status)}</span>`;
+}
+
+async function refreshExcessRelatedData(){
+  const [excessResult,savingsResult,repaymentResult,loanResult]=await Promise.all([
+    fetchBusinessTableRows('pb_excess_payments'),
+    fetchBusinessTableRows('pb_savings'),
+    fetchBusinessTableRows('pb_repayments'),
+    fetchBusinessTableRows('pb_loans')
+  ]);
+  if(excessResult.error) throw excessResult.error;
+  state.data.excessPayments=excessResult.data||[];
+  if(!savingsResult.error) state.data.savings=savingsResult.data||[];
+  if(!repaymentResult.error) state.data.repayments=repaymentResult.data||[];
+  if(!loanResult.error) state.data.loans=loanResult.data||[];
+}
+
+function pageExcessPayments(){
+  if(!canManageExcessPayments()){
+    $('page').innerHTML='<div class="card card-pad"><h3>Access restricted</h3><p class="muted">Only administrators and specifically authorised staff can manage excess payments.</p></div>';
+    return;
+  }
+
+  const search=String(_excessSearch||'').trim().toLowerCase();
+  const all=[...(state.data.excessPayments||[])].sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  const pending=all.filter(x=>x.status==='pending');
+  const visible=all.filter(x=>{
+    if(_excessStatusFilter!=='all' && x.status!==_excessStatusFilter) return false;
+    const member=state.data.members.find(m=>String(m.id)===String(x.member_id));
+    const group=state.data.groups.find(g=>String(g.id)===String(x.group_id));
+    const loan=state.data.loans.find(l=>String(l.id)===String(x.loan_id));
+    const haystack=[member?.full_name,member?.phone,member?.national_id,group?.name,loan?.asset_name,x.resolution_reference,x.notes]
+      .filter(Boolean).join(' ').toLowerCase();
+    return !search || haystack.includes(search);
+  });
+  const pendingTotal=pending.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
+  const resolved=all.filter(x=>x.status!=='pending');
+  const resolvedTotal=resolved.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
+
+  $('page').innerHTML=`
+    <div class="page-head">
+      <div><h1>Excess Payments</h1><div class="desc">Money received above a fully paid loan balance. Every amount remains traceable until an administrator resolves it.</div></div>
+      <button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Refresh</button>
+    </div>
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi"><div class="l">Awaiting decision</div><div class="v" style="color:var(--warning)">${KES(pendingTotal)}</div><div class="d">${pending.length} payment${pending.length===1?'':'s'}</div></div>
+      <div class="kpi"><div class="l">Resolved</div><div class="v">${KES(resolvedTotal)}</div><div class="d">${resolved.length} payment${resolved.length===1?'':'s'}</div></div>
+      <div class="kpi"><div class="l">Total protected</div><div class="v">${KES(pendingTotal+resolvedTotal)}</div><div class="d">No excess is discarded</div></div>
+    </div>
+    <div class="card card-pad" style="padding:12px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+        <input value="${statementHtml(_excessSearch)}" placeholder="Search member, phone, ID, group or reference" oninput="_excessSearch=this.value;pageExcessPayments()" />
+        <select onchange="_excessStatusFilter=this.value;pageExcessPayments()">
+          <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Awaiting decision</option>
+          <option value="all" ${_excessStatusFilter==='all'?'selected':''}>All records</option>
+          <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Moved to savings</option>
+          <option value="refunded" ${_excessStatusFilter==='refunded'?'selected':''}>Refunded</option>
+          <option value="applied_to_loan" ${_excessStatusFilter==='applied_to_loan'?'selected':''}>Applied to another loan</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="tbl">
+      <thead><tr><th>Date</th><th>Member</th><th>Original Loan</th><th class="num">Payment Received</th><th class="num">Applied to Loan</th><th class="num">Excess</th><th>Status</th><th>Resolution</th><th></th></tr></thead>
+      <tbody>${visible.length?visible.map(row=>{
+        const member=state.data.members.find(m=>String(m.id)===String(row.member_id));
+        const group=state.data.groups.find(g=>String(g.id)===String(row.group_id));
+        const loan=state.data.loans.find(l=>String(l.id)===String(row.loan_id));
+        const resolver=state.data.staff.find(s=>String(s.id)===String(row.resolved_by));
+        return `<tr>
+          <td>${fmtDate(row.payment_date||row.created_at)}</td>
+          <td><b>${statementHtml(member?.full_name||'Unknown member')}</b><div class="muted" style="font-size:11px">${statementHtml(member?.phone||member?.national_id||'')} ${group?.name?`&middot; ${statementHtml(group.name)}`:''}</div></td>
+          <td><b>${statementHtml(loan?.asset_name||'Loan')}</b><div class="muted" style="font-size:11px">${loan?.total_payable?`Total ${KES(loan.total_payable)}`:''}</div></td>
+          <td class="num">${KES(row.original_payment_amount)}</td>
+          <td class="num">${KES(row.amount_applied_to_loan)}</td>
+          <td class="num"><b style="color:var(--warning)">${KES(row.excess_amount)}</b></td>
+          <td>${excessStatusBadge(row.status)}</td>
+          <td style="font-size:12px">${row.resolution_reference?`<b>${statementHtml(row.resolution_reference)}</b><br>`:''}${resolver?`<span class="muted">By ${statementHtml(resolver.full_name)}</span>`:''}</td>
+          <td>${row.status==='pending'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
+        </tr>`;
+      }).join(''):`<tr><td colspan="9"><div class="empty"><h4>No excess payments found</h4><p>${_excessStatusFilter==='pending'?'There are no unresolved excess payments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
+    </table></div>`;
+}
+
+async function refreshExcessPaymentsPage(){
+  try{
+    await refreshExcessRelatedData();
+    render();
+    toast('Excess payments refreshed.','success');
+  }catch(error){ toast(error.message||'Could not refresh excess payments.','error'); }
+}
+
+function excessPaymentActions(ev,id){
+  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
+  if(!row || row.status!=='pending') return;
+  showActMenu(ev,[
+    {label:'Transfer to member savings',onClick:()=>openExcessToSavings(id)},
+    {label:'Apply to another active loan',onClick:()=>openExcessToLoan(id)},
+    'sep',
+    {label:'Mark as refunded',onClick:()=>openExcessRefund(id)}
+  ]);
+}
+
+function openExcessToSavings(id){
+  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
+  const member=state.data.members.find(m=>String(m.id)===String(row?.member_id));
+  if(!row) return;
+  modal({
+    title:'Transfer excess to savings',
+    body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Amount to savings: ${KES(row.excess_amount)}</span></div>
+      <div class="field"><label>Internal note (optional)</label><textarea id="excess-savings-note" rows="3" placeholder="Reason or instruction"></textarea></div>`,
+    actions:[{label:'Cancel',cls:'btn-outline',onClick:closeModal},{label:'Confirm transfer',cls:'btn-primary',onClick:async()=>{
+      if(!(await ensureFreshToken())) return;
+      const note=$('excess-savings-note')?.value?.trim()||null;
+      const {error}=await sb.rpc('pb_resolve_excess_to_savings',{p_excess_id:id,p_note:note});
+      if(error) return toast(error.message,'error');
+      audit('excess_to_savings','pb_excess_payments',id,null,{amount:row.excess_amount,member_id:row.member_id});
+      closeModal(); await refreshExcessRelatedData(); render(); toast(`${KES(row.excess_amount)} transferred to member savings.`,'success');
+    }}]
+  });
+}
+
+function openExcessRefund(id){
+  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
+  const member=state.data.members.find(m=>String(m.id)===String(row?.member_id));
+  if(!row) return;
+  modal({
+    title:'Record excess payment refund',
+    body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Refund amount: ${KES(row.excess_amount)}</span></div>
+      <div class="field"><label>Refund reference *</label><input id="excess-refund-reference" placeholder="Receipt, transaction or voucher number" /></div>
+      <div class="field"><label>Note (optional)</label><textarea id="excess-refund-note" rows="3" placeholder="How the refund was made"></textarea></div>`,
+    actions:[{label:'Cancel',cls:'btn-outline',onClick:closeModal},{label:'Mark refunded',cls:'btn-primary',onClick:async()=>{
+      if(!(await ensureFreshToken())) return;
+      const reference=$('excess-refund-reference')?.value?.trim();
+      const note=$('excess-refund-note')?.value?.trim()||null;
+      if(!reference) return toast('Enter the refund reference.','error');
+      const {error}=await sb.rpc('pb_resolve_excess_as_refund',{p_excess_id:id,p_reference:reference,p_note:note});
+      if(error) return toast(error.message,'error');
+      audit('excess_refunded','pb_excess_payments',id,null,{amount:row.excess_amount,reference});
+      closeModal(); await refreshExcessRelatedData(); render(); toast('Excess payment marked as refunded.','success');
+    }}]
+  });
+}
+
+function openExcessToLoan(id){
+  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
+  const member=state.data.members.find(m=>String(m.id)===String(row?.member_id));
+  if(!row) return;
+  const eligible=state.data.loans.filter(loan=>{
+    if(String(loan.member_id)!==String(row.member_id) || loan.status!=='active' || String(loan.id)===String(row.loan_id)) return false;
+    return Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id))+0.001>=Number(row.excess_amount||0);
+  });
+  modal({
+    title:'Apply excess to another loan',
+    body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Amount available: ${KES(row.excess_amount)}</span></div>
+      ${eligible.length?`<div class="field"><label>Eligible active loan *</label><select id="excess-target-loan"><option value="">Select loan</option>${eligible.map(loan=>`<option value="${loan.id}">${statementHtml(loan.asset_name||'Loan')} - Balance ${KES(Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id)))}</option>`).join('')}</select></div>
+      <div class="field"><label>Internal note (optional)</label><textarea id="excess-loan-note" rows="3" placeholder="Allocation instruction"></textarea></div>`:
+      '<div class="notice notice-warn">This member has no other active loan with enough outstanding balance. Use savings or refund instead.</div>'}`,
+    actions:[{label:'Cancel',cls:'btn-outline',onClick:closeModal},...(eligible.length?[{label:'Apply payment',cls:'btn-primary',onClick:async()=>{
+      if(!(await ensureFreshToken())) return;
+      const targetLoan=$('excess-target-loan')?.value;
+      const note=$('excess-loan-note')?.value?.trim()||null;
+      if(!targetLoan) return toast('Select the loan that should receive this payment.','error');
+      const {error}=await sb.rpc('pb_resolve_excess_to_loan',{p_excess_id:id,p_loan_id:targetLoan,p_note:note});
+      if(error) return toast(error.message,'error');
+      audit('excess_to_loan','pb_excess_payments',id,null,{amount:row.excess_amount,target_loan_id:targetLoan});
+      closeModal(); await refreshExcessRelatedData(); render(); toast('Excess payment applied to the selected loan.','success');
+    }}]:[])]
+  });
+}
+
 function repRowActions(ev, id){
   const rep = state.data.repayments.find(x=>x.id===id);
   const canApproveRep = can('approve_repayment');
@@ -8506,12 +8717,14 @@ function repRowActions(ev, id){
     items.push({ label: '✓ Approve', onClick: async () => {
       if(rep.status === 'approved'){ toast('Already approved.','warn'); return; }
       if(!(await ensureFreshToken())) return;
-      const { error } = await sb.from('pb_repayments').update({ status: 'approved' }).eq('id', id);
+      const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status: 'approved' }).eq('id', id).select();
       if(error) return toast(error.message, 'error');
-      rep.status = 'approved';
+      if(approvedRows?.[0]) Object.assign(rep,approvedRows[0]);
+      await refreshExcessRelatedData();
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
-      toast(closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
+      const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
+      toast(split?'Repayment approved; the excess was safely separated.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
   if(canEdit){
@@ -8879,16 +9092,14 @@ function openEditRepayment(repaymentId){
         const principal = +(amount - interest).toFixed(2);
         const oldAmount = rep.amount;
 
-        const { error } = await sb.from('pb_repayments')
+        const { data:updatedRepayment, error } = await sb.from('pb_repayments')
           .update({ amount, principal, interest, edit_notes: reason })
-          .eq('id', repaymentId);
+          .eq('id', repaymentId).select().single();
 
         if(error) return toast(error.message, 'error');
 
-        rep.amount = amount;
-        rep.principal = principal;
-        rep.interest = interest;
-        rep.edit_notes = reason;
+        Object.assign(rep,updatedRepayment||{ amount, principal, interest, edit_notes:reason });
+        await refreshExcessRelatedData();
         audit('edit_repayment', 'pb_repayments', repaymentId, { amount: oldAmount }, { amount, principal, interest, edit_notes: reason });
         const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
         closeModal();
