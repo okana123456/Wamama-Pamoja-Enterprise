@@ -46,6 +46,9 @@ No raw API keys, passkeys, or secrets should be stored in this repository.
 - Improved savings approval loading so high-volume pending approvals can be reviewed in pages instead of failing silently.
 - Added performance indexes for faster login, client opening, transaction saving, report generation, and switching between modules.
 - Repaired loan totals so the required 6 percent loan charge is included in active loan total payable/outstanding balances.
+- Added weekly Collection Compliance reporting with group OLB, active members, products under repayment, savings, expected collections, actual collections, arrears and funding checks.
+- Added weekly exception detection for missing client/group links, possible wrong client or group uploads, approved orders without loans, and incomplete sold-items uploads.
+- Added monthly product-sales reporting by item, quantity, client, group, officer, principal value and total payable value, with Excel export.
 - Added SQL repair scripts so important database fixes can be rerun or reviewed safely.
 
 ## 5. Current Architecture
@@ -149,6 +152,7 @@ Files currently present in the Wamama working repository:
 - `wamama-officer-order-permission.sql`
 - `wamama-performance-indexes.sql`
 - `wamama-fix-active-loan-6-percent-charge.sql`
+- `wamama-collection-compliance-reporting.sql`
 - `README.md`
 
 Main purpose of each support SQL file:
@@ -156,6 +160,7 @@ Main purpose of each support SQL file:
 - `wamama-officer-order-permission.sql`: adds/supports the permission that allows officers to create client orders.
 - `wamama-performance-indexes.sql`: improves database speed for common operational screens and reports.
 - `wamama-fix-active-loan-6-percent-charge.sql`: repairs active loan totals so the 6 percent charge is included correctly.
+- `wamama-collection-compliance-reporting.sql`: adds read-performance indexes for weekly compliance and monthly product-sales reports without modifying operational data.
 
 ## 12. Next Recommended Tasks
 

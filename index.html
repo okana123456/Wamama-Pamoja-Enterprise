@@ -252,6 +252,22 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 .summary-table td:first-child{color:var(--text-muted);width:45%}
 .summary-table td:last-child{font-weight:600;text-align:right}
 .summary-table h5{margin:14px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-subtle)}
+.compliance-filters{display:grid;grid-template-columns:minmax(190px,1.2fr) minmax(170px,1fr) minmax(170px,1fr) auto;gap:10px;align-items:end}
+.compliance-filters .field{margin:0}
+.compliance-group{border-left:4px solid var(--primary)}
+.compliance-group .group-metrics{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:1px;background:var(--border);border-top:1px solid var(--border)}
+.compliance-group .metric{background:var(--surface);padding:12px 14px;min-width:0}
+.compliance-group .metric span{display:block;color:var(--text-muted);font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+.compliance-group .metric b{display:block;margin-top:4px;font-size:15px;overflow-wrap:anywhere}
+.compliance-issue{display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border-bottom:1px solid var(--border)}
+.compliance-issue:last-child{border-bottom:0}
+.compliance-issue .issue-mark{width:8px;height:8px;margin-top:5px;border-radius:50%;background:var(--warning);flex:0 0 auto}
+.product-sales-filters{display:grid;grid-template-columns:minmax(170px,.6fr) minmax(220px,1.4fr) auto;gap:10px;align-items:end}
+.product-sales-filters .field{margin:0}
+.product-sales-metrics{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+@media(max-width:900px){.compliance-filters{grid-template-columns:1fr 1fr}.compliance-group .group-metrics{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.product-sales-filters{grid-template-columns:1fr}.product-sales-filters .btn{width:100%}.product-sales-metrics{grid-template-columns:1fr}}
+@media(max-width:560px){.compliance-filters{grid-template-columns:1fr}.compliance-group .group-metrics{grid-template-columns:repeat(2,1fr)}.compliance-filters .btn{width:100%}}
 </style>
 </head>
 <body>
@@ -702,6 +718,7 @@ const PAGE_ACCESS = {
   groups:         ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   members:        ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   meeting:        ['branch_manager','supervisor','loan_officer','officer'],
+  collection_compliance: ['branch_manager','supervisor','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
   excess_payments: [],
@@ -997,7 +1014,7 @@ function handleRealtimeChange(payload){
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
   applySupervisorDataScope();
   cacheDataKey(key, state.data[key]);
-  if(['dashboard','members','groups','meeting','loans','inventory','repayments','excess_payments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
+  if(['dashboard','members','groups','meeting','collection_compliance','loans','inventory','repayments','excess_payments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
   if(rtChan) sb.removeChannel(rtChan);
@@ -1441,6 +1458,7 @@ function navItems(){
     { k:'groups',         label:'Groups',           icon:groupsIcon() },
     { k:'members',        label:'Members',          icon:memberIcon() },
     { k:'meeting',        label:'Meeting Recorder', icon:meetingIcon(), extra: canSeeMeeting },
+    { k:'collection_compliance', label:'Collection Compliance', icon:reportIcon(), extra: canSeeMeeting },
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
     { k:'repayments',          label:'Repayments',          icon:repaymentsIcon() },
     { k:'excess_payments', label:`Excess Payments${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length?` <span class="badge b-red" style="margin-left:6px">${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length}</span>`:''}`, icon:repaymentsIcon(), extra:canManageExcessPayments() },
@@ -1541,7 +1559,7 @@ function renderShell(){
 }
 function pageTitle(){
   return ({
-    dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder',
+    dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder', collection_compliance:'Collection Compliance',
     savings:'Savings', repayments:'Repayments', excess_payments:'Excess Payments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
@@ -1568,7 +1586,7 @@ function toggleSidebar(force){
 function renderPage(){
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, savings: pageSavings, repayments: pageRepayments, excess_payments: pageExcessPayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
+    meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, excess_payments: pageExcessPayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -1860,6 +1878,7 @@ function calcIcon(){ return ic('<rect x="4" y="2" width="16" height="20" rx="2"/
 function invIcon(){ return ic('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>'); }
 function orderIcon(){ return ic('<path d="M9 11V6a3 3 0 0 1 6 0v5"/><rect x="4" y="11" width="16" height="10" rx="1"/>'); }
 function reportIcon(){ return ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/>'); }
+function searchIcon(){ return ic('<circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/>'); }
 function staffIcon(){ return ic('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6M19 8v6"/>'); }
 function settingsIcon(){ return ic('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'); }
 function auditIcon(){ return ic('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>'); }
@@ -3549,6 +3568,229 @@ function pageMemberProfile(){
 }
 
 /* =====================================================================
+ * PAGE: WEEKLY COLLECTION COMPLIANCE
+ * Read-only operational checks. No function in this section writes to
+ * loans, repayments, savings, members, groups or orders.
+ * ===================================================================== */
+function dateOnly(value){
+  const iso = String(value||'').slice(0,10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00Z`) : null;
+}
+function dateOnlyISO(date){ return date.toISOString().slice(0,10); }
+function addDateDays(value, days){
+  const d = dateOnly(value) || dateOnly(todayISO());
+  d.setUTCDate(d.getUTCDate() + Number(days||0));
+  return dateOnlyISO(d);
+}
+function mondayOfWeek(value){
+  const d = dateOnly(value) || dateOnly(todayISO());
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - day + 1);
+  return dateOnlyISO(d);
+}
+function daysBetweenDates(from, to){
+  const a = dateOnly(from), b = dateOnly(to);
+  return !a || !b ? 0 : Math.floor((b-a)/86400000);
+}
+function repaymentPaidByDate(loanId, cutoff){
+  return state.data.repayments
+    .filter(r=>r.loan_id===loanId && countsInBalance(r) && String(r.meeting_date||r.created_at||'').slice(0,10)<=cutoff)
+    .reduce((sum,r)=>sum+Number(r.amount||0),0);
+}
+function loanExpectedByDate(loan, cutoff){
+  if(!loan?.start_date || loan.start_date>cutoff) return 0;
+  const elapsedWeeks = Math.max(0, Math.floor(daysBetweenDates(loan.start_date,cutoff)/7));
+  return Math.min(Number(loan.total_payable||0), elapsedWeeks*Number(loan.weekly_installment||0));
+}
+function loanArrearsAtDate(loan, cutoff){
+  return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff)-5);
+}
+function loanOverlapsWeek(loan,start,end){
+  if(['pending','rejected','cancelled'].includes(String(loan.status||'').toLowerCase())) return false;
+  const loanStart=String(loan.start_date||'').slice(0,10);
+  const loanEnd=String(loan.expected_end_date||'2999-12-31').slice(0,10);
+  return !!loanStart && loanStart<=end && loanEnd>=start;
+}
+function loanExpectedWithinWeek(loan,start,end){
+  const before=addDateDays(start,-1);
+  return Math.max(0,loanExpectedByDate(loan,end)-loanExpectedByDate(loan,before));
+}
+function amountCollectedWithinWeek(loanId,start,end){
+  return state.data.repayments
+    .filter(r=>r.loan_id===loanId && countsInBalance(r))
+    .filter(r=>{ const d=String(r.meeting_date||r.created_at||'').slice(0,10); return d>=start&&d<=end; })
+    .reduce((sum,r)=>sum+Number(r.amount||0),0);
+}
+function savingsByDate(memberId,cutoff){
+  return state.data.savings
+    .filter(s=>s.member_id===memberId && countsInBalance(s) && String(s.meeting_date||s.created_at||'').slice(0,10)<=cutoff)
+    .reduce((sum,s)=>sum+Number(s.amount||0),0);
+}
+function collectionAccessibleGroups(){
+  return visiblePortfolioGroupsForCurrentStaff().filter(g=>g.status!=='inactive');
+}
+function collectionSelectedWeek(){
+  const start=mondayOfWeek(state._collectionWeekStart||todayISO());
+  return { start,end:addDateDays(start,6) };
+}
+function buildCollectionCompliance(){
+  const {start,end}=collectionSelectedWeek();
+  const arrearsCutoff=end<todayISO()?end:todayISO();
+  const groupFilter=state._collectionGroup||'';
+  const officerFilter=state._collectionOfficer||'';
+  let groups=collectionAccessibleGroups();
+  if(groupFilter) groups=groups.filter(g=>g.id===groupFilter);
+  if(officerFilter) groups=groups.filter(g=>g.officer_id===officerFilter);
+
+  const groupRows=[]; const memberRows=[];
+  groups.forEach(group=>{
+    const allGroupMembers=state.data.members.filter(m=>m.group_id===group.id);
+    const activeMembers=allGroupMembers.filter(m=>m.status==='active');
+    const groupMemberIds=new Set(allGroupMembers.map(m=>m.id));
+    const loans=state.data.loans.filter(l=>(l.group_id===group.id||groupMemberIds.has(l.member_id))&&loanOverlapsWeek(l,start,end));
+    const loanMemberIds=new Set(loans.map(l=>l.member_id).filter(Boolean));
+    const reportMembers=allGroupMembers.filter(m=>m.status==='active'||loanMemberIds.has(m.id));
+    reportMembers.forEach(member=>{
+      const memberLoans=loans.filter(l=>l.member_id===member.id);
+      const products=memberLoans.reduce((sum,l)=>sum+Math.max(1,Number(l.asset_quantity||1)),0);
+      const olb=memberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-repaymentPaidByDate(l.id,arrearsCutoff)),0);
+      const expected=memberLoans.reduce((sum,l)=>sum+loanExpectedWithinWeek(l,start,end),0);
+      const collected=memberLoans.reduce((sum,l)=>sum+amountCollectedWithinWeek(l.id,start,end),0);
+      const arrears=memberLoans.reduce((sum,l)=>sum+loanArrearsAtDate(l,arrearsCutoff),0);
+      const savings=savingsByDate(member.id,arrearsCutoff);
+      const pendingFunding=state.data.orders.some(o=>o.member_id===member.id&&['pending','approved'].includes(String(o.status||'').toLowerCase()));
+      memberRows.push({group,member,loans:memberLoans,products,olb,expected,collected,arrears,savings,pendingFunding});
+    });
+    const rows=memberRows.filter(r=>r.group.id===group.id);
+    groupRows.push({
+      group,
+      officer:state.data.staff.find(s=>s.id===group.officer_id),
+      members:activeMembers.length,
+      olb:rows.reduce((s,r)=>s+r.olb,0),
+      products:rows.reduce((s,r)=>s+r.products,0),
+      savings:rows.reduce((s,r)=>s+r.savings,0),
+      expected:rows.reduce((s,r)=>s+r.expected,0),
+      collected:rows.reduce((s,r)=>s+r.collected,0),
+      arrears:rows.reduce((s,r)=>s+r.arrears,0),
+      arrearsClients:rows.filter(r=>r.arrears>0).length
+    });
+  });
+  return {start,end,arrearsCutoff,groupRows,memberRows};
+}
+function safeOrderMeta(order){ try{return JSON.parse(order?.notes||'{}')||{};}catch{return {};} }
+function collectionExceptions(report){
+  const {start,end}=report;
+  const groups=report.groupRows.map(r=>r.group);
+  const groupIds=new Set(groups.map(g=>g.id));
+  const memberIds=new Set(report.memberRows.map(r=>r.member.id));
+  const issues=[];
+  const relevantLoans=state.data.loans.filter(l=>{
+    const d=String(l.start_date||'').slice(0,10);
+    return (groupIds.has(l.group_id)||memberIds.has(l.member_id)) && d>=start && d<=end && !['cancelled','rejected'].includes(String(l.status||'').toLowerCase());
+  });
+  relevantLoans.forEach(loan=>{
+    const member=state.data.members.find(m=>m.id===loan.member_id);
+    const group=state.data.groups.find(g=>g.id===(loan.group_id||member?.group_id));
+    if(!member) issues.push({type:'Loan has no client',detail:`${loan.asset_name||'Loan'} (${String(loan.id).slice(0,8)}) is not linked to a valid client.`,group:'Unassigned'});
+    else if(!group) issues.push({type:'Client has no valid group',detail:`${member.full_name} has a loan but no valid group assignment.`,group:'Unassigned'});
+    else if(loan.group_id&&member.group_id&&loan.group_id!==member.group_id) issues.push({type:'Possible wrong group upload',detail:`${member.full_name}'s loan is linked to ${group.name}, but the client profile points to another group.`,group:group.name});
+    const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
+    if(order?.member_id&&loan.member_id&&order.member_id!==loan.member_id) issues.push({type:'Possible wrong client upload',detail:`Loan ${loan.asset_name||String(loan.id).slice(0,8)} and its order are assigned to different clients.`,group:group?.name||'Unassigned'});
+  });
+  const relevantOrders=state.data.orders.filter(o=>{
+    const d=String(o.ordered_on||o.created_at||'').slice(0,10);
+    return groupIds.has(o.group_id)&&d>=start&&d<=end&&!['rejected','cancelled'].includes(String(o.status||'').toLowerCase());
+  });
+  relevantOrders.forEach(order=>{
+    const linked=state.data.loans.filter(l=>l.order_id===order.id&&!['cancelled','rejected'].includes(String(l.status||'').toLowerCase()));
+    if(['approved','fulfilled'].includes(String(order.status||'').toLowerCase())&&!linked.length){
+      issues.push({type:'Possible unuploaded loan',detail:`Approved order ${String(order.id).slice(0,8)} (${order.asset_name||'item'}) has no linked loan.`,group:state.data.groups.find(g=>g.id===order.group_id)?.name||'Unassigned'});
+    }
+    const meta=safeOrderMeta(order);
+    if(meta.source==='sold_items'&&Array.isArray(meta.rows)&&linked.length<meta.rows.length){
+      issues.push({type:'Incomplete sold-items upload',detail:`Sold-items form ${String(order.id).slice(0,8)} has ${meta.rows.length} client rows but only ${linked.length} linked loans.`,group:meta.group_name||state.data.groups.find(g=>g.id===order.group_id)?.name||'Unassigned'});
+    }
+    if(meta.source==='sold_items'&&Array.isArray(meta.rows)){
+      meta.rows.forEach(row=>{
+        const phone=normalisePhone(row.phone||'');
+        if(phone.length<9) return;
+        const expectedMember=state.data.members.find(m=>normalisePhone(m.phone||'')===phone);
+        if(expectedMember&&!linked.some(l=>l.member_id===expectedMember.id)){
+          issues.push({type:'Possible missing or wrong client upload',detail:`${row.client_name||expectedMember.full_name} (${row.phone}) appears on the sold-items form but no linked loan is assigned to that client.`,group:meta.group_name||state.data.groups.find(g=>g.id===order.group_id)?.name||'Unassigned'});
+        }
+      });
+    }
+  });
+  return issues;
+}
+function setCollectionFilter(key,value){ state[key]=value; pageCollectionCompliance(); }
+function openGroupCollectionCompliance(groupId,date){
+  state._collectionGroup=groupId||'';
+  state._collectionWeekStart=mondayOfWeek(date||todayISO());
+  state._collectionTab='members';
+  go('collection_compliance');
+}
+function pageCollectionCompliance(){
+  state._collectionWeekStart=mondayOfWeek(state._collectionWeekStart||todayISO());
+  state._collectionTab=state._collectionTab||'overview';
+  state._collectionSearch=state._collectionSearch||'';
+  const report=buildCollectionCompliance();
+  const issues=collectionExceptions(report);
+  const officers=state.data.staff.filter(s=>report.groupRows.some(r=>r.group.officer_id===s.id)||collectionAccessibleGroups().some(g=>g.officer_id===s.id));
+  const totals={
+    members:report.groupRows.reduce((s,r)=>s+r.members,0),olb:report.groupRows.reduce((s,r)=>s+r.olb,0),
+    expected:report.groupRows.reduce((s,r)=>s+r.expected,0),collected:report.groupRows.reduce((s,r)=>s+r.collected,0),
+    arrears:report.groupRows.reduce((s,r)=>s+r.arrears,0),products:report.groupRows.reduce((s,r)=>s+r.products,0)
+  };
+  const q=cleanMemberText(state._collectionSearch);
+  const visibleMembers=report.memberRows.filter(r=>!q||cleanMemberText(`${r.member.full_name} ${r.member.phone} ${r.member.national_id} ${r.group.name} ${r.loans.map(l=>l.asset_name).join(' ')}`).includes(q));
+  const tab=state._collectionTab;
+  $('page').innerHTML=`
+    <div class="page-head"><div><h1>Collection Compliance</h1><div class="desc">Weekly group performance, funding checks and upload exceptions.</div></div>
+      <div class="actions"><button class="btn btn-outline" onclick="exportCollectionCompliance()">Export Excel</button></div></div>
+    <div class="card card-pad" style="margin-bottom:16px"><div class="compliance-filters">
+      <div class="field"><label>Week beginning</label><input type="date" value="${report.start}" onchange="setCollectionFilter('_collectionWeekStart',mondayOfWeek(this.value))"></div>
+      <div class="field"><label>Group</label><select onchange="state._collectionGroup=this.value;state._collectionOfficer='';pageCollectionCompliance()"><option value="">All accessible groups</option>${collectionAccessibleGroups().map(g=>`<option value="${g.id}" ${state._collectionGroup===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
+      <div class="field"><label>Officer</label><select onchange="state._collectionOfficer=this.value;state._collectionGroup='';pageCollectionCompliance()"><option value="">All accessible officers</option>${officers.map(o=>`<option value="${o.id}" ${state._collectionOfficer===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
+      <button class="btn btn-outline" onclick="state._collectionWeekStart=mondayOfWeek(todayISO());pageCollectionCompliance()">Current week</button>
+    </div><div class="helper" style="margin-top:10px">Reporting period: <b>${fmtDate(report.start)}</b> to <b>${fmtDate(report.end)}</b>. Arrears are measured using approved repayments up to ${fmtDate(report.arrearsCutoff)}.</div></div>
+    <div class="kpi-grid">
+      <div class="kpi k-primary"><div class="l">Active group members</div><div class="v">${totals.members}</div><div class="d">${report.groupRows.length} groups</div></div>
+      <div class="kpi"><div class="l">Total OLB</div><div class="v">${KES(totals.olb)}</div><div class="d">Balance within selected portfolios</div></div>
+      <div class="kpi"><div class="l">Products in repayment</div><div class="v">${totals.products}</div><div class="d">Item quantities under active repayment</div></div>
+      <div class="kpi k-success"><div class="l">Collected this week</div><div class="v">${KES(totals.collected)}</div><div class="d">Expected ${KES(totals.expected)}</div></div>
+      <div class="kpi ${totals.arrears>0?'k-danger':'k-success'}"><div class="l">Arrears detected</div><div class="v">${KES(totals.arrears)}</div><div class="d">Before further funding</div></div>
+      <div class="kpi ${issues.length?'k-warn':'k-success'}"><div class="l">Upload exceptions</div><div class="v">${issues.length}</div><div class="d">Review only; no records changed</div></div>
+    </div>
+    <div class="tabs">
+      <button class="${tab==='overview'?'active':''}" onclick="state._collectionTab='overview';pageCollectionCompliance()">Group overview</button>
+      <button class="${tab==='members'?'active':''}" onclick="state._collectionTab='members';pageCollectionCompliance()">Client compliance</button>
+      <button class="${tab==='exceptions'?'active':''}" onclick="state._collectionTab='exceptions';pageCollectionCompliance()">Exceptions (${issues.length})</button>
+    </div>
+    ${tab==='overview'?`<div class="table-wrap"><table class="tbl" style="min-width:1050px"><thead><tr><th>Group / Officer</th><th class="num">Members</th><th class="num">Products</th><th class="num">Total OLB</th><th class="num">Savings</th><th class="num">Expected</th><th class="num">Collected</th><th class="num">Shortfall</th><th class="num">Arrears clients</th><th></th></tr></thead><tbody>
+      ${report.groupRows.map(r=>`<tr><td><b>${r.group.name}</b><div class="muted" style="font-size:11px">${r.officer?.full_name||'No officer assigned'}</div></td><td class="num">${r.members}</td><td class="num">${r.products}</td><td class="num"><b>${KES(r.olb)}</b></td><td class="num">${KES(r.savings)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num" style="color:${Math.max(0,r.expected-r.collected)>0?'var(--danger)':'var(--success)'}">${KES(Math.max(0,r.expected-r.collected))}</td><td class="num">${r.arrearsClients}</td><td><button class="btn btn-sm btn-outline" onclick="state._collectionGroup='${r.group.id}';state._collectionOfficer='';state._collectionTab='members';pageCollectionCompliance()">View clients</button></td></tr>`).join('')||`<tr><td colspan="10"><div class="empty"><h4>No groups found</h4><p>Adjust the group or officer filter.</p></div></td></tr>`}
+      </tbody></table></div>`:''}
+    ${tab==='members'?`<div class="toolbar"><div class="search-box grow"><span class="ic">${searchIcon()}</span><input placeholder="Search client, phone, ID, group or product" value="${state._collectionSearch}" oninput="state._collectionSearch=this.value;clearTimeout(state._collectionSearchTimer);state._collectionSearchTimer=setTimeout(pageCollectionCompliance,250)"></div></div>
+      <div class="table-wrap"><table class="tbl" style="min-width:1150px"><thead><tr><th>Client / Group</th><th>Products in repayment</th><th class="num">Total OLB</th><th class="num">Weekly expected</th><th class="num">Collected</th><th class="num">Savings</th><th class="num">Arrears</th><th>Funding check</th></tr></thead><tbody>
+      ${visibleMembers.slice(0,500).map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num">${KES(r.savings)}</td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="8"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
+      </tbody></table></div>${visibleMembers.length>500?`<div class="helper" style="margin-top:8px">Showing the first 500 clients. Export Excel for all ${visibleMembers.length} records.</div>`:''}`:''}
+    ${tab==='exceptions'?`<div class="card">${issues.length?issues.map(i=>`<div class="compliance-issue"><span class="issue-mark"></span><div><b>${i.type}</b><div class="muted" style="font-size:12px;margin-top:2px">${i.detail}</div><div style="font-size:11px;margin-top:3px">Group: ${i.group}</div></div></div>`).join(''):`<div class="empty"><h4>No upload exceptions detected</h4><p>No high-confidence order, loan, client or group mismatch was found for this week.</p></div>`}</div>`:''}
+  `;
+}
+function exportCollectionCompliance(){
+  const report=buildCollectionCompliance();
+  const issues=collectionExceptions(report);
+  const wb=XLSX.utils.book_new();
+  const summary=report.groupRows.map(r=>({WeekStart:report.start,WeekEnd:report.end,Group:r.group.name,Officer:r.officer?.full_name||'',Members:r.members,Products:r.products,OLB:r.olb,Savings:r.savings,Expected:r.expected,Collected:r.collected,Shortfall:Math.max(0,r.expected-r.collected),Arrears:r.arrears,ClientsInArrears:r.arrearsClients}));
+  const clients=report.memberRows.map(r=>({WeekStart:report.start,Group:r.group.name,Client:r.member.full_name,Phone:r.member.phone||'',ID:r.member.national_id||'',Products:r.products,ProductNames:r.loans.map(l=>l.asset_name).join(', '),OLB:r.olb,Expected:r.expected,Collected:r.collected,Savings:r.savings,Arrears:r.arrears,FundingStatus:r.arrears>0?'Review arrears before funding':'Compliant'}));
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Group Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(clients),'Client Compliance');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(issues),'Exceptions');
+  XLSX.writeFile(wb,`collection_compliance_${report.start}_${report.end}.xlsx`);
+  toast('Weekly collection compliance report exported','success');
+}
+
+/* =====================================================================
  * PAGE: WEEKLY MEETING RECORDER
  * ===================================================================== */
 function pageMeeting(){
@@ -3559,6 +3801,7 @@ function pageMeeting(){
   $('page').innerHTML = `
     <div class="page-head">
       <div><h1>Weekly meeting recorder</h1><div class="desc">Capture savings and loan repayments per member for a single meeting session.</div></div>
+      <div class="actions">${m.groupId?`<button class="btn btn-outline" onclick="openGroupCollectionCompliance('${m.groupId}','${m.date}')">View group compliance</button>`:''}</div>
     </div>
 
     <div class="card card-pad">
@@ -3575,8 +3818,8 @@ function pageMeeting(){
 
     <div id="meet-list" style="margin-top:16px"></div>
   `;
-  $('m-group').addEventListener('change', e => { m.groupId = e.target.value; m.entries = {}; renderMeetList(); });
-  $('m-date').addEventListener('change', e => { m.date = e.target.value; });
+  $('m-group').addEventListener('change', e => { m.groupId = e.target.value; m.entries = {}; pageMeeting(); });
+  $('m-date').addEventListener('change', e => { m.date = e.target.value; pageMeeting(); });
   renderMeetList();
 }
 function renderMeetList(){
@@ -5302,6 +5545,85 @@ function approveOrder(o){
 /* =====================================================================
  * PAGE: REPORTS
  * ===================================================================== */
+function productSalesMonth(){ return state._productSalesMonth||todayISO().slice(0,7); }
+function confirmedSaleLoans(){
+  return state.data.loans.filter(l=>['active','completed','defaulted'].includes(String(l.status||'').toLowerCase()));
+}
+function productLinesForLoan(loan){
+  const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
+  const meta=safeOrderMeta(order);
+  if(meta.source!=='sold_items'&&Array.isArray(meta.assets)&&meta.assets.length){
+    return meta.assets.map(line=>({
+      name:String(line.asset_name||'Unspecified item').trim(),
+      quantity:Math.max(1,Number(line.quantity||1)),
+      principal:Number(line.loan_price||0)*Math.max(1,Number(line.quantity||1))
+    }));
+  }
+  return [{name:String(loan.asset_name||'Unspecified item').trim(),quantity:Math.max(1,Number(loan.asset_quantity||1)),principal:Number(loan.loan_value||0)}];
+}
+function buildProductSalesReport(){
+  const month=productSalesMonth();
+  const query=cleanMemberText(state._productSalesSearch||'');
+  const details=[];
+  confirmedSaleLoans().forEach(loan=>{
+    const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
+    const saleDate=String(order?.ordered_on||loan.start_date||'').slice(0,10);
+    if(!saleDate.startsWith(month)) return;
+    const member=state.data.members.find(m=>m.id===loan.member_id);
+    const group=state.data.groups.find(g=>g.id===(loan.group_id||member?.group_id));
+    const officer=state.data.staff.find(s=>s.id===loan.officer_id)||state.data.staff.find(s=>s.id===order?.recorded_by);
+    const lines=productLinesForLoan(loan);
+    const linePrincipalTotal=lines.reduce((sum,line)=>sum+Number(line.principal||0),0);
+    lines.forEach(line=>{
+      if(query&&!cleanMemberText(line.name).includes(query)) return;
+      const principal=Number(line.principal||0)||(Number(loan.loan_value||0)/Math.max(1,lines.length));
+      const payable=linePrincipalTotal>0?Number(loan.total_payable||0)*(principal/linePrincipalTotal):Number(loan.total_payable||0)/Math.max(1,lines.length);
+      details.push({date:saleDate,product:line.name,quantity:line.quantity,principal,payable,client:member?.full_name||'Unlinked client',group:group?.name||'Unassigned',officer:officer?.full_name||'Unassigned',loanId:loan.id});
+    });
+  });
+  const map=new Map();
+  details.forEach(row=>{
+    const key=cleanMemberText(row.product)||'unspecified item';
+    if(!map.has(key)) map.set(key,{product:row.product,quantity:0,principal:0,payable:0,clients:new Set(),groups:new Set(),sales:0});
+    const rec=map.get(key);
+    rec.quantity+=row.quantity; rec.principal+=row.principal; rec.payable+=row.payable; rec.sales++;
+    rec.clients.add(row.client); rec.groups.add(row.group);
+  });
+  const summary=[...map.values()].map(r=>({...r,clientCount:r.clients.size,groupCount:r.groups.size})).sort((a,b)=>b.quantity-a.quantity||a.product.localeCompare(b.product));
+  return {month,details,summary};
+}
+function productSalesReportHtml(){
+  const report=buildProductSalesReport();
+  const qty=report.summary.reduce((s,r)=>s+r.quantity,0);
+  const principal=report.summary.reduce((s,r)=>s+r.principal,0);
+  return `<div class="card" style="margin-top:18px">
+    <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed items issued through approved or disbursed loans</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
+    <div class="card-pad" style="padding-bottom:12px"><div class="product-sales-filters">
+      <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;pageReports()"></div>
+      <div class="field"><label>Product</label><input value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="state._productSalesSearch=this.value;clearTimeout(state._productSalesTimer);state._productSalesTimer=setTimeout(pageReports,250)"></div>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='';pageReports()">Clear product</button>
+    </div></div>
+    <div class="product-sales-metrics">
+      <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Product types</span><b style="display:block;margin-top:3px">${report.summary.length}</b></div>
+      <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Units sold</span><b style="display:block;margin-top:3px">${qty}</b></div>
+      <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Principal sales value</span><b style="display:block;margin-top:3px">${KES(principal)}</b></div>
+    </div>
+    <div style="overflow-x:auto"><table class="tbl" style="min-width:760px"><thead><tr><th>Product</th><th class="num">Units sold</th><th class="num">Client sales</th><th class="num">Groups</th><th class="num">Principal value</th><th class="num">Total payable value</th></tr></thead><tbody>
+      ${report.summary.map(r=>`<tr><td><b>${r.product}</b></td><td class="num">${r.quantity}</td><td class="num">${r.clientCount}</td><td class="num">${r.groupCount}</td><td class="num">${KES(r.principal)}</td><td class="num">${KES(r.payable)}</td></tr>`).join('')||`<tr><td colspan="6"><div class="empty"><h4>No confirmed product sales found</h4><p>Choose another month or clear the product search.</p></div></td></tr>`}
+    </tbody></table></div>
+  </div>`;
+}
+function exportProductSalesReport(){
+  const report=buildProductSalesReport();
+  if(!report.details.length) return toast('No product sales to export for this selection.','warn');
+  const summary=report.summary.map(r=>({Month:report.month,Product:r.product,UnitsSold:r.quantity,ClientSales:r.clientCount,Groups:r.groupCount,PrincipalValue:r.principal,TotalPayableValue:r.payable}));
+  const details=report.details.map(r=>({Date:r.date,Product:r.product,Quantity:r.quantity,Client:r.client,Group:r.group,Officer:r.officer,PrincipalValue:r.principal,TotalPayableValue:r.payable,LoanID:r.loanId}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Product Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(details),'Sales Details');
+  XLSX.writeFile(wb,`monthly_product_sales_${report.month}.xlsx`);
+  toast('Monthly product sales report exported','success');
+}
 function pageReports(){
   $('page').innerHTML = `
     <div class="page-head"><div><h1>Reports</h1><div class="desc">Preview and export operational data.</div></div></div>
@@ -5322,6 +5644,7 @@ function pageReports(){
         </div>
       </div>`).join('')}
     </div>
+    ${productSalesReportHtml()}
   `;
 }
 function buildReportRows(kind){
