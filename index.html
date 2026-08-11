@@ -3633,12 +3633,39 @@ function collectionSelectedWeek(){
   const start=mondayOfWeek(state._collectionWeekStart||todayISO());
   return { start,end:addDateDays(start,6) };
 }
+function rerenderSearchWithFocus(input,stateKey,timerKey,pageFn,inputId){
+  state[stateKey]=input.value;
+  const cursor=input.selectionStart??input.value.length;
+  if(state[timerKey]) clearTimeout(state[timerKey]);
+  state[timerKey]=setTimeout(()=>{
+    state[timerKey]=null;
+    pageFn();
+    requestAnimationFrame(()=>{
+      const next=$(inputId);
+      if(!next) return;
+      next.focus();
+      const nextCursor=Math.min(cursor,next.value.length);
+      next.setSelectionRange(nextCursor,nextCursor);
+    });
+  },120);
+}
+function handleCollectionPortfolioSearch(input){
+  rerenderSearchWithFocus(input,'_collectionPortfolioSearch','_collectionPortfolioSearchTimer',pageCollectionCompliance,'collection-portfolio-search');
+}
+function handleCollectionClientSearch(input){
+  rerenderSearchWithFocus(input,'_collectionSearch','_collectionClientSearchTimer',pageCollectionCompliance,'collection-client-search');
+}
 function buildCollectionCompliance(){
   const {start,end}=collectionSelectedWeek();
   const arrearsCutoff=end<todayISO()?end:todayISO();
   const groupFilter=state._collectionGroup||'';
   const officerFilter=state._collectionOfficer||'';
+  const portfolioSearch=cleanMemberText(state._collectionPortfolioSearch||'');
   let groups=collectionAccessibleGroups();
+  if(portfolioSearch) groups=groups.filter(group=>{
+    const officer=state.data.staff.find(s=>s.id===group.officer_id);
+    return cleanMemberText(`${group.name} ${group.mpesa_code||''} ${officer?.full_name||''} ${officer?.email||''}`).includes(portfolioSearch);
+  });
   if(groupFilter) groups=groups.filter(g=>g.id===groupFilter);
   if(officerFilter) groups=groups.filter(g=>g.officer_id===officerFilter);
 
@@ -3734,6 +3761,7 @@ function pageCollectionCompliance(){
   state._collectionWeekStart=mondayOfWeek(state._collectionWeekStart||todayISO());
   state._collectionTab=state._collectionTab||'overview';
   state._collectionSearch=state._collectionSearch||'';
+  state._collectionPortfolioSearch=state._collectionPortfolioSearch||'';
   const report=buildCollectionCompliance();
   const issues=collectionExceptions(report);
   const officers=state.data.staff.filter(s=>report.groupRows.some(r=>r.group.officer_id===s.id)||collectionAccessibleGroups().some(g=>g.officer_id===s.id));
@@ -3748,7 +3776,9 @@ function pageCollectionCompliance(){
   $('page').innerHTML=`
     <div class="page-head"><div><h1>Collection Compliance</h1><div class="desc">Weekly group performance, funding checks and upload exceptions.</div></div>
       <div class="actions"><button class="btn btn-outline" onclick="exportCollectionCompliance()">Export Excel</button></div></div>
-    <div class="card card-pad" style="margin-bottom:16px"><div class="compliance-filters">
+    <div class="card card-pad" style="margin-bottom:16px">
+      <div class="field"><label>Search group or loan officer</label><div class="search-box"><span class="ic">${searchIcon()}</span><input id="collection-portfolio-search" value="${state._collectionPortfolioSearch}" placeholder="Type a group name, group code, officer name or email" oninput="handleCollectionPortfolioSearch(this)"></div></div>
+      <div class="compliance-filters">
       <div class="field"><label>Week beginning</label><input type="date" value="${report.start}" onchange="setCollectionFilter('_collectionWeekStart',mondayOfWeek(this.value))"></div>
       <div class="field"><label>Group</label><select onchange="state._collectionGroup=this.value;state._collectionOfficer='';pageCollectionCompliance()"><option value="">All accessible groups</option>${collectionAccessibleGroups().map(g=>`<option value="${g.id}" ${state._collectionGroup===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
       <div class="field"><label>Officer</label><select onchange="state._collectionOfficer=this.value;state._collectionGroup='';pageCollectionCompliance()"><option value="">All accessible officers</option>${officers.map(o=>`<option value="${o.id}" ${state._collectionOfficer===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
@@ -3770,7 +3800,7 @@ function pageCollectionCompliance(){
     ${tab==='overview'?`<div class="table-wrap"><table class="tbl" style="min-width:1050px"><thead><tr><th>Group / Officer</th><th class="num">Members</th><th class="num">Products</th><th class="num">Total OLB</th><th class="num">Savings</th><th class="num">Expected</th><th class="num">Collected</th><th class="num">Shortfall</th><th class="num">Arrears clients</th><th></th></tr></thead><tbody>
       ${report.groupRows.map(r=>`<tr><td><b>${r.group.name}</b><div class="muted" style="font-size:11px">${r.officer?.full_name||'No officer assigned'}</div></td><td class="num">${r.members}</td><td class="num">${r.products}</td><td class="num"><b>${KES(r.olb)}</b></td><td class="num">${KES(r.savings)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num" style="color:${Math.max(0,r.expected-r.collected)>0?'var(--danger)':'var(--success)'}">${KES(Math.max(0,r.expected-r.collected))}</td><td class="num">${r.arrearsClients}</td><td><button class="btn btn-sm btn-outline" onclick="state._collectionGroup='${r.group.id}';state._collectionOfficer='';state._collectionTab='members';pageCollectionCompliance()">View clients</button></td></tr>`).join('')||`<tr><td colspan="10"><div class="empty"><h4>No groups found</h4><p>Adjust the group or officer filter.</p></div></td></tr>`}
       </tbody></table></div>`:''}
-    ${tab==='members'?`<div class="toolbar"><div class="search-box grow"><span class="ic">${searchIcon()}</span><input placeholder="Search client, phone, ID, group or product" value="${state._collectionSearch}" oninput="state._collectionSearch=this.value;clearTimeout(state._collectionSearchTimer);state._collectionSearchTimer=setTimeout(pageCollectionCompliance,250)"></div></div>
+    ${tab==='members'?`<div class="toolbar"><div class="search-box grow"><span class="ic">${searchIcon()}</span><input id="collection-client-search" placeholder="Search client, phone, ID, group or product" value="${state._collectionSearch}" oninput="handleCollectionClientSearch(this)"></div></div>
       <div class="table-wrap"><table class="tbl" style="min-width:1150px"><thead><tr><th>Client / Group</th><th>Products in repayment</th><th class="num">Total OLB</th><th class="num">Weekly expected</th><th class="num">Collected</th><th class="num">Savings</th><th class="num">Arrears</th><th>Funding check</th></tr></thead><tbody>
       ${visibleMembers.slice(0,500).map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num">${KES(r.savings)}</td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="8"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
       </tbody></table></div>${visibleMembers.length>500?`<div class="helper" style="margin-top:8px">Showing the first 500 clients. Export Excel for all ${visibleMembers.length} records.</div>`:''}`:''}
@@ -5546,6 +5576,9 @@ function approveOrder(o){
  * PAGE: REPORTS
  * ===================================================================== */
 function productSalesMonth(){ return state._productSalesMonth||todayISO().slice(0,7); }
+function handleProductSalesSearch(input){
+  rerenderSearchWithFocus(input,'_productSalesSearch','_productSalesSearchTimer',pageReports,'product-sales-search');
+}
 function confirmedSaleLoans(){
   return state.data.loans.filter(l=>['active','completed','defaulted'].includes(String(l.status||'').toLowerCase()));
 }
@@ -5600,7 +5633,7 @@ function productSalesReportHtml(){
     <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed items issued through approved or disbursed loans</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
     <div class="card-pad" style="padding-bottom:12px"><div class="product-sales-filters">
       <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;pageReports()"></div>
-      <div class="field"><label>Product</label><input value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="state._productSalesSearch=this.value;clearTimeout(state._productSalesTimer);state._productSalesTimer=setTimeout(pageReports,250)"></div>
+      <div class="field"><label>Product</label><input id="product-sales-search" value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="handleProductSalesSearch(this)"></div>
       <button class="btn btn-outline" onclick="state._productSalesSearch='';pageReports()">Clear product</button>
     </div></div>
     <div class="product-sales-metrics">
