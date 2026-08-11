@@ -3775,7 +3775,7 @@ function pageCollectionCompliance(){
   const tab=state._collectionTab;
   $('page').innerHTML=`
     <div class="page-head"><div><h1>Collection Compliance</h1><div class="desc">Weekly group performance, funding checks and upload exceptions.</div></div>
-      <div class="actions"><button class="btn btn-outline" onclick="exportCollectionCompliance()">Export Excel</button></div></div>
+      <div class="actions"><button class="btn btn-outline" onclick="downloadCollectionFieldSheetPdf()">Download Field PDF</button><button class="btn btn-outline" onclick="exportCollectionCompliance()">Export Excel</button></div></div>
     <div class="card card-pad" style="margin-bottom:16px">
       <div class="field"><label>Search group or loan officer</label><div class="search-box"><span class="ic">${searchIcon()}</span><input id="collection-portfolio-search" value="${state._collectionPortfolioSearch}" placeholder="Type a group name, group code, officer name or email" oninput="handleCollectionPortfolioSearch(this)"></div></div>
       <div class="compliance-filters">
@@ -3818,6 +3818,160 @@ function exportCollectionCompliance(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(issues),'Exceptions');
   XLSX.writeFile(wb,`collection_compliance_${report.start}_${report.end}.xlsx`);
   toast('Weekly collection compliance report exported','success');
+}
+
+function collectionLoanInstallmentSummary(loan,cutoff){
+  const totalPayable=Number(loan?.total_payable||0);
+  const weekly=Number(loan?.weekly_installment||0);
+  const paid=repaymentPaidByDate(loan.id,cutoff);
+  const totalInstallments=weekly>0?Math.ceil(totalPayable/weekly):0;
+  const paidInstallments=weekly>0
+    ?Math.min(totalInstallments,paid>=totalPayable-0.01?totalInstallments:Math.floor((paid+0.01)/weekly))
+    :0;
+  const dueInstallments=weekly>0&&loan.start_date
+    ?Math.min(totalInstallments,Math.max(0,Math.floor(daysBetweenDates(loan.start_date,cutoff)/7)))
+    :0;
+  const unpaidInstallments=Math.max(0,dueInstallments-paidInstallments);
+  const repayments=state.data.repayments
+    .filter(r=>r.loan_id===loan.id&&countsInBalance(r))
+    .filter(r=>String(r.meeting_date||r.created_at||'').slice(0,10)<=cutoff)
+    .sort((a,b)=>String(b.meeting_date||b.created_at||'').localeCompare(String(a.meeting_date||a.created_at||'')));
+  const lastPaid=repayments.length?String(repayments[0].meeting_date||repayments[0].created_at||'').slice(0,10):'';
+  const overdue=loanArrearsAtDate(loan,cutoff);
+  const firstUnpaidDue=unpaidInstallments>0?addDateDays(loan.start_date,(paidInstallments+1)*7):'';
+  const overdueDays=firstUnpaidDue?Math.max(0,daysBetweenDates(firstUnpaidDue,cutoff)):0;
+  return {paidInstallments,unpaidInstallments,lastPaid,overdue,overdueDays};
+}
+
+function collectionFieldSheetRows(groupRow,report){
+  const members=report.memberRows
+    .filter(row=>row.group.id===groupRow.group.id)
+    .sort((a,b)=>String(a.member.full_name||'').localeCompare(String(b.member.full_name||'')));
+  const rows=[];
+  members.forEach(memberRow=>{
+    const loans=[...memberRow.loans].sort((a,b)=>String(a.start_date||'').localeCompare(String(b.start_date||'')));
+    if(!loans.length){
+      rows.push({memberId:memberRow.member.id,client:memberRow.member.full_name||'-',savings:memberRow.savings,product:'No loan in repayment',totalPayable:0,olb:0,start:'',paidInstallments:0,unpaidInstallments:0,end:'',lastPaid:'',overdue:0,overdueDays:0});
+      return;
+    }
+    loans.forEach((loan,index)=>{
+      const installment=collectionLoanInstallmentSummary(loan,report.arrearsCutoff);
+      rows.push({
+        memberId:memberRow.member.id,
+        client:index===0?(memberRow.member.full_name||'-'):'',
+        savings:index===0?memberRow.savings:null,
+        product:`${loan.asset_name||'Loan product'}${Number(loan.asset_quantity||1)>1?` x${loan.asset_quantity}`:''}`,
+        totalPayable:Number(loan.total_payable||0),
+        olb:Math.max(0,Number(loan.total_payable||0)-repaymentPaidByDate(loan.id,report.arrearsCutoff)),
+        start:loan.start_date||'',
+        paidInstallments:installment.paidInstallments,
+        unpaidInstallments:installment.unpaidInstallments,
+        end:loan.expected_end_date||'',
+        lastPaid:installment.lastPaid,
+        overdue:installment.overdue,
+        overdueDays:installment.overdueDays
+      });
+    });
+  });
+  return rows;
+}
+
+function downloadCollectionFieldSheetPdf(){
+  try{
+    const report=buildCollectionCompliance();
+    if(!report.groupRows.length) return toast('No collection groups match the selected filters.','warn');
+    const {jsPDF}=window.jspdf||{};
+    if(!jsPDF) throw new Error('The PDF service is not available. Refresh the system and try again.');
+    const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+    const orange=[230,92,0],charcoal=[42,28,18],muted=[105,91,80],pale=[255,247,239],red=[164,38,44];
+    const pageWidth=doc.internal.pageSize.width;
+    const pageHeight=doc.internal.pageSize.height;
+
+    report.groupRows.forEach((groupRow,groupIndex)=>{
+      if(groupIndex>0) doc.addPage('a4','landscape');
+      const rows=collectionFieldSheetRows(groupRow,report);
+      const uniqueSavings=new Map();
+      rows.forEach(row=>{ if(row.savings!==null) uniqueSavings.set(row.memberId,Number(row.savings||0)); });
+      const totals={
+        savings:[...uniqueSavings.values()].reduce((sum,value)=>sum+value,0),
+        totalPayable:rows.reduce((sum,row)=>sum+Number(row.totalPayable||0),0),
+        olb:rows.reduce((sum,row)=>sum+Number(row.olb||0),0),
+        paidInstallments:rows.reduce((sum,row)=>sum+Number(row.paidInstallments||0),0),
+        unpaidInstallments:rows.reduce((sum,row)=>sum+Number(row.unpaidInstallments||0),0),
+        overdue:rows.reduce((sum,row)=>sum+Number(row.overdue||0),0)
+      };
+
+      doc.setFillColor(...orange); doc.rect(0,0,pageWidth,25,'F');
+      doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(15);
+      doc.text('WAMAMA PAMOJA ENTERPRISE',10,10);
+      doc.setFontSize(8); doc.setFont('helvetica','normal');
+      doc.text('WEEKLY GROUP COLLECTION FIELD SHEET',10,17);
+      doc.text(`Generated: ${fmtDate(todayISO())}`,pageWidth-10,11,{align:'right'});
+      doc.text(`Week: ${fmtDate(report.start)} to ${fmtDate(report.end)}`,pageWidth-10,17,{align:'right'});
+
+      doc.setFillColor(...pale); doc.roundedRect(10,30,pageWidth-20,15,1.5,1.5,'F');
+      doc.setTextColor(...charcoal); doc.setFont('helvetica','bold'); doc.setFontSize(9);
+      doc.text(`Group: ${groupRow.group.name}`,14,36);
+      doc.setFont('helvetica','normal');
+      doc.text(`Loan officer: ${groupRow.officer?.full_name||'Not assigned'}`,14,41);
+      doc.text(`Active members: ${groupRow.members}`,105,36);
+      doc.text(`Products in repayment: ${groupRow.products}`,105,41);
+      doc.text(`Arrears measured up to: ${fmtDate(report.arrearsCutoff)}`,pageWidth-14,38.5,{align:'right'});
+
+      const body=rows.map((row,index)=>[
+        index+1,row.client,row.savings===null?'':KES(row.savings),row.product,KES(row.totalPayable),KES(row.olb),
+        row.start?fmtDate(row.start):'-',row.paidInstallments,row.unpaidInstallments,row.end?fmtDate(row.end):'-',
+        row.lastPaid?fmtDate(row.lastPaid):'-',KES(row.overdue),row.overdueDays||'-'
+      ]);
+      body.push(['','TOTALS',KES(totals.savings),'',KES(totals.totalPayable),KES(totals.olb),'',totals.paidInstallments,totals.unpaidInstallments,'','',KES(totals.overdue),'']);
+
+      doc.autoTable({
+        startY:50,
+        margin:{left:7,right:7,bottom:18},
+        head:[['#','Client name','Total savings','Loan product','Loan amount P + I','OLB','Start date','Paid inst.','Unpaid inst.','End date','Last paid','Overdue','Days']],
+        body,
+        theme:'grid',
+        showHead:'everyPage',
+        styles:{font:'helvetica',fontSize:5.8,cellPadding:1.25,textColor:charcoal,lineColor:[218,205,194],lineWidth:.15,overflow:'linebreak',valign:'middle'},
+        headStyles:{fillColor:orange,textColor:[255,255,255],fontStyle:'bold',fontSize:5.8,halign:'center'},
+        alternateRowStyles:{fillColor:[255,251,247]},
+        columnStyles:{
+          0:{cellWidth:7,halign:'center'},1:{cellWidth:31},2:{cellWidth:22,halign:'right'},3:{cellWidth:39},
+          4:{cellWidth:24,halign:'right'},5:{cellWidth:21,halign:'right'},6:{cellWidth:18},7:{cellWidth:14,halign:'center'},
+          8:{cellWidth:15,halign:'center'},9:{cellWidth:18},10:{cellWidth:18},11:{cellWidth:20,halign:'right'},12:{cellWidth:10,halign:'center'}
+        },
+        didParseCell(data){
+          if(data.section==='body'&&data.row.index===body.length-1){
+            data.cell.styles.fontStyle='bold'; data.cell.styles.fillColor=[244,231,217];
+          }
+          if(data.section==='body'&&data.column.index===11&&data.row.index<body.length-1&&Number(rows[data.row.index]?.overdue||0)>0){
+            data.cell.styles.textColor=red; data.cell.styles.fontStyle='bold';
+          }
+        },
+        didDrawPage(){
+          doc.setDrawColor(220,210,200); doc.line(10,pageHeight-13,pageWidth-10,pageHeight-13);
+          doc.setTextColor(...muted); doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
+          doc.text('Prepared for offline field collection. Figures are based on approved records available when this PDF was generated.',10,pageHeight-8);
+          doc.text(`Page ${doc.internal.getNumberOfPages()}`,pageWidth-10,pageHeight-8,{align:'right'});
+        }
+      });
+
+      let signY=(doc.lastAutoTable?.finalY||50)+6;
+      if(signY>pageHeight-25){ doc.addPage('a4','landscape'); signY=25; }
+      doc.setTextColor(...charcoal); doc.setFontSize(7); doc.setFont('helvetica','normal');
+      doc.text('Officer name/signature: ____________________________________',12,signY);
+      doc.text('Supervisor verification: ____________________________________',110,signY);
+      doc.text('Comments: __________________________________________________________________________________________________________',12,signY+7);
+    });
+
+    const groupName=state._collectionGroup?report.groupRows[0]?.group?.name:'all_accessible_groups';
+    const safeGroup=String(groupName||'collection').replace(/[^a-z0-9]+/gi,'_').replace(/^_|_$/g,'');
+    doc.save(`Wamama_Collection_Field_Sheet_${safeGroup}_${report.start}_${report.end}.pdf`);
+    toast('Weekly collection field PDF downloaded.','success');
+  }catch(error){
+    console.error('collection field PDF error',error);
+    toast(error.message||'Could not generate the collection field PDF.','error');
+  }
 }
 
 /* =====================================================================
