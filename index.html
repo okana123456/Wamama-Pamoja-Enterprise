@@ -548,8 +548,21 @@ const state = {
 
 /* ----- Money formatter ----- */
 const KES = n => 'KES ' + (Number(n||0)).toLocaleString('en-KE', { minimumFractionDigits:0, maximumFractionDigits:2 });
-const fmtDate = d => d ? new Date(d).toLocaleDateString('en-KE', { day:'2-digit', month:'short', year:'numeric' }) : '—';
-const todayISO = () => new Date().toISOString().slice(0,10);
+function kenyaDateISO(value=new Date()){
+  const date=value instanceof Date?value:new Date(value);
+  if(Number.isNaN(date.getTime())) return '';
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Nairobi',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date);
+  const pick=type=>parts.find(part=>part.type===type)?.value||'';
+  return `${pick('year')}-${pick('month')}-${pick('day')}`;
+}
+const fmtDate = d => {
+  if(!d) return '—';
+  const raw=String(d);
+  const value=/^\d{4}-\d{2}-\d{2}$/.test(raw)?`${raw}T12:00:00+03:00`:d;
+  return new Date(value).toLocaleDateString('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric'});
+};
+const fmtDateTime = d => d ? new Date(d).toLocaleString('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+const todayISO = () => kenyaDateISO(new Date());
 const initials = name => (name||'').split(/\s+/).filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase() || '—';
 const normalisePhone = p => {
   if(!p) return '';
@@ -1955,7 +1968,7 @@ let _mpSavingsCustomStart = '', _mpSavingsCustomEnd = '';
 
 function dashDateRange(){
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   const today = iso(now);
   if(_dashFilter==='today') return { start: today, end: today };
   if(_dashFilter==='yesterday'){
@@ -1984,7 +1997,7 @@ function arrearDateRange(){
   // Returns a date range for filtering loan start_dates in the arrears view.
   // 'all' means no restriction (show all active loans regardless of start date).
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   const today = iso(now);
   if(_arrearsFilter === 'all') return { start: '2000-01-01', end: '2999-12-31' };
   if(_arrearsFilter === 'week'){
@@ -2030,7 +2043,7 @@ function pageDashboard(){
   const inRangeFallback = (dateStr, createdAt) => {
     if(inRange(dateStr)) return true;
     if(!createdAt) return false;
-    const cd = new Date(createdAt).toISOString().slice(0,10);
+    const cd = kenyaDateISO(createdAt);
     return cd >= start && cd <= end;
   };
 
@@ -2161,7 +2174,7 @@ function dashArrFilter(){
   const today     = todayISO();
   const msPerWeek = 7 * 24 * 3600 * 1000;
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   let drStart = '2000-01-01', drEnd = '2999-12-31';
   if(rangeVal === 'week')    { const d=new Date(now); d.setDate(d.getDate()-6); drStart=iso(d); drEnd=today; }
   if(rangeVal === 'month')   { const d=new Date(now); d.setMonth(d.getMonth()-1); drStart=iso(d); drEnd=today; }
@@ -2329,7 +2342,7 @@ function pageOfficerDashboard(){
     if(!dateStr && !createdAt) return false;
     const d = (dateStr||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(createdAt){ const cd = new Date(createdAt).toISOString().slice(0,10); if(cd >= start && cd <= end) return true; }
+    if(createdAt){ const cd = kenyaDateISO(createdAt); if(cd >= start && cd <= end) return true; }
     return false;
   };
   const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && s.status !== 'pending');
@@ -3407,7 +3420,7 @@ function pageMemberProfile(){
       ${tab==='savings' ? (()=>{
           // Compute member-profile savings date range
           const now = new Date();
-          const isoD = d => d.toISOString().slice(0,10);
+          const isoD = d => kenyaDateISO(d);
           const today = isoD(now);
           let mpSvStart = '2000-01-01', mpSvEnd = '2999-12-31';
           if(_mpSavingsFilter==='today'){ mpSvStart=today; mpSvEnd=today; }
@@ -3576,14 +3589,18 @@ function dateOnly(value){
   const iso = String(value||'').slice(0,10);
   return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00Z`) : null;
 }
+function collectionTodayISO(){
+  const today=billingTodayParts();
+  return `${today.year}-${today.month}-${String(today.day).padStart(2,'0')}`;
+}
 function dateOnlyISO(date){ return date.toISOString().slice(0,10); }
 function addDateDays(value, days){
-  const d = dateOnly(value) || dateOnly(todayISO());
+  const d = dateOnly(value) || dateOnly(collectionTodayISO());
   d.setUTCDate(d.getUTCDate() + Number(days||0));
   return dateOnlyISO(d);
 }
 function mondayOfWeek(value){
-  const d = dateOnly(value) || dateOnly(todayISO());
+  const d = dateOnly(value) || dateOnly(collectionTodayISO());
   const day = d.getUTCDay() || 7;
   d.setUTCDate(d.getUTCDate() - day + 1);
   return dateOnlyISO(d);
@@ -3630,7 +3647,7 @@ function collectionAccessibleGroups(){
   return visiblePortfolioGroupsForCurrentStaff().filter(g=>g.status!=='inactive');
 }
 function collectionSelectedWeek(){
-  const start=mondayOfWeek(state._collectionWeekStart||todayISO());
+  const start=mondayOfWeek(state._collectionWeekStart||collectionTodayISO());
   return { start,end:addDateDays(start,6) };
 }
 function rerenderSearchWithFocus(input,stateKey,timerKey,pageFn,inputId){
@@ -3657,7 +3674,7 @@ function handleCollectionClientSearch(input){
 }
 function buildCollectionCompliance(){
   const {start,end}=collectionSelectedWeek();
-  const arrearsCutoff=end<todayISO()?end:todayISO();
+  const arrearsCutoff=end<collectionTodayISO()?end:collectionTodayISO();
   const groupFilter=state._collectionGroup||'';
   const officerFilter=state._collectionOfficer||'';
   const portfolioSearch=cleanMemberText(state._collectionPortfolioSearch||'');
@@ -3753,12 +3770,12 @@ function collectionExceptions(report){
 function setCollectionFilter(key,value){ state[key]=value; pageCollectionCompliance(); }
 function openGroupCollectionCompliance(groupId,date){
   state._collectionGroup=groupId||'';
-  state._collectionWeekStart=mondayOfWeek(date||todayISO());
+  state._collectionWeekStart=mondayOfWeek(date||collectionTodayISO());
   state._collectionTab='members';
   go('collection_compliance');
 }
 function pageCollectionCompliance(){
-  state._collectionWeekStart=mondayOfWeek(state._collectionWeekStart||todayISO());
+  state._collectionWeekStart=mondayOfWeek(state._collectionWeekStart||collectionTodayISO());
   state._collectionTab=state._collectionTab||'overview';
   state._collectionSearch=state._collectionSearch||'';
   state._collectionPortfolioSearch=state._collectionPortfolioSearch||'';
@@ -3782,7 +3799,7 @@ function pageCollectionCompliance(){
       <div class="field"><label>Week beginning</label><input type="date" value="${report.start}" onchange="setCollectionFilter('_collectionWeekStart',mondayOfWeek(this.value))"></div>
       <div class="field"><label>Group</label><select onchange="state._collectionGroup=this.value;state._collectionOfficer='';pageCollectionCompliance()"><option value="">All accessible groups</option>${collectionAccessibleGroups().map(g=>`<option value="${g.id}" ${state._collectionGroup===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
       <div class="field"><label>Officer</label><select onchange="state._collectionOfficer=this.value;state._collectionGroup='';pageCollectionCompliance()"><option value="">All accessible officers</option>${officers.map(o=>`<option value="${o.id}" ${state._collectionOfficer===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
-      <button class="btn btn-outline" onclick="state._collectionWeekStart=mondayOfWeek(todayISO());pageCollectionCompliance()">Current week</button>
+      <button class="btn btn-outline" onclick="state._collectionWeekStart=mondayOfWeek(collectionTodayISO());pageCollectionCompliance()">Current week</button>
     </div><div class="helper" style="margin-top:10px">Reporting period: <b>${fmtDate(report.start)}</b> to <b>${fmtDate(report.end)}</b>. Arrears are measured using approved repayments up to ${fmtDate(report.arrearsCutoff)}.</div></div>
     <div class="kpi-grid">
       <div class="kpi k-primary"><div class="l">Active group members</div><div class="v">${totals.members}</div><div class="d">${report.groupRows.length} groups</div></div>
@@ -4386,7 +4403,7 @@ function pageLoans(){
   // Compute loan date range
   const loanDateRange = () => {
     const now = new Date();
-    const iso = d => d.toISOString().slice(0,10);
+    const iso = d => kenyaDateISO(d);
     const today = iso(now);
     if(_loanDateFilter==='all') return { start: '2000-01-01', end: '2999-12-31' };
     if(_loanDateFilter==='today') return { start: today, end: today };
@@ -6301,7 +6318,7 @@ async function pageAudit(){
   $('al-host').innerHTML = `<div class="table-wrap"><table class="tbl">
     <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Entity</th><th>Reference</th></tr></thead>
     <tbody>${(data||[]).map(r => `<tr>
-      <td>${new Date(r.created_at).toLocaleString('en-KE')}</td>
+      <td>${fmtDateTime(r.created_at)}</td>
       <td>${r.staff_name||'—'}</td>
       <td><code class="kbd">${r.action}</code></td>
       <td>${r.entity||'—'}</td>
@@ -8063,7 +8080,7 @@ const EXPENSE_CATEGORIES = ['Transport','Office Supplies','Utilities','Salary','
 
 function expDateRange(){
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   const today = iso(now);
   if(_expDateFilter==='today') return { start: today, end: today };
   if(_expDateFilter==='yesterday'){
@@ -8091,7 +8108,7 @@ function pageExpenses(){
   const inRangeFallback = (dateStr, createdAt) => {
     const d = (dateStr||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(createdAt){ const cd = new Date(createdAt).toISOString().slice(0,10); return cd >= start && cd <= end; }
+    if(createdAt){ const cd = kenyaDateISO(createdAt); return cd >= start && cd <= end; }
     return false;
   };
 
@@ -8256,7 +8273,7 @@ const LEDGER_PAGE_SIZE = 100;
 
 function savingsDateRange(){
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   const today = iso(now);
   if(_savingsDateFilter==='today') return { start: today, end: today };
   if(_savingsDateFilter==='yesterday'){
@@ -8475,7 +8492,7 @@ function pageSavings(){
   const inRange = s => {
     const d = (s.meeting_date||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(s.created_at){ const cd = new Date(s.created_at).toISOString().slice(0,10); return cd >= start && cd <= end; }
+    if(s.created_at){ const cd = kenyaDateISO(s.created_at); return cd >= start && cd <= end; }
     return false;
   };
 
@@ -8642,7 +8659,7 @@ function exportSavingsFiltered(){
   const inRange = s => {
     const d = (s.meeting_date||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(s.created_at){ const cd = new Date(s.created_at).toISOString().slice(0,10); return cd >= start && cd <= end; }
+    if(s.created_at){ const cd = kenyaDateISO(s.created_at); return cd >= start && cd <= end; }
     return false;
   };
   const filtered = state.data.savings.filter(s => {
@@ -8682,7 +8699,7 @@ let _repLedgerPage = 0;
 
 function repDateRange(){
   const now = new Date();
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => kenyaDateISO(d);
   const today = iso(now);
   if(_repDateFilter==='today') return { start: today, end: today };
   if(_repDateFilter==='yesterday'){
@@ -9191,7 +9208,7 @@ function pageRepayments(){
   const inRange = r => {
     const d = (r.meeting_date||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(r.created_at){ const cd = new Date(r.created_at).toISOString().slice(0,10); return cd >= start && cd <= end; }
+    if(r.created_at){ const cd = kenyaDateISO(r.created_at); return cd >= start && cd <= end; }
     return false;
   };
 
@@ -9528,7 +9545,7 @@ function exportRepaymentsFiltered(){
   const inRange = r => {
     const d = (r.meeting_date||'').slice(0,10);
     if(d >= start && d <= end) return true;
-    if(r.created_at){ const cd = new Date(r.created_at).toISOString().slice(0,10); return cd >= start && cd <= end; }
+    if(r.created_at){ const cd = kenyaDateISO(r.created_at); return cd >= start && cd <= end; }
     return false;
   };
   const filtered = state.data.repayments.filter(r => {
