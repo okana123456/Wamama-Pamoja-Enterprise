@@ -3869,33 +3869,31 @@ function collectionFieldSheetRows(groupRow,report){
   const members=report.memberRows
     .filter(row=>row.group.id===groupRow.group.id)
     .sort((a,b)=>String(a.member.full_name||'').localeCompare(String(b.member.full_name||'')));
-  const rows=[];
-  members.forEach(memberRow=>{
+  return members.map(memberRow=>{
     const loans=[...memberRow.loans].sort((a,b)=>String(a.start_date||'').localeCompare(String(b.start_date||'')));
     if(!loans.length){
-      rows.push({memberId:memberRow.member.id,client:memberRow.member.full_name||'-',savings:memberRow.savings,product:'No loan in repayment',totalPayable:0,olb:0,start:'',paidInstallments:0,unpaidInstallments:0,end:'',lastPaid:'',overdue:0,overdueDays:0});
-      return;
+      return {memberId:memberRow.member.id,client:memberRow.member.full_name||'-',savings:memberRow.savings,product:'No loan in repayment',totalPayable:0,olb:0,start:'',paidInstallments:0,unpaidInstallments:0,end:'',lastPaid:'',overdue:0,overdueDays:0};
     }
-    loans.forEach((loan,index)=>{
-      const installment=collectionLoanInstallmentSummary(loan,report.arrearsCutoff);
-      rows.push({
-        memberId:memberRow.member.id,
-        client:index===0?(memberRow.member.full_name||'-'):'',
-        savings:index===0?memberRow.savings:null,
-        product:`${loan.asset_name||'Loan product'}${Number(loan.asset_quantity||1)>1?` x${loan.asset_quantity}`:''}`,
-        totalPayable:Number(loan.total_payable||0),
-        olb:Math.max(0,Number(loan.total_payable||0)-repaymentPaidByDate(loan.id,report.arrearsCutoff)),
-        start:loan.start_date||'',
-        paidInstallments:installment.paidInstallments,
-        unpaidInstallments:installment.unpaidInstallments,
-        end:loan.expected_end_date||'',
-        lastPaid:installment.lastPaid,
-        overdue:installment.overdue,
-        overdueDays:installment.overdueDays
-      });
-    });
+    const installments=loans.map(loan=>collectionLoanInstallmentSummary(loan,report.arrearsCutoff));
+    const starts=loans.map(loan=>String(loan.start_date||'').slice(0,10)).filter(Boolean).sort();
+    const ends=loans.map(loan=>String(loan.expected_end_date||'').slice(0,10)).filter(Boolean).sort();
+    const lastPaidDates=installments.map(item=>item.lastPaid).filter(Boolean).sort();
+    return {
+      memberId:memberRow.member.id,
+      client:memberRow.member.full_name||'-',
+      savings:memberRow.savings,
+      product:loans.map(loan=>`${loan.asset_name||'Loan product'}${Number(loan.asset_quantity||1)>1?` x${loan.asset_quantity}`:''}`).join('; '),
+      totalPayable:loans.reduce((sum,loan)=>sum+Number(loan.total_payable||0),0),
+      olb:loans.reduce((sum,loan)=>sum+Math.max(0,Number(loan.total_payable||0)-repaymentPaidByDate(loan.id,report.arrearsCutoff)),0),
+      start:starts[0]||'',
+      paidInstallments:installments.reduce((sum,item)=>sum+Number(item.paidInstallments||0),0),
+      unpaidInstallments:installments.reduce((sum,item)=>sum+Number(item.unpaidInstallments||0),0),
+      end:ends.at(-1)||'',
+      lastPaid:lastPaidDates.at(-1)||'',
+      overdue:installments.reduce((sum,item)=>sum+Number(item.overdue||0),0),
+      overdueDays:installments.reduce((max,item)=>Math.max(max,Number(item.overdueDays||0)),0)
+    };
   });
-  return rows;
 }
 
 function downloadCollectionFieldSheetPdf(){
@@ -3936,7 +3934,7 @@ function downloadCollectionFieldSheetPdf(){
       doc.text(`Group: ${groupRow.group.name}`,14,36);
       doc.setFont('helvetica','normal');
       doc.text(`Loan officer: ${groupRow.officer?.full_name||'Not assigned'}`,14,41);
-      doc.text(`Active members: ${groupRow.members}`,105,36);
+      doc.text(`Clients listed: ${rows.length} (active members: ${groupRow.members})`,105,36);
       doc.text(`Products in repayment: ${groupRow.products}`,105,41);
       doc.text(`Arrears measured up to: ${fmtDate(report.arrearsCutoff)}`,pageWidth-14,38.5,{align:'right'});
 
