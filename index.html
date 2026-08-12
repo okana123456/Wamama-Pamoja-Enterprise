@@ -7234,6 +7234,11 @@ async function saveSoldItemsForm(){
       );
     }
 
+    if(!member){
+      errors.push(`${row.client_name}: client not found. Register the client first or correct the name/phone in the sold-items form.`);
+      continue;
+    }
+
     const memberId = member?.id || null;
 
     // Calculate loan schedule.
