@@ -3646,6 +3646,14 @@ function savingsByDate(memberId,cutoff){
 function collectionAccessibleGroups(){
   return visiblePortfolioGroupsForCurrentStaff().filter(g=>g.status!=='inactive');
 }
+function currentPortfolioGroupForLoan(loan){
+  const member=state.data.members.find(m=>m.id===loan?.member_id);
+  return state.data.groups.find(g=>g.id===(member?.group_id||loan?.group_id))||null;
+}
+function currentPortfolioOfficerForLoan(loan){
+  const group=currentPortfolioGroupForLoan(loan);
+  return state.data.staff.find(s=>s.id===(group?.officer_id||loan?.officer_id))||null;
+}
 function collectionSelectedWeek(){
   const start=mondayOfWeek(state._collectionWeekStart||collectionTodayISO());
   return { start,end:addDateDays(start,6) };
@@ -3690,8 +3698,7 @@ function buildCollectionCompliance(){
   groups.forEach(group=>{
     const allGroupMembers=state.data.members.filter(m=>m.group_id===group.id);
     const activeMembers=allGroupMembers.filter(m=>m.status==='active');
-    const groupMemberIds=new Set(allGroupMembers.map(m=>m.id));
-    const loans=state.data.loans.filter(l=>(l.group_id===group.id||groupMemberIds.has(l.member_id))&&loanOverlapsWeek(l,start,end));
+    const loans=state.data.loans.filter(l=>currentPortfolioGroupForLoan(l)?.id===group.id&&loanOverlapsWeek(l,start,end));
     const loanMemberIds=new Set(loans.map(l=>l.member_id).filter(Boolean));
     const reportMembers=allGroupMembers.filter(m=>m.status==='active'||loanMemberIds.has(m.id));
     reportMembers.forEach(member=>{
@@ -3730,14 +3737,15 @@ function collectionExceptions(report){
   const issues=[];
   const relevantLoans=state.data.loans.filter(l=>{
     const d=String(l.start_date||'').slice(0,10);
-    return (groupIds.has(l.group_id)||memberIds.has(l.member_id)) && d>=start && d<=end && !['cancelled','rejected'].includes(String(l.status||'').toLowerCase());
+    return (groupIds.has(currentPortfolioGroupForLoan(l)?.id)||memberIds.has(l.member_id)) && d>=start && d<=end && !['cancelled','rejected'].includes(String(l.status||'').toLowerCase());
   });
   relevantLoans.forEach(loan=>{
     const member=state.data.members.find(m=>m.id===loan.member_id);
-    const group=state.data.groups.find(g=>g.id===(loan.group_id||member?.group_id));
+    const group=currentPortfolioGroupForLoan(loan);
+    const storedLoanGroup=state.data.groups.find(g=>g.id===loan.group_id);
     if(!member) issues.push({type:'Loan has no client',detail:`${loan.asset_name||'Loan'} (${String(loan.id).slice(0,8)}) is not linked to a valid client.`,group:'Unassigned'});
     else if(!group) issues.push({type:'Client has no valid group',detail:`${member.full_name} has a loan but no valid group assignment.`,group:'Unassigned'});
-    else if(loan.group_id&&member.group_id&&loan.group_id!==member.group_id) issues.push({type:'Possible wrong group upload',detail:`${member.full_name}'s loan is linked to ${group.name}, but the client profile points to another group.`,group:group.name});
+    else if(loan.group_id&&member.group_id&&loan.group_id!==member.group_id) issues.push({type:'Historical loan group differs from current client group',detail:`${member.full_name}'s client profile is currently in ${group.name}, while this loan still stores ${storedLoanGroup?.name||'an unavailable group'}. Collection reports use the current client group.`,group:group.name});
     const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
     if(order?.member_id&&loan.member_id&&order.member_id!==loan.member_id) issues.push({type:'Possible wrong client upload',detail:`Loan ${loan.asset_name||String(loan.id).slice(0,8)} and its order are assigned to different clients.`,group:group?.name||'Unassigned'});
   });
@@ -4213,7 +4221,7 @@ function pageArrears(){
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(l.group_id || state.data.members.find(m=>m.id===l.member_id)?.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(currentPortfolioGroupForLoan(l)?.id) || currentPortfolioOfficerForLoan(l)?.id === state.staff.id)
   );
 
   const today = todayISO();
@@ -4222,8 +4230,8 @@ function pageArrears(){
 
   const report = activeLoans.map(l => {
     const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = state.data.groups.find(x => x.id === (l.group_id || mem?.group_id));
-    const off = state.data.staff.find(x => x.id === l.officer_id);
+    const g   = currentPortfolioGroupForLoan(l);
+    const off = currentPortfolioOfficerForLoan(l);
     const paid = loanPaid(l.id);
 
     const startDate = new Date(l.start_date);
@@ -4252,10 +4260,10 @@ function pageArrears(){
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
   let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
-  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
+  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   const officersWithLoans = (portfolioView || teamView)
-    ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && report.some(r => r.loan.officer_id === s.id))
+    ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && report.some(r => r.officer?.id === s.id))
     : [];
 
   const filterBtns = [
@@ -4336,7 +4344,7 @@ function exportArrearsCollectionSheet(){
   const activeLoans = state.data.loans.filter(l =>
     l.status === 'active'
     && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(l.group_id || state.data.members.find(m=>m.id===l.member_id)?.group_id) || l.officer_id === state.staff.id)
+    && (portfolioView || teamView || myGroupIds.includes(currentPortfolioGroupForLoan(l)?.id) || currentPortfolioOfficerForLoan(l)?.id === state.staff.id)
   );
 
   const today = todayISO();
@@ -4345,8 +4353,8 @@ function exportArrearsCollectionSheet(){
 
   const report = activeLoans.map(l => {
     const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = state.data.groups.find(x => x.id === (l.group_id || mem?.group_id));
-    const off = state.data.staff.find(x => x.id === l.officer_id);
+    const g   = currentPortfolioGroupForLoan(l);
+    const off = currentPortfolioOfficerForLoan(l);
     const paid = loanPaid(l.id);
     const startDate = new Date(l.start_date);
     const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
@@ -4371,7 +4379,7 @@ function exportArrearsCollectionSheet(){
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
   let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
-  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.loan.officer_id === offFilter);
+  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   if(!filtered.length){ toast('No records in current view to export.','warn'); return; }
 
@@ -5774,8 +5782,8 @@ function buildProductSalesReport(){
     const saleDate=String(order?.ordered_on||loan.start_date||'').slice(0,10);
     if(!saleDate.startsWith(month)) return;
     const member=state.data.members.find(m=>m.id===loan.member_id);
-    const group=state.data.groups.find(g=>g.id===(loan.group_id||member?.group_id));
-    const officer=state.data.staff.find(s=>s.id===loan.officer_id)||state.data.staff.find(s=>s.id===order?.recorded_by);
+    const group=currentPortfolioGroupForLoan(loan);
+    const officer=currentPortfolioOfficerForLoan(loan)||state.data.staff.find(s=>s.id===order?.recorded_by);
     const lines=productLinesForLoan(loan);
     const linePrincipalTotal=lines.reduce((sum,line)=>sum+Number(line.principal||0),0);
     lines.forEach(line=>{
