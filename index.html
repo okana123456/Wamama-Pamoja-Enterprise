@@ -1074,6 +1074,19 @@ function memberLoan(memberId){
 function cleanMemberText(v){
   return String(v||'').trim().toLowerCase().replace(/\s+/g,' ');
 }
+function loanMemberInfo(loan){
+  const member = state.data.members.find(x => String(x.id) === String(loan?.member_id));
+  const group = state.data.groups.find(x => String(x.id) === String(loan?.group_id));
+  const missing = !member;
+  return {
+    member,
+    group,
+    name: member?.full_name || loan?.member_name || loan?.client_name || '',
+    phone: member?.phone || loan?.phone || loan?.client_phone || '',
+    nationalId: member?.national_id || loan?.national_id || loan?.id_number || '',
+    missing
+  };
+}
 function canManageMemberDuplicates(){
   const r = state.staff?.app_role || state.staff?.role || '';
   return state.staff?.role === 'admin' || ['ceo','admin','branch_manager'].includes(r) || can('approve_group');
@@ -4444,11 +4457,11 @@ function pageLoans(){
   if(state._loanDuplicatesOnly) loans = loans.filter(isDuplicateLoan);
   if(loanSearch){
     loans = loans.filter(l => {
-      const m = state.data.members.find(x=>x.id===l.member_id);
-      const grp = state.data.groups.find(x=>x.id===l.group_id);
+      const info = loanMemberInfo(l);
+      const grp = info.group || state.data.groups.find(x=>x.id===l.group_id);
       const off = state.data.staff.find(x=>x.id===l.officer_id);
       return [
-        m?.full_name, m?.national_id, m?.phone, grp?.name, off?.full_name,
+        info.name, info.nationalId, info.phone, grp?.name, off?.full_name,
         l.asset_name, l.id, l.order_id, l.status, l.start_date
       ].some(v => String(v||'').toLowerCase().includes(loanSearch));
     });
@@ -4502,16 +4515,23 @@ function pageLoans(){
         </tr></thead>
         <tbody>
           ${loans.map(l => {
-            const m = state.data.members.find(x=>x.id===l.member_id);
-            const grp = state.data.groups.find(x=>x.id===l.group_id);
+            const info = loanMemberInfo(l);
+            const grp = info.group || state.data.groups.find(x=>x.id===l.group_id);
             const off = state.data.staff.find(x=>x.id===l.officer_id);
             const paid = loanPaid(l.id);
             const out = Number(l.total_payable)-paid;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
             // Detect duplicate — same member, same order, more than one active loan
             const isDup = isDuplicateLoan(l);
+            const memberLabel = info.name || 'Client not linked';
+            const memberSub = info.phone || info.nationalId || (info.missing ? 'Repair needed: loan is not connected to a member record' : '');
             return `<tr style="${isDup?'background:var(--warning-50);':l.status==='completed'?'background:var(--surface-2);color:var(--text-muted)':l.status==='defaulted'?'background:var(--danger-50)':''}">
-              <td><b>${m?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow" title="Duplicate loan detected — use ··· to delete">⚠ Duplicate</span>`:''}</td>
+              <td>
+                <b>${statementHtml(memberLabel)}</b>
+                ${isDup?` <span class="badge b-yellow" title="Duplicate loan detected">Duplicate</span>`:''}
+                ${info.missing?` <span class="badge b-red" title="This loan is not connected to an existing member record">Needs member link</span>`:''}
+                ${memberSub?`<div class="muted" style="font-size:11px">${statementHtml(memberSub)}</div>`:''}
+              </td>
               <td>${grp?.name||'—'}</td>
               <td>${l.asset_name}</td>
               ${canSeeAll ? `<td style="font-size:12px;color:var(--text-muted)">${off?.full_name||'—'}</td>` : ''}
