@@ -734,7 +734,6 @@ const PAGE_ACCESS = {
   collection_compliance: ['branch_manager','supervisor','loan_officer','officer'],
   savings:        ['branch_manager','supervisor','loan_officer','officer'],
   repayments:     ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
-  excess_payments: [],
   repayment_approvals: ['branch_manager','ceo','admin','supervisor'],
   savings_approvals:   ['branch_manager','ceo','admin','supervisor'],
   loans:          ['branch_manager','supervisor','loan_officer','officer','inventory_officer','storekeeper'],
@@ -759,7 +758,6 @@ function canView(page){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
-  if(page === 'excess_payments' && canManageExcessPayments()) return true;
   if((page === 'orders' || page === 'sold_items') && canCreateClientOrders()) return true;
   const acl = PAGE_ACCESS[page];
   if(acl === 'ALL') return true;
@@ -1027,7 +1025,7 @@ function handleRealtimeChange(payload){
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
   applySupervisorDataScope();
   cacheDataKey(key, state.data[key]);
-  if(['dashboard','members','groups','meeting','collection_compliance','loans','inventory','repayments','excess_payments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
+  if(['dashboard','members','groups','meeting','collection_compliance','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
   if(rtChan) sb.removeChannel(rtChan);
@@ -1474,7 +1472,6 @@ function navItems(){
     { k:'collection_compliance', label:'Collection Compliance', icon:reportIcon(), extra: canSeeMeeting },
     { k:'savings',        label:'Savings',          icon:savingsIcon() },
     { k:'repayments',          label:'Repayments',          icon:repaymentsIcon() },
-    { k:'excess_payments', label:`Excess Payments${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length?` <span class="badge b-red" style="margin-left:6px">${(state.data.excessPayments||[]).filter(x=>x.status==='pending').length}</span>`:''}`, icon:repaymentsIcon(), extra:canManageExcessPayments() },
     { k:'repayment_approvals', label:`Repayment Approvals${pendRepApprovals?` <span class="badge b-red" style="margin-left:6px">${pendRepApprovals}</span>`:''}`, icon:repaymentsIcon() },
     { k:'savings_approvals',   label:`Savings Approvals${pendSavApprovals?` <span class="badge b-red" style="margin-left:6px">${pendSavApprovals}</span>`:''}`,   icon:savingsIcon() },
     { k:'loans',          label:'Active Loans',     icon:loanIcon() },
@@ -1573,7 +1570,7 @@ function renderShell(){
 function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder', collection_compliance:'Collection Compliance',
-    savings:'Savings', repayments:'Repayments', excess_payments:'Excess Payments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
+    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
     loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
@@ -1599,7 +1596,7 @@ function toggleSidebar(force){
 function renderPage(){
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, excess_payments: pageExcessPayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
+    meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -3306,7 +3303,7 @@ async function mpApproveRepayment(id){
   const closed=await closeFullyPaidLoans([r.loan_id],{silent:true});
   render();
   const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-  toast(split?'Repayment approved; the amount above the loan balance was moved to Excess Payments.':closed?'Repayment approved and loan closed.':'Repayment approved.','success');
+  toast(split?'Repayment approved; the amount above the cleared loan was added to the client savings account.':closed?'Repayment approved and loan closed.':'Repayment approved.','success');
 }
 async function mpDeleteRepayment(id){
   confirmDialog('Delete this repayment entry? This cannot be undone.', async()=>{
@@ -3822,12 +3819,12 @@ function pageCollectionCompliance(){
       <button class="${tab==='members'?'active':''}" onclick="state._collectionTab='members';pageCollectionCompliance()">Client compliance</button>
       <button class="${tab==='exceptions'?'active':''}" onclick="state._collectionTab='exceptions';pageCollectionCompliance()">Exceptions (${issues.length})</button>
     </div>
-    ${tab==='overview'?`<div class="table-wrap"><table class="tbl" style="min-width:1050px"><thead><tr><th>Group / Officer</th><th class="num">Members</th><th class="num">Products</th><th class="num">Total OLB</th><th class="num">Savings</th><th class="num">Expected</th><th class="num">Collected</th><th class="num">Shortfall</th><th class="num">Arrears clients</th><th></th></tr></thead><tbody>
-      ${report.groupRows.map(r=>`<tr><td><b>${r.group.name}</b><div class="muted" style="font-size:11px">${r.officer?.full_name||'No officer assigned'}</div></td><td class="num">${r.members}</td><td class="num">${r.products}</td><td class="num"><b>${KES(r.olb)}</b></td><td class="num">${KES(r.savings)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num" style="color:${Math.max(0,r.expected-r.collected)>0?'var(--danger)':'var(--success)'}">${KES(Math.max(0,r.expected-r.collected))}</td><td class="num">${r.arrearsClients}</td><td><button class="btn btn-sm btn-outline" onclick="state._collectionGroup='${r.group.id}';state._collectionOfficer='';state._collectionTab='members';pageCollectionCompliance()">View clients</button></td></tr>`).join('')||`<tr><td colspan="10"><div class="empty"><h4>No groups found</h4><p>Adjust the group or officer filter.</p></div></td></tr>`}
+    ${tab==='overview'?`<div class="table-wrap"><table class="tbl" style="min-width:1080px"><thead><tr><th>Group / Officer</th><th class="num">Members</th><th class="num">Products</th><th class="num">Total OLB</th><th class="num">Client deposits / savings</th><th class="num">Expected</th><th class="num">Collected</th><th class="num">Shortfall</th><th class="num">Arrears clients</th><th></th></tr></thead><tbody>
+      ${report.groupRows.map(r=>`<tr><td><b>${r.group.name}</b><div class="muted" style="font-size:11px">${r.officer?.full_name||'No officer assigned'}</div></td><td class="num">${r.members}</td><td class="num">${r.products}</td><td class="num"><b>${KES(r.olb)}</b></td><td class="num"><b>${KES(r.savings)}</b></td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num" style="color:${Math.max(0,r.expected-r.collected)>0?'var(--danger)':'var(--success)'}">${KES(Math.max(0,r.expected-r.collected))}</td><td class="num">${r.arrearsClients}</td><td><button class="btn btn-sm btn-outline" onclick="state._collectionGroup='${r.group.id}';state._collectionOfficer='';state._collectionTab='members';pageCollectionCompliance()">View clients</button></td></tr>`).join('')||`<tr><td colspan="10"><div class="empty"><h4>No groups found</h4><p>Adjust the group or officer filter.</p></div></td></tr>`}
       </tbody></table></div>`:''}
     ${tab==='members'?`<div class="toolbar"><div class="search-box grow"><span class="ic">${searchIcon()}</span><input id="collection-client-search" placeholder="Search client, phone, ID, group or product" value="${state._collectionSearch}" oninput="handleCollectionClientSearch(this)"></div></div>
-      <div class="table-wrap"><table class="tbl" style="min-width:1150px"><thead><tr><th>Client / Group</th><th>Products in repayment</th><th class="num">Total OLB</th><th class="num">Weekly expected</th><th class="num">Collected</th><th class="num">Savings</th><th class="num">Arrears</th><th>Funding check</th></tr></thead><tbody>
-      ${visibleMembers.slice(0,500).map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num">${KES(r.savings)}</td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="8"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
+      <div class="table-wrap"><table class="tbl" style="min-width:1180px"><thead><tr><th>Client / Group</th><th>Products in repayment</th><th class="num">Total OLB</th><th class="num">Weekly expected</th><th class="num">Collected</th><th class="num">Client deposits / savings</th><th class="num">Arrears</th><th>Funding check</th></tr></thead><tbody>
+      ${visibleMembers.slice(0,500).map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num"><b>${KES(r.savings)}</b></td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="8"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
       </tbody></table></div>${visibleMembers.length>500?`<div class="helper" style="margin-top:8px">Showing the first 500 clients. Export Excel for all ${visibleMembers.length} records.</div>`:''}`:''}
     ${tab==='exceptions'?`<div class="card">${issues.length?issues.map(i=>`<div class="compliance-issue"><span class="issue-mark"></span><div><b>${i.type}</b><div class="muted" style="font-size:12px;margin-top:2px">${i.detail}</div><div style="font-size:11px;margin-top:3px">Group: ${i.group}</div></div></div>`).join(''):`<div class="empty"><h4>No upload exceptions detected</h4><p>No high-confidence order, loan, client or group mismatch was found for this week.</p></div>`}</div>`:''}
   `;
@@ -3836,8 +3833,8 @@ function exportCollectionCompliance(){
   const report=buildCollectionCompliance();
   const issues=collectionExceptions(report);
   const wb=XLSX.utils.book_new();
-  const summary=report.groupRows.map(r=>({WeekStart:report.start,WeekEnd:report.end,Group:r.group.name,Officer:r.officer?.full_name||'',Members:r.members,Products:r.products,OLB:r.olb,Savings:r.savings,Expected:r.expected,Collected:r.collected,Shortfall:Math.max(0,r.expected-r.collected),Arrears:r.arrears,ClientsInArrears:r.arrearsClients}));
-  const clients=report.memberRows.map(r=>({WeekStart:report.start,Group:r.group.name,Client:r.member.full_name,Phone:r.member.phone||'',ID:r.member.national_id||'',Products:r.products,ProductNames:r.loans.map(l=>l.asset_name).join(', '),OLB:r.olb,Expected:r.expected,Collected:r.collected,Savings:r.savings,Arrears:r.arrears,FundingStatus:r.arrears>0?'Review arrears before funding':'Compliant'}));
+  const summary=report.groupRows.map(r=>({WeekStart:report.start,WeekEnd:report.end,Group:r.group.name,Officer:r.officer?.full_name||'',Members:r.members,Products:r.products,OLB:r.olb,ClientDepositsSavings:r.savings,Expected:r.expected,Collected:r.collected,Shortfall:Math.max(0,r.expected-r.collected),Arrears:r.arrears,ClientsInArrears:r.arrearsClients}));
+  const clients=report.memberRows.map(r=>({WeekStart:report.start,Group:r.group.name,Client:r.member.full_name,Phone:r.member.phone||'',ID:r.member.national_id||'',Products:r.products,ProductNames:r.loans.map(l=>l.asset_name).join(', '),OLB:r.olb,Expected:r.expected,Collected:r.collected,ClientDepositsSavings:r.savings,Arrears:r.arrears,FundingStatus:r.arrears>0?'Review arrears before funding':'Compliant'}));
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Group Summary');
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(clients),'Client Compliance');
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(issues),'Exceptions');
@@ -3953,7 +3950,7 @@ function downloadCollectionFieldSheetPdf(){
       doc.autoTable({
         startY:50,
         margin:{left:7,right:7,bottom:18},
-        head:[['#','Client name','Total savings','Loan product','Loan amount P + I','OLB','Start date','Paid inst.','Unpaid inst.','End date','Last paid','Overdue','Days']],
+        head:[['#','Client name','Client deposits / savings','Loan product','Loan amount P + I','OLB','Start date','Paid inst.','Unpaid inst.','End date','Last paid','Overdue','Days']],
         body,
         theme:'grid',
         showHead:'everyPage',
@@ -3961,7 +3958,7 @@ function downloadCollectionFieldSheetPdf(){
         headStyles:{fillColor:orange,textColor:[255,255,255],fontStyle:'bold',fontSize:5.8,halign:'center'},
         alternateRowStyles:{fillColor:[255,251,247]},
         columnStyles:{
-          0:{cellWidth:7,halign:'center'},1:{cellWidth:31},2:{cellWidth:22,halign:'right'},3:{cellWidth:39},
+          0:{cellWidth:7,halign:'center'},1:{cellWidth:31},2:{cellWidth:25,halign:'right'},3:{cellWidth:39},
           4:{cellWidth:24,halign:'right'},5:{cellWidth:21,halign:'right'},6:{cellWidth:18},7:{cellWidth:14,halign:'center'},
           8:{cellWidth:15,halign:'center'},9:{cellWidth:18},10:{cellWidth:18},11:{cellWidth:20,halign:'right'},12:{cellWidth:10,halign:'center'}
         },
@@ -4079,7 +4076,7 @@ function renderMeetList(){
             const out        = Math.max(0, Number(ln.total_payable) - paid);
             const weekly     = Number(ln.weekly_installment) || 0;
             const currentAmt = ent.repayments[ln.id] !== undefined ? ent.repayments[ln.id] : weekly;
-            const isExcess   = Number(currentAmt) > weekly && weekly > 0;
+            const isExcess   = Number(currentAmt) > out && out >= 0;
             return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${isExcess?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
               <div class="row">
                 <div>
@@ -4090,7 +4087,7 @@ function renderMeetList(){
                     style="border-color:${isExcess?'var(--warning)':'var(--border)'}" />
                   <div style="font-size:11px;margin-top:3px;color:${isExcess?'var(--warning)':'var(--text-muted)'}">
                     Weekly installment: <b>${KES(weekly)}</b>
-                    ${isExcess ? ` · ⚡ Excess payment — ${KES(Number(currentAmt)-weekly)} above weekly amount. This will reduce future weeks owed.` : ''}
+                    ${isExcess ? ` · ${KES(Number(currentAmt)-out)} is above the remaining loan balance and will be added to the client savings account.` : ''}
                   </div>
                 </div>
                 <div>
@@ -6251,8 +6248,7 @@ async function editPerms(id){
     ['can_approve_orders','Approve / reject orders'],
     ['can_view_reports','View financial reports'],
     ['can_manage_inventory','Manage inventory'],
-    ['can_manage_suppliers','Manage suppliers and purchases'],
-    ['can_manage_excess_payments','View and resolve excess payments']
+    ['can_manage_suppliers','Manage suppliers and purchases']
   ];
   modal({
     title:`Permissions — ${s.full_name}`,
@@ -8987,7 +8983,7 @@ async function approveOneRepayment(id, btn){
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
   const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-  toast(split?'Repayment approved; the excess was safely separated.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
+  toast(split?'Repayment approved; the amount above the cleared loan was added to the client savings account.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
 
 async function rejectOneRepayment(id, btn){
@@ -9071,15 +9067,13 @@ async function loadWamamaLoanStatement(loanId){
   });
   const member=state.data.members.find(m=>m.id===loan.member_id)||null;
   const group=state.data.groups.find(g=>g.id===loan.group_id)||null;
-  const excessRows=(state.data.excessPayments||[]).filter(x=>String(x.loan_id)===String(loanId));
-  const excessTotal=excessRows.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
-  return {loan,member,group,rows,totalPayable,totalPaid:runningPaid,balance:Math.max(0,Number((totalPayable-runningPaid).toFixed(2))),excessRows,excessTotal};
+  return {loan,member,group,rows,totalPayable,totalPaid:runningPaid,balance:Math.max(0,Number((totalPayable-runningPaid).toFixed(2)))};
 }
 
 async function openWamamaRepaymentStatement(loanId){
   try{
     const statement=await loadWamamaLoanStatement(loanId);
-    const {loan,member,group,rows,totalPayable,totalPaid,balance,excessTotal}=statement;
+    const {loan,member,group,rows,totalPayable,totalPaid,balance}=statement;
     const bodyRows=rows.map(row=>`
       <tr>
         <td>${fmtDate(row.meeting_date||row.created_at)}</td>
@@ -9103,7 +9097,6 @@ async function openWamamaRepaymentStatement(loanId){
             <div><span class="muted">Total repaid</span><br><b style="color:var(--success)">${KES(totalPaid)}</b></div>
             <div><span class="muted">Current balance</span><br><b style="color:${balance<=0?'var(--success)':'var(--danger)'}">${balance<=0?'Cleared':KES(balance)}</b></div>
             <div><span class="muted">Start date</span><br><b>${fmtDate(loan.start_date)}</b></div>
-            ${excessTotal>0?`<div><span class="muted">Excess payment held</span><br><b style="color:var(--warning)">${KES(excessTotal)}</b></div>`:''}
           </div>
         </div>
         <div class="table-wrap">
@@ -9124,7 +9117,7 @@ async function openWamamaRepaymentStatement(loanId){
 
 async function downloadWamamaRepaymentStatementPdf(loanId){
   try{
-    const {loan,member,group,rows,totalPayable,totalPaid,balance,excessTotal}=await loadWamamaLoanStatement(loanId);
+    const {loan,member,group,rows,totalPayable,totalPaid,balance}=await loadWamamaLoanStatement(loanId);
     const {jsPDF}=window.jspdf;
     const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
     const orange=[230,92,0];
@@ -9160,12 +9153,6 @@ async function downloadWamamaRepaymentStatementPdf(loanId){
     doc.setFont('helvetica','bold');
     doc.setTextColor(...(balance<=0?green:red));
     doc.text(balance<=0?'PAID IN FULL':'BALANCE OUTSTANDING',108,69);
-    if(excessTotal>0){
-      doc.setTextColor(...orange);
-      doc.setFont('helvetica','bold');
-      doc.text(`Excess held separately: ${KES(excessTotal)}`,19,74);
-    }
-
     doc.autoTable({
       startY:84,
       head:[['Date','Description','Total Loan','Repayment','Balance After']],
@@ -9522,7 +9509,7 @@ function repRowActions(ev, id){
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
       const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-      toast(split?'Repayment approved; the excess was safely separated.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
+      toast(split?'Repayment approved; the amount above the cleared loan was added to the client savings account.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
   if(canEdit){
