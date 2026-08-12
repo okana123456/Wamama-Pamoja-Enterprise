@@ -1,9 +1,11 @@
 -- Wamama Pamoja Enterprise
 -- APPLY: restore historical loan deposits / prepayments that were previously moved into savings.
 --
+-- Run the preview file first.
+--
 -- What this does:
 -- 1. Finds pb_excess_payments currently marked transferred_to_savings.
--- 2. Finds only the matching auto-created savings rows with loan-overpayment notes.
+-- 2. Finds only the exact matching auto-created savings rows using the transfer note.
 -- 3. Marks those savings rows rejected so they no longer count as normal savings.
 -- 4. Marks the corresponding pb_excess_payments rows as pending loan deposits / prepayments.
 --
@@ -12,19 +14,17 @@
 begin;
 
 with matched as (
-  select
+  select distinct
     ep.id as loan_deposit_id,
     s.id as savings_id
   from public.pb_excess_payments ep
   join public.pb_savings s
     on s.member_id::text = ep.member_id::text
    and s.business_id::text = ep.business_id::text
-   and s.amount = ep.excess_amount
    and lower(coalesce(s.status, 'approved')) = 'approved'
    and (
      s.notes = 'Loan overpayment transferred to savings; repayment ' || ep.original_repayment_id::text
      or s.notes = 'Historical loan overpayment transferred to savings; excess record ' || ep.id::text
-     or s.notes ilike '%loan overpayment transferred to savings%'
    )
   where ep.status = 'transferred_to_savings'
 ),
