@@ -9348,7 +9348,7 @@ let _excessSearch='';
 function excessStatusLabel(status){
   return ({
     pending:'Pending decision',
-    transferred_to_savings:'Moved to savings',
+    transferred_to_savings:'Held as loan deposit',
     refunded:'Refunded',
     applied_to_loan:'Applied to another loan'
   })[status]||status;
@@ -9411,7 +9411,7 @@ function pageExcessPayments(){
         <select onchange="_excessStatusFilter=this.value;pageExcessPayments()">
           <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Awaiting decision</option>
           <option value="all" ${_excessStatusFilter==='all'?'selected':''}>All records</option>
-          <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Moved to savings</option>
+          <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Historical moved-to-savings records</option>
           <option value="refunded" ${_excessStatusFilter==='refunded'?'selected':''}>Refunded</option>
           <option value="applied_to_loan" ${_excessStatusFilter==='applied_to_loan'?'selected':''}>Applied to another loan</option>
         </select>
@@ -9451,30 +9451,10 @@ function excessPaymentActions(ev,id){
   const row=(state.data.excessPayments||[]).find(x=>x.id===id);
   if(!row || row.status!=='pending') return;
   showActMenu(ev,[
-    {label:'Transfer to member savings',onClick:()=>openExcessToSavings(id)},
-    {label:'Apply to another active loan',onClick:()=>openExcessToLoan(id)},
+    {label:'Apply prepayment to another active loan',onClick:()=>openExcessToLoan(id)},
     'sep',
-    {label:'Mark as refunded',onClick:()=>openExcessRefund(id)}
+    {label:'Mark loan deposit as refunded',onClick:()=>openExcessRefund(id)}
   ]);
-}
-
-function openExcessToSavings(id){
-  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
-  const member=state.data.members.find(m=>String(m.id)===String(row?.member_id));
-  if(!row) return;
-  modal({
-    title:'Transfer excess to savings',
-    body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Amount to savings: ${KES(row.excess_amount)}</span></div>
-      <div class="field"><label>Internal note (optional)</label><textarea id="excess-savings-note" rows="3" placeholder="Reason or instruction"></textarea></div>`,
-    actions:[{label:'Cancel',cls:'btn-outline',onClick:closeModal},{label:'Confirm transfer',cls:'btn-primary',onClick:async()=>{
-      if(!(await ensureFreshToken())) return;
-      const note=$('excess-savings-note')?.value?.trim()||null;
-      const {error}=await sb.rpc('pb_resolve_excess_to_savings',{p_excess_id:id,p_note:note});
-      if(error) return toast(error.message,'error');
-      audit('excess_to_savings','pb_excess_payments',id,null,{amount:row.excess_amount,member_id:row.member_id});
-      closeModal(); await refreshExcessRelatedData(); render(); toast(`${KES(row.excess_amount)} transferred to member savings.`,'success');
-    }}]
-  });
 }
 
 function openExcessRefund(id){
@@ -9482,7 +9462,7 @@ function openExcessRefund(id){
   const member=state.data.members.find(m=>String(m.id)===String(row?.member_id));
   if(!row) return;
   modal({
-    title:'Record excess payment refund',
+    title:'Record loan deposit refund',
     body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Refund amount: ${KES(row.excess_amount)}</span></div>
       <div class="field"><label>Refund reference *</label><input id="excess-refund-reference" placeholder="Receipt, transaction or voucher number" /></div>
       <div class="field"><label>Note (optional)</label><textarea id="excess-refund-note" rows="3" placeholder="How the refund was made"></textarea></div>`,
@@ -9508,7 +9488,7 @@ function openExcessToLoan(id){
     return Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id))+0.001>=Number(row.excess_amount||0);
   });
   modal({
-    title:'Apply excess to another loan',
+    title:'Apply prepayment to another loan',
     body:`<div class="card card-pad" style="background:var(--surface-2);margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Amount available: ${KES(row.excess_amount)}</span></div>
       ${eligible.length?`<div class="field"><label>Eligible active loan *</label><select id="excess-target-loan"><option value="">Select loan</option>${eligible.map(loan=>`<option value="${loan.id}">${statementHtml(loan.asset_name||'Loan')} - Balance ${KES(Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id)))}</option>`).join('')}</select></div>
       <div class="field"><label>Internal note (optional)</label><textarea id="excess-loan-note" rows="3" placeholder="Allocation instruction"></textarea></div>`:

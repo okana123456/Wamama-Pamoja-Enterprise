@@ -269,6 +269,6 @@ commit;
 select
   'Wamama loan deposit / prepayment setup ready' as result,
   count(*) filter (where status = 'pending') as open_prepayment_rows,
-  count(*) filter (where status = 'transferred_to_savings') as already_moved_to_savings_rows,
+  count(*) filter (where status = 'transferred_to_savings') as historical_rows_that_need_restoring,
   false as historical_savings_changed
 from public.pb_excess_payments;
