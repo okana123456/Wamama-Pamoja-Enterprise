@@ -970,6 +970,14 @@ async function smartLoadAll(){
       if(!refreshErr && refreshed.session) state.session = refreshed.session;
     }
   }
+  // Release only the instalments that have become due from advance loan payments.
+  // The database function is idempotent, so refreshing cannot duplicate a release.
+  if(navigator.onLine && state.staff?.business_id){
+    const { error:prepaymentReleaseError } = await sb.rpc('pb_release_due_prepayments');
+    if(prepaymentReleaseError && !/could not find the function|does not exist/i.test(prepaymentReleaseError.message||'')){
+      console.warn('Could not release due loan prepayments',prepaymentReleaseError);
+    }
+  }
   state.loading = true; render();
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
@@ -3316,7 +3324,7 @@ async function mpApproveRepayment(id){
   const closed=await closeFullyPaidLoans([r.loan_id],{silent:true});
   render();
   const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-  toast(split?'Repayment approved; the amount above the cleared loan was held as a loan deposit / prepayment.':closed?'Repayment approved and loan closed.':'Repayment approved.','success');
+  toast(split?'Repayment approved; the advance portion was held for future scheduled instalments.':closed?'Repayment approved and loan closed.':'Repayment approved.','success');
 }
 async function mpDeleteRepayment(id){
   confirmDialog('Delete this repayment entry? This cannot be undone.', async()=>{
@@ -3629,6 +3637,9 @@ function loanExpectedByDate(loan, cutoff){
   const elapsedWeeks = Math.max(0, Math.floor(daysBetweenDates(loan.start_date,cutoff)/7));
   return Math.min(Number(loan.total_payable||0), elapsedWeeks*Number(loan.weekly_installment||0));
 }
+function loanAmountDueAtDate(loan, cutoff){
+  return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff));
+}
 function loanArrearsAtDate(loan, cutoff){
   return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff)-5);
 }
@@ -3656,9 +3667,9 @@ function savingsByDate(memberId,cutoff){
 function loanDepositsByDate(memberId,cutoff){
   return (state.data.excessPayments||[])
     .filter(x=>String(x.member_id)===String(memberId))
-    .filter(x=>!['refunded','applied_to_loan','cancelled','rejected'].includes(String(x.status||'pending').toLowerCase()))
+    .filter(x=>!['refunded','cancelled','rejected','transferred_to_savings'].includes(String(x.status||'pending').toLowerCase()))
     .filter(x=>String(x.payment_date||x.created_at||'').slice(0,10)<=cutoff)
-    .reduce((sum,x)=>sum+Number(x.excess_amount||0),0);
+    .reduce((sum,x)=>sum+Math.max(0,Number(x.excess_amount||0)-Number(x.released_amount||0)),0);
 }
 function collectionAccessibleGroups(){
   return visiblePortfolioGroupsForCurrentStaff().filter(g=>g.status!=='inactive');
@@ -4100,18 +4111,21 @@ function renderMeetList(){
             const out        = Math.max(0, Number(ln.total_payable) - paid);
             const weekly     = Number(ln.weekly_installment) || 0;
             const currentAmt = ent.repayments[ln.id] !== undefined ? ent.repayments[ln.id] : weekly;
-            const isExcess   = Number(currentAmt) > out && out >= 0;
-            return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${isExcess?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
+            const dueNow     = Math.min(out,loanAmountDueAtDate(ln,m.date));
+            const heldAhead  = Math.max(0,Math.min(Number(currentAmt)||0,out)-dueNow);
+            const exceedsLoan= Number(currentAmt) > out + 0.01;
+            const isAdvance  = heldAhead > 0.005;
+            return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${exceedsLoan?'var(--danger-50)':isAdvance?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
               <div class="row">
                 <div>
                   <label style="color:var(--primary);font-weight:600">📋 Loan Repayment: ${ln.asset_name}</label>
                   <input type="number" min="0" data-id="${mem.id}" data-loanid="${ln.id}"
                     value="${currentAmt}" ${ent.absent?'disabled':''}
                     placeholder="${weekly}"
-                    style="border-color:${isExcess?'var(--warning)':'var(--border)'}" />
-                  <div style="font-size:11px;margin-top:3px;color:${isExcess?'var(--warning)':'var(--text-muted)'}">
-                    Weekly installment: <b>${KES(weekly)}</b>
-                    ${isExcess ? ` - ${KES(Number(currentAmt)-out)} is above the remaining loan balance and will be held as a loan deposit / prepayment.` : ''}
+                    style="border-color:${exceedsLoan?'var(--danger)':isAdvance?'var(--warning)':'var(--border)'}" />
+                  <div style="font-size:11px;margin-top:3px;color:${exceedsLoan?'var(--danger)':isAdvance?'var(--warning)':'var(--text-muted)'}">
+                    Due by ${fmtDate(m.date)}: <b>${KES(dueNow)}</b> &middot; Weekly installment: <b>${KES(weekly)}</b>
+                    ${exceedsLoan?` &middot; Payment cannot exceed the unpaid balance of ${KES(out)}.`:isAdvance ? ` &middot; ${KES(heldAhead)} will remain in the loan deposit account for future scheduled instalments.` : ''}
                   </div>
                 </div>
                 <div>
@@ -9019,7 +9033,7 @@ async function approveOneRepayment(id, btn){
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
   const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-  toast(split?'Repayment approved; the amount above the cleared loan was held as a loan deposit / prepayment.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
+  toast(split?'Repayment approved; the advance portion was held for future scheduled instalments.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
 
 async function rejectOneRepayment(id, btn){
@@ -9347,10 +9361,10 @@ let _excessSearch='';
 
 function excessStatusLabel(status){
   return ({
-    pending:'Pending decision',
+    pending:'Available for future instalments',
     transferred_to_savings:'Held as loan deposit',
     refunded:'Refunded',
-    applied_to_loan:'Applied to another loan'
+    applied_to_loan:'Fully released to loan'
   })[status]||status;
 }
 
@@ -9391,17 +9405,17 @@ function pageExcessPayments(){
       .filter(Boolean).join(' ').toLowerCase();
     return !search || haystack.includes(search);
   });
-  const pendingTotal=pending.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
+  const pendingTotal=pending.reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0);
   const resolved=all.filter(x=>x.status!=='pending');
   const resolvedTotal=resolved.reduce((sum,row)=>sum+Number(row.excess_amount||0),0);
 
   $('page').innerHTML=`
     <div class="page-head">
-      <div><h1>Loan Deposits / Prepayments</h1><div class="desc">Money received above a fully paid loan balance. It is kept separate from normal savings until an administrator resolves it.</div></div>
+      <div><h1>Loan Deposits / Prepayments</h1><div class="desc">Advance loan payments held separately and released as each scheduled instalment becomes due. Normal savings are not included.</div></div>
       <button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Refresh</button>
     </div>
     <div class="kpi-grid" style="margin-bottom:14px">
-      <div class="kpi"><div class="l">Awaiting decision</div><div class="v" style="color:var(--warning)">${KES(pendingTotal)}</div><div class="d">${pending.length} payment${pending.length===1?'':'s'}</div></div>
+      <div class="kpi"><div class="l">Available prepayment</div><div class="v" style="color:var(--warning)">${KES(pending.reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0))}</div><div class="d">${pending.length} deposit${pending.length===1?'':'s'}</div></div>
       <div class="kpi"><div class="l">Resolved</div><div class="v">${KES(resolvedTotal)}</div><div class="d">${resolved.length} payment${resolved.length===1?'':'s'}</div></div>
       <div class="kpi"><div class="l">Total protected</div><div class="v">${KES(pendingTotal+resolvedTotal)}</div><div class="d">No prepayment is discarded</div></div>
     </div>
@@ -9409,7 +9423,7 @@ function pageExcessPayments(){
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
         <input value="${statementHtml(_excessSearch)}" placeholder="Search member, phone, ID, group or reference" oninput="_excessSearch=this.value;pageExcessPayments()" />
         <select onchange="_excessStatusFilter=this.value;pageExcessPayments()">
-          <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Awaiting decision</option>
+          <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Available for future instalments</option>
           <option value="all" ${_excessStatusFilter==='all'?'selected':''}>All records</option>
           <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Historical moved-to-savings records</option>
           <option value="refunded" ${_excessStatusFilter==='refunded'?'selected':''}>Refunded</option>
@@ -9418,7 +9432,7 @@ function pageExcessPayments(){
       </div>
     </div>
     <div class="table-wrap"><table class="tbl">
-      <thead><tr><th>Date</th><th>Member</th><th>Original Loan</th><th class="num">Payment Received</th><th class="num">Applied to Loan</th><th class="num">Loan Deposit / Prepayment</th><th>Status</th><th>Resolution</th><th></th></tr></thead>
+      <thead><tr><th>Date</th><th>Member</th><th>Original Loan</th><th class="num">Payment Received</th><th class="num">Applied when received</th><th class="num">Deposit received</th><th class="num">Released</th><th class="num">Available</th><th>Status</th><th>Resolution</th><th></th></tr></thead>
       <tbody>${visible.length?visible.map(row=>{
         const member=state.data.members.find(m=>String(m.id)===String(row.member_id));
         const group=state.data.groups.find(g=>String(g.id)===String(row.group_id));
@@ -9431,11 +9445,13 @@ function pageExcessPayments(){
           <td class="num">${KES(row.original_payment_amount)}</td>
           <td class="num">${KES(row.amount_applied_to_loan)}</td>
           <td class="num"><b style="color:var(--warning)">${KES(row.excess_amount)}</b></td>
+          <td class="num">${KES(row.released_amount||0)}</td>
+          <td class="num"><b>${KES(Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)))}</b></td>
           <td>${excessStatusBadge(row.status)}</td>
           <td style="font-size:12px">${row.resolution_reference?`<b>${statementHtml(row.resolution_reference)}</b><br>`:''}${resolver?`<span class="muted">By ${statementHtml(resolver.full_name)}</span>`:''}</td>
-          <td>${row.status==='pending'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
+          <td>${row.status==='pending'&&row.source!=='scheduled_prepayment'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
         </tr>`;
-      }).join(''):`<tr><td colspan="9"><div class="empty"><h4>No loan deposits or prepayments found</h4><p>${_excessStatusFilter==='pending'?'There are no unresolved prepayments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
+      }).join(''):`<tr><td colspan="11"><div class="empty"><h4>No loan deposits or prepayments found</h4><p>${_excessStatusFilter==='pending'?'There are no available prepayments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
     </table></div>`;
 }
 
@@ -9450,6 +9466,9 @@ async function refreshExcessPaymentsPage(){
 function excessPaymentActions(ev,id){
   const row=(state.data.excessPayments||[]).find(x=>x.id===id);
   if(!row || row.status!=='pending') return;
+  if(row.source==='scheduled_prepayment'){
+    return toast('This deposit is reserved for this loan and will be released automatically on each due date.','info');
+  }
   showActMenu(ev,[
     {label:'Apply prepayment to another active loan',onClick:()=>openExcessToLoan(id)},
     'sep',
@@ -9525,7 +9544,7 @@ function repRowActions(ev, id){
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
       const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-      toast(split?'Repayment approved; the amount above the cleared loan was held as a loan deposit / prepayment.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
+      toast(split?'Repayment approved; the advance portion was held for future scheduled instalments.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
   if(canEdit){
@@ -9721,11 +9740,11 @@ function openStandaloneRepayment(loanId, memberId){
       </div>
       <div class="field">
         <label>Repayment Amount (KES) *</label>
-        <input type="number" id="sr-amount" min="1" max="${outstanding||999999}" step="0.01" value="${ln.weekly_installment}" oninput="srCalcSplit(${ir})" />
+        <input type="number" id="sr-amount" min="1" max="${outstanding||999999}" step="0.01" value="${ln.weekly_installment}" oninput="srCalcSplit(${ir},'${ln.id}')" />
       </div>
       <div class="field">
         <label>Date</label>
-        <input type="date" id="sr-date" value="${todayISO()}" />
+        <input type="date" id="sr-date" value="${todayISO()}" onchange="srCalcSplit(${ir},'${ln.id}')" />
       </div>
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;margin-top:2px;font-size:13px">
         <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin-bottom:6px">Calculated split</div>
@@ -9733,6 +9752,7 @@ function openStandaloneRepayment(loanId, memberId){
           <div><div class="muted" style="font-size:11px">Principal</div><div id="sr-principal" style="font-weight:700">${KES(+(Number(ln.weekly_installment)*(1-ir)).toFixed(2))}</div></div>
           <div><div class="muted" style="font-size:11px">Interest</div><div id="sr-interest" style="font-weight:700;color:var(--warning)">${KES(+(Number(ln.weekly_installment)*ir).toFixed(2))}</div></div>
         </div>
+        <div id="sr-prepayment-preview" class="muted" style="font-size:11px;margin-top:8px"></div>
       </div>
     `,
     actions: [
@@ -9777,12 +9797,20 @@ function openStandaloneRepayment(loanId, memberId){
   });
 }
 
-function srCalcSplit(ir){
+function srCalcSplit(ir,loanId){
   const amount = Number(document.getElementById('sr-amount')?.value) || 0;
   const interest = +(amount * ir).toFixed(2);
   const principal = +(amount - interest).toFixed(2);
   const pi = document.getElementById('sr-principal'); if(pi) pi.textContent = KES(principal);
   const ii = document.getElementById('sr-interest'); if(ii) ii.textContent = KES(interest);
+  const loan=state.data.loans.find(item=>String(item.id)===String(loanId));
+  const date=document.getElementById('sr-date')?.value||todayISO();
+  const dueNow=loan?Math.min(Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id)),loanAmountDueAtDate(loan,date)):0;
+  const heldAhead=Math.max(0,amount-dueNow);
+  const preview=document.getElementById('sr-prepayment-preview');
+  if(preview) preview.innerHTML=heldAhead>0.005
+    ? `<b style="color:var(--warning)">${KES(Math.min(heldAhead,Math.max(0,Number(loan?.total_payable||0)-loanPaid(loan?.id))))}</b> will remain in the loan deposit account and be released on future due dates.`
+    : `The payment is within the amount due by ${fmtDate(date)}.`;
 }
 
 /* =====================================================================
