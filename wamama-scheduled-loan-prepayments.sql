@@ -8,6 +8,7 @@
 -- 3. The available prepayment is released automatically as future weekly instalments fall due.
 -- 4. Ordinary member savings are never changed by this setup.
 -- 5. Existing historical prepayment rows are not automatically released or rewritten.
+-- 6. pb_loans.start_date is the FIRST repayment due date, not the disbursement date.
 
 begin;
 
@@ -101,12 +102,14 @@ begin
     and r.id::text <> new.id::text
     and lower(coalesce(r.status, 'approved')) not in ('pending','rejected','cancelled');
 
+  -- start_date is already the first repayment due date. On that date one
+  -- instalment is due; every seven days after it adds another instalment.
   expected_by_payment_day := case
-    when loan_row.start_date is null or payment_day < loan_row.start_date + 7 then 0
+    when loan_row.start_date is null or payment_day < loan_row.start_date then 0
     when coalesce(loan_row.weekly_installment, 0) <= 0 then loan_row.total_payable
     else least(
       loan_row.total_payable,
-      floor((payment_day - loan_row.start_date)::numeric / 7)
+      (floor((payment_day - loan_row.start_date)::numeric / 7) + 1)
         * loan_row.weekly_installment
     )
   end;
@@ -173,6 +176,9 @@ begin
   end;
 
   if applied <= 0 then
+    -- The source row remains excluded from loan totals while the full amount is
+    -- safely represented by pb_excess_payments. The application labels this as
+    -- "Moved to loan deposit", not as a failed collection.
     new.status := 'rejected';
     new.edit_notes := concat_ws(' | ', nullif(new.edit_notes, ''),
       'Full amount held in loan prepayment account until scheduled instalments become due.');
@@ -249,7 +255,7 @@ begin
       select gs::date as due_date,
              row_number() over (order by gs)::numeric as instalment_number
       from generate_series(
-        loan_row.start_date + 7,
+        loan_row.start_date,
         least(v_today, coalesce(loan_row.expected_end_date, v_today)),
         interval '7 days'
       ) gs
@@ -408,7 +414,7 @@ $$;
 commit;
 
 select
-  'Wamama scheduled loan prepayments are ready' as result,
+  'Wamama approved-payment allocation and scheduled loan prepayments are ready' as result,
   count(*) filter (where source = 'scheduled_prepayment' and status = 'pending') as new_scheduled_prepayments,
   count(*) filter (where source <> 'scheduled_prepayment' or source is null) as historical_rows_unchanged,
   false as ordinary_savings_changed

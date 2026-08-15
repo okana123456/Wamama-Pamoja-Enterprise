@@ -2065,8 +2065,8 @@ function pageDashboard(){
     return cd >= start && cd <= end;
   };
 
-  const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && s.status !== 'pending');
-  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending' && isClientRepayment(r));
+  const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s));
+  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && countsInBalance(r) && isClientRepayment(r));
   const totalSavings = savings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRepay = repayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
@@ -2079,8 +2079,8 @@ function pageDashboard(){
   const officers = state.data.staff.filter(s => ( s.role==='officer' || s.role==='loan_officer') && s.status==='active');
   const todayISO_ = todayISO();
   const officerPerf = officers.map(o => {
-    const oSav = state.data.savings.filter(s=>s.recorded_by===o.id && inRangeFallback(s.meeting_date||'', s.created_at) && s.status !== 'pending').reduce((a,b)=>a+Number(b.amount||0),0);
-    const oRep = state.data.repayments.filter(r=>r.recorded_by===o.id && inRangeFallback(r.meeting_date||'', r.created_at) && r.status !== 'pending' && isClientRepayment(r)).reduce((a,b)=>a+Number(b.amount||0),0);
+    const oSav = state.data.savings.filter(s=>s.recorded_by===o.id && inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s)).reduce((a,b)=>a+Number(b.amount||0),0);
+    const oRep = state.data.repayments.filter(r=>r.recorded_by===o.id && inRangeFallback(r.meeting_date||'', r.created_at) && countsInBalance(r) && isClientRepayment(r)).reduce((a,b)=>a+Number(b.amount||0),0);
     const oLoans = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active').reduce((a,b)=>a+Number(b.loan_value||0),0);
     const oOrdersToday = state.data.orders.filter(o2=>o2.recorded_by===o.id && (o2.ordered_on||'').slice(0,10)===todayISO_).length;
     const oLoanValuePeriod = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active' && inRangeFallback(l.start_date, l.created_at)).reduce((a,b)=>a+Number(b.loan_value||0),0);
@@ -2363,8 +2363,8 @@ function pageOfficerDashboard(){
     if(createdAt){ const cd = kenyaDateISO(createdAt); if(cd >= start && cd <= end) return true; }
     return false;
   };
-  const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && s.status !== 'pending');
-  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && r.status !== 'pending' && isClientRepayment(r));
+  const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
+  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsInBalance(r) && isClientRepayment(r));
   const myGroupIds = new Set(myGroups.map(g=>g.id));
   const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
@@ -3634,8 +3634,10 @@ function repaymentPaidByDate(loanId, cutoff){
 }
 function loanExpectedByDate(loan, cutoff){
   if(!loan?.start_date || loan.start_date>cutoff) return 0;
-  const elapsedWeeks = Math.max(0, Math.floor(daysBetweenDates(loan.start_date,cutoff)/7));
-  return Math.min(Number(loan.total_payable||0), elapsedWeeks*Number(loan.weekly_installment||0));
+  // start_date is the first repayment due date. One instalment is therefore
+  // due on that date, followed by one more every seven days.
+  const dueInstallments = Math.max(1, Math.floor(daysBetweenDates(loan.start_date,cutoff)/7)+1);
+  return Math.min(Number(loan.total_payable||0), dueInstallments*Number(loan.weekly_installment||0));
 }
 function loanAmountDueAtDate(loan, cutoff){
   return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff));
@@ -8998,7 +9000,12 @@ function pageRepaymentApprovals(){
                 <td><b>${mem?.full_name||'—'}</b></td>
                 <td style="font-size:12px;color:var(--text-muted)">${loan?.asset_name||'—'}</td>
                 <td>${fmtDate(r.meeting_date)}</td>
-                <td class="num"><b>${KES(r.amount)}</b></td>
+                ${(()=>{
+                  const allocation=repaymentApprovalAllocation(r);
+                  return `<td class="num"><b>${KES(r.amount)}</b>${allocation.deposit>0.005
+                    ?`<div style="font-size:10px;margin-top:3px;color:var(--warning)">Due now ${KES(allocation.applied)}<br>To loan deposit ${KES(allocation.deposit)}</div>`
+                    :'<div class="muted" style="font-size:10px;margin-top:3px">Applied to loan when approved</div>'}</td>`;
+                })()}
                 <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
                 <td>
                   <button class="btn btn-sm btn-primary" onclick="approveOneRepayment('${r.id}',this)">✓</button>
@@ -9021,19 +9028,58 @@ function pageRepaymentApprovals(){
   `;
 }
 
+function repaymentApprovalAllocation(repayment){
+  const loan=state.data.loans.find(l=>String(l.id)===String(repayment?.loan_id));
+  const gross=Math.max(0,Number(repayment?.amount||0));
+  if(!loan) return {gross,applied:gross,deposit:0};
+  const date=String(repayment.meeting_date||todayISO()).slice(0,10);
+  const remaining=Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id));
+  const due=Math.min(remaining,loanAmountDueAtDate(loan,date));
+  const applied=Math.max(0,Math.min(gross,due,remaining));
+  return {gross,applied,deposit:Math.max(0,Math.min(gross,remaining)-applied)};
+}
+
+function repaymentDepositRecord(repaymentId){
+  return (state.data.excessPayments||[]).find(row=>
+    String(row.original_repayment_id)===String(repaymentId)
+    && row.source==='scheduled_prepayment'
+  )||null;
+}
+
+function isHeldPrepaymentSource(repayment){
+  const deposit=repaymentDepositRecord(repayment?.id);
+  return !!deposit && Number(deposit.amount_applied_to_loan||0)<=0.005;
+}
+
+async function approveRepaymentBatch(ids){
+  const approvedRows=[];
+  const failures=[];
+  for(const id of [...new Set((ids||[]).filter(Boolean))]){
+    const {data,error}=await sb.from('pb_repayments')
+      .update({status:'approved'}).eq('id',id).eq('status','pending').select();
+    if(error){ failures.push({id,message:error.message}); continue; }
+    if(data?.[0]) approvedRows.push(data[0]);
+  }
+  const {error:releaseError}=await sb.rpc('pb_release_due_prepayments');
+  if(releaseError&&!/could not find the function|does not exist/i.test(releaseError.message||'')){
+    console.warn('Could not release due loan deposits after approval',releaseError);
+  }
+  return {approvedRows,failures};
+}
+
 async function approveOneRepayment(id, btn){
   const r = state.data.repayments.find(x=>x.id===id);
   if(!r || r.status==='approved') return;
   if(btn){ btn.disabled=true; btn.textContent='…'; }
   if(!(await ensureFreshToken())) return;
-  const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).eq('id', id).select();
-  if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
+  const {approvedRows,failures}=await approveRepaymentBatch([id]);
+  if(failures.length){ toast(failures[0].message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
   if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
   await refreshExcessRelatedData();
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
-  const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-  toast(split?'Repayment approved; the advance portion was held for future scheduled instalments.':closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
+  const deposit=repaymentDepositRecord(id);
+  toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
 
 async function rejectOneRepayment(id, btn){
@@ -9056,13 +9102,14 @@ async function approveGroupRepayments(groupName){
     .map(r=>r.id);
   if(!ids.length) return toast('No pending repayments for this group.','warn');
   const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
-  const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids).select();
-  if(error) return toast(error.message,'error');
+  const {approvedRows,failures}=await approveRepaymentBatch(ids);
   (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
   await refreshExcessRelatedData();
   const closed = await closeFullyPaidLoans(loanIds, { silent:true });
+  const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
   render();
-  toast(`${ids.length} repayment(s) for ${groupName} approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
+  const message=`${approvedRows.length} repayment(s) for ${groupName} approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
+  toast(failures.length?`${message} ${failures.length} could not be approved and remain pending.`:message,failures.length?'warn':'success');
 }
 
 async function approveAllRepayments(){
@@ -9072,13 +9119,14 @@ async function approveAllRepayments(){
       .filter(r=>r.status==='pending' && isClientRepayment(r))
       .map(r=>r.id);
     const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
-    const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status:'approved' }).in('id', ids).select();
-    if(error) return toast(error.message,'error');
+    const {approvedRows,failures}=await approveRepaymentBatch(ids);
     (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
     await refreshExcessRelatedData();
     const closed = await closeFullyPaidLoans(loanIds, { silent:true });
+    const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
     render();
-    toast(`${ids.length} repayment(s) approved${closed?` and ${closed} loan(s) closed`:''}.`,'success');
+    const message=`${approvedRows.length} repayment(s) approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
+    toast(failures.length?`${message} ${failures.length} remain pending for review.`:message,failures.length?'warn':'success');
   },{ title:'Approve All Repayments' });
 }
 
@@ -9283,9 +9331,10 @@ function pageRepayments(){
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
   ];
 
-  const totalAmt      = clientReps.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalPrincipal= clientReps.reduce((a,b)=>a+Number(b.principal||0),0);
-  const totalInterest = clientReps.reduce((a,b)=>a+Number(b.interest||0),0);
+  const countedClientReps=clientReps.filter(countsInBalance);
+  const totalAmt      = countedClientReps.reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalPrincipal= countedClientReps.reduce((a,b)=>a+Number(b.principal||0),0);
+  const totalInterest = countedClientReps.reduce((a,b)=>a+Number(b.interest||0),0);
 
   $('page').innerHTML = `
     <div class="page-head">
@@ -9334,16 +9383,18 @@ function pageRepayments(){
             const rec = state.data.staff.find(x=>x.id===r.recorded_by);
             const isPending = r.status === 'pending';
             const isFee = !isClientRepayment(r);
-            return `<tr${isPending ? ' style="background:var(--warning-50)"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
+            const heldDeposit=isHeldPrepaymentSource(r);
+            const deposit=heldDeposit?repaymentDepositRecord(r.id):null;
+            return `<tr${isPending ? ' style="background:var(--warning-50)"' : heldDeposit ? ' style="background:#fff8e1"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
               <td>${fmtDate(r.meeting_date)}</td>
               <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${isFee?`<span style="color:var(--warning);font-size:10px">${r.notes}</span>`:mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td style="font-size:12px">${ln?.asset_name||'—'}</td>
-              <td class="num"><b>${KES(r.amount)}</b>${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
+              <td class="num"><b>${KES(r.amount)}</b>${heldDeposit?`<div style="font-size:10px;color:var(--warning)">${KES(deposit?.excess_amount||r.amount)} held for future due dates</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
               </td>
               <td class="num">${KES(r.principal)}</td>
               <td class="num" style="color:var(--warning)">${KES(r.interest)}</td>
-              <td>${isPending ? '<span class="badge b-yellow">Pending Approval</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : '<span class="badge b-green">Approved</span>'}</td>
+              <td>${isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${String(r.status||'Excluded')}</span>`}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
               <td>${ln?`<button class="btn btn-outline btn-sm" onclick="openWamamaRepaymentStatement('${ln.id}')">Statement</button>`:'&mdash;'}</td>
@@ -9537,14 +9588,14 @@ function repRowActions(ev, id){
     items.push({ label: '✓ Approve', onClick: async () => {
       if(rep.status === 'approved'){ toast('Already approved.','warn'); return; }
       if(!(await ensureFreshToken())) return;
-      const { data:approvedRows, error } = await sb.from('pb_repayments').update({ status: 'approved' }).eq('id', id).select();
-      if(error) return toast(error.message, 'error');
+      const {approvedRows,failures}=await approveRepaymentBatch([id]);
+      if(failures.length) return toast(failures[0].message,'error');
       if(approvedRows?.[0]) Object.assign(rep,approvedRows[0]);
       await refreshExcessRelatedData();
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
-      const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
-      toast(split?'Repayment approved; the advance portion was held for future scheduled instalments.':closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
+      const deposit=repaymentDepositRecord(id);
+      toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
   if(canEdit){
