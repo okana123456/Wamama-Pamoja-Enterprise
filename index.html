@@ -9036,7 +9036,7 @@ function repaymentApprovalAllocation(repayment){
   const remaining=Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id));
   const due=Math.min(remaining,loanAmountDueAtDate(loan,date));
   const applied=Math.max(0,Math.min(gross,due,remaining));
-  return {gross,applied,deposit:Math.max(0,Math.min(gross,remaining)-applied)};
+  return {gross,applied,deposit:Math.max(0,gross-applied)};
 }
 
 function repaymentDepositRecord(repaymentId){
@@ -9109,7 +9109,11 @@ async function approveGroupRepayments(groupName){
   const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
   render();
   const message=`${approvedRows.length} repayment(s) for ${groupName} approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
-  toast(failures.length?`${message} ${failures.length} could not be approved and remain pending.`:message,failures.length?'warn':'success');
+  const firstFailure=failures[0];
+  const failedRepayment=firstFailure?state.data.repayments.find(r=>String(r.id)===String(firstFailure.id)):null;
+  const failedMember=failedRepayment?state.data.members.find(m=>String(m.id)===String(failedRepayment.member_id)):null;
+  const failureDetail=firstFailure?` ${failedMember?.full_name||'One entry'} remains pending: ${firstFailure.message}`:'';
+  toast(failures.length?`${message}${failureDetail}`:message,failures.length?'warn':'success');
 }
 
 async function approveAllRepayments(){
@@ -9126,7 +9130,11 @@ async function approveAllRepayments(){
     const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
     render();
     const message=`${approvedRows.length} repayment(s) approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
-    toast(failures.length?`${message} ${failures.length} remain pending for review.`:message,failures.length?'warn':'success');
+    const firstFailure=failures[0];
+    const failedRepayment=firstFailure?state.data.repayments.find(r=>String(r.id)===String(firstFailure.id)):null;
+    const failedMember=failedRepayment?state.data.members.find(m=>String(m.id)===String(failedRepayment.member_id)):null;
+    const failureDetail=firstFailure?` First pending entry: ${failedMember?.full_name||'Unknown member'} - ${firstFailure.message}`:'';
+    toast(failures.length?`${message} ${failures.length} remain pending.${failureDetail}`:message,failures.length?'warn':'success');
   },{ title:'Approve All Repayments' });
 }
 

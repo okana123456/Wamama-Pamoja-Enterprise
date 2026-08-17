@@ -4,7 +4,7 @@
 --
 -- Business rule:
 -- 1. A payment covers arrears and instalments due up to the payment date.
--- 2. Any amount paid ahead of that date remains in the loan prepayment account.
+-- 2. Any amount paid ahead of that date remains in the member loan-deposit account.
 -- 3. The available prepayment is released automatically as future weekly instalments fall due.
 -- 4. Ordinary member savings are never changed by this setup.
 -- 5. Existing historical prepayment rows are not automatically released or rewritten.
@@ -32,8 +32,16 @@ create table if not exists public.pb_prepayment_releases (
   amount numeric(14,2) not null check (amount > 0),
   repayment_id text,
   created_at timestamptz not null default now(),
-  unique (prepayment_id, due_date)
+  unique (prepayment_id, loan_id, due_date)
 );
+
+-- Older deployments allowed only one release per deposit and date. A member
+-- deposit can now continue to another loan after its source loan is completed.
+alter table public.pb_prepayment_releases
+  drop constraint if exists pb_prepayment_releases_prepayment_id_due_date_key;
+
+create unique index if not exists pb_prepayment_releases_deposit_loan_due_uidx
+  on public.pb_prepayment_releases (prepayment_id, loan_id, due_date);
 
 create index if not exists pb_prepayment_releases_business_loan_idx
   on public.pb_prepayment_releases (business_id, loan_id, due_date);
@@ -116,10 +124,9 @@ begin
 
   due_room := greatest(0, expected_by_payment_day - already_applied);
   remaining_total := greatest(0, loan_row.total_payable - already_applied);
-  if coalesce(new.amount, 0) > remaining_total + 0.01 then
-    raise exception 'Payment of KES % exceeds the unpaid loan balance of KES %. Record only the unpaid balance.',
-      round(new.amount, 2), round(remaining_total, 2);
-  end if;
+  -- Never reject a genuine collection merely because it is above the current
+  -- loan balance. The amount due now is applied; everything else remains in
+  -- the member loan-deposit account for a later due instalment or loan.
   applied := round(greatest(0, least(coalesce(new.amount, 0), due_room, remaining_total)), 2);
   advance_amount := round(greatest(0, coalesce(new.amount, 0) - applied), 2);
 
@@ -157,7 +164,7 @@ begin
     0,
     'pending',
     'scheduled_prepayment',
-    'Advance payment held and released only as future weekly instalments become due.'
+    'Advance payment held in the member loan-deposit account and released only when an instalment becomes due.'
   )
   on conflict (original_repayment_id) where original_repayment_id is not null do update
   set payment_date = excluded.payment_date,
@@ -235,11 +242,20 @@ begin
       and lower(coalesce(l.status::text, 'active')) = 'active'
       and exists (
         select 1 from public.pb_excess_payments ep
-        where ep.loan_id = l.id::text
-          and ep.business_id = v_business_id
+        where ep.business_id = v_business_id
+          and ep.member_id = l.member_id::text
           and ep.status = 'pending'
           and ep.source = 'scheduled_prepayment'
           and ep.excess_amount > coalesce(ep.released_amount, 0)
+          and (
+            ep.loan_id = l.id::text
+            or not exists (
+              select 1
+              from public.pb_loans source_loan
+              where source_loan.id::text = ep.loan_id
+                and lower(coalesce(source_loan.status::text, 'active')) = 'active'
+            )
+          )
       )
     for update
   loop
@@ -271,13 +287,23 @@ begin
       for deposit_row in
         select ep.*
         from public.pb_excess_payments ep
-        where ep.loan_id = loan_row.id::text
-          and ep.business_id = v_business_id
+        where ep.business_id = v_business_id
+          and ep.member_id = loan_row.member_id::text
           and ep.status = 'pending'
           and ep.source = 'scheduled_prepayment'
           and ep.payment_date < due_row.due_date
           and ep.excess_amount > coalesce(ep.released_amount, 0)
-        order by ep.payment_date, ep.created_at, ep.id
+          and (
+            ep.loan_id = loan_row.id::text
+            or not exists (
+              select 1
+              from public.pb_loans source_loan
+              where source_loan.id::text = ep.loan_id
+                and lower(coalesce(source_loan.status::text, 'active')) = 'active'
+            )
+          )
+        order by case when ep.loan_id = loan_row.id::text then 0 else 1 end,
+                 ep.payment_date, ep.created_at, ep.id
         for update
       loop
         exit when v_due <= 0;
@@ -340,14 +366,7 @@ begin
       end loop;
     end loop;
 
-    if v_paid + 0.01 >= loan_row.total_payable
-       and not exists (
-         select 1 from public.pb_excess_payments ep
-         where ep.loan_id = loan_row.id::text
-           and ep.status = 'pending'
-           and ep.source = 'scheduled_prepayment'
-           and ep.excess_amount > coalesce(ep.released_amount, 0)
-       ) then
+    if v_paid + 0.01 >= loan_row.total_payable then
       update public.pb_loans
       set status = 'completed'
       where id::text = loan_row.id::text
@@ -362,8 +381,8 @@ $$;
 grant execute on function public.pb_release_due_prepayments() to authenticated;
 revoke all on function public.pb_release_due_prepayments() from public, anon;
 
--- Fully paid loans with an unreleased scheduled prepayment remain active until
--- their scheduled instalments have been released. Other fully paid loans close normally.
+  -- The source loan remains active until its payable amount has been released.
+  -- Any genuine surplus remains available to the same member after that loan closes.
 create or replace function public.pb_reconcile_paid_loan(p_loan_id text)
 returns boolean
 language plpgsql
@@ -374,7 +393,6 @@ declare
   v_total_payable numeric := 0;
   v_total_paid numeric := 0;
   v_status text;
-  v_has_unreleased_prepayment boolean := false;
   v_closed boolean := false;
 begin
   if nullif(trim(p_loan_id), '') is null then return false; end if;
@@ -393,15 +411,7 @@ begin
   where r.loan_id::text = p_loan_id
     and lower(coalesce(r.status::text, 'approved')) not in ('pending','rejected','cancelled');
 
-  select exists (
-    select 1 from public.pb_excess_payments ep
-    where ep.loan_id = p_loan_id
-      and ep.status = 'pending'
-      and ep.source = 'scheduled_prepayment'
-      and ep.excess_amount > coalesce(ep.released_amount, 0)
-  ) into v_has_unreleased_prepayment;
-
-  if v_total_paid + 0.01 >= v_total_payable and not v_has_unreleased_prepayment then
+  if v_total_paid + 0.01 >= v_total_payable then
     update public.pb_loans
     set status = 'completed'
     where id::text = p_loan_id and lower(coalesce(status::text, '')) = 'active';
