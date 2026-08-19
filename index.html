@@ -335,10 +335,17 @@ const CACHEABLE_DATA_KEYS = new Set([
   'groups', 'members', 'staff', 'inventory', 'loans', 'orders',
   'meetings', 'suppliers', 'purchases', 'purchaseLines', 'settings'
 ]);
-const FINANCIAL_CACHE_TABLES = new Set(['pb_savings','pb_repayments']);
+const INCREMENTAL_CACHE_TABLES = new Set([
+  'pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory',
+  'pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments',
+  'pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines',
+  'pb_reconciliations','pb_expenses'
+]);
+const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
 const FINANCIAL_CACHE_VERSION = 1;
-const FINANCIAL_FULL_SYNC_MS = 7 * 24 * 60 * 60 * 1000;
-const FINANCIAL_RECENT_DAYS = 14;
+const INCREMENTAL_FULL_SYNC_MS = 14 * 24 * 60 * 60 * 1000;
+const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
+const INCREMENTAL_FALLBACK_DAYS = 3;
 
 function openFinancialCache(){
   return new Promise((resolve,reject)=>{
@@ -907,49 +914,68 @@ async function fetchBusinessTableRows(table){
   return { data: rows, error: null };
 }
 
-async function fetchRecentFinancialRows(table, cached){
-  const cutoff=new Date(Date.now()-FINANCIAL_RECENT_DAYS*24*60*60*1000).toISOString();
-  let recentQuery=sb.from(table).select('*').gte('created_at',cutoff).order('created_at',{ascending:false});
-  let pendingQuery=sb.from(table).select('*').eq('status','pending');
-  if(state.staff?.business_id){
-    recentQuery=recentQuery.eq('business_id',state.staff.business_id);
-    pendingQuery=pendingQuery.eq('business_id',state.staff.business_id);
-  }
-  const [recentResult,pendingResult]=await Promise.all([recentQuery,pendingQuery]);
-  if(recentResult.error) return {data:cached.rows||[],error:recentResult.error,fromCache:true};
-  if(pendingResult.error) return {data:cached.rows||[],error:pendingResult.error,fromCache:true};
-
-  const cachedRows=cached.rows||[];
-  const oldPendingIds=cachedRows
-    .filter(row=>row.status==='pending' && String(row.created_at||'')<cutoff)
-    .map(row=>row.id).filter(Boolean);
-  let resolvedOldPending=[];
-  for(let i=0;i<oldPendingIds.length;i+=100){
-    let query=sb.from(table).select('*').in('id',oldPendingIds.slice(i,i+100));
+async function fetchPagedBusinessRows(table, configureQuery){
+  const pageSize=1000;
+  const maxRows=50000;
+  const rows=[];
+  for(let from=0;from<maxRows;from+=pageSize){
+    let query=sb.from(table).select('*').range(from,from+pageSize-1);
     if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
-    const result=await query;
-    if(!result.error) resolvedOldPending.push(...(result.data||[]));
+    query=configureQuery(query);
+    const {data,error}=await query;
+    if(error) return {data:rows,error};
+    rows.push(...(data||[]));
+    if(!data || data.length<pageSize) break;
+  }
+  return {data:rows,error:null};
+}
+
+async function fetchIncrementalRows(table,cached){
+  const cachedRows=Array.isArray(cached?.rows)?cached.rows:[];
+  const lastSavedAt=Number(cached?.savedAt||0);
+  const cursor=new Date(Math.max(0,lastSavedAt-INCREMENTAL_SYNC_OVERLAP_MS)).toISOString();
+  let changedResult=await fetchPagedBusinessRows(
+    table,
+    query=>query.gte('updated_at',cursor).order('updated_at',{ascending:false})
+  );
+
+  // This fallback keeps older deployments usable until the incremental-sync SQL is run.
+  if(changedResult.error && /updated_at|column .* does not exist/i.test(changedResult.error.message||'')){
+    if(!PENDING_SYNC_TABLES.has(table)) return fetchBusinessTableRows(table);
+    const cutoff=new Date(Date.now()-INCREMENTAL_FALLBACK_DAYS*24*60*60*1000).toISOString();
+    changedResult=await fetchPagedBusinessRows(
+      table,
+      query=>query.gte('created_at',cutoff).order('created_at',{ascending:false})
+    );
+  }
+  if(changedResult.error) return {data:cachedRows,error:changedResult.error,fromCache:true};
+
+  let pendingResult={data:[],error:null};
+  if(PENDING_SYNC_TABLES.has(table)){
+    pendingResult=await fetchPagedBusinessRows(table,query=>query.eq('status','pending'));
+    if(pendingResult.error) return {data:cachedRows,error:pendingResult.error,fromCache:true};
   }
 
-  const merged=new Map();
-  cachedRows
-    .filter(row=>String(row.created_at||'')<cutoff && row.status!=='pending')
-    .forEach(row=>merged.set(row.id,row));
-  [...(recentResult.data||[]),...(pendingResult.data||[]),...resolvedOldPending]
+  const merged=new Map(cachedRows.filter(row=>row?.id).map(row=>[row.id,row]));
+  [...(changedResult.data||[]),...(pendingResult.data||[])]
+    .filter(row=>row?.id)
     .forEach(row=>merged.set(row.id,row));
   return {data:[...merged.values()],error:null,fromCache:true};
 }
 
 async function loadBusinessTableOptimized(table){
-  if(!FINANCIAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
+  if(!INCREMENTAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
   const cached=await readFinancialCache(table);
-  const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=FINANCIAL_FULL_SYNC_MS;
+  const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=INCREMENTAL_FULL_SYNC_MS;
   if(needsFull){
     const result=await fetchBusinessTableRows(table);
     if(!result.error) await writeFinancialCache(table,result.data,Date.now());
     return result;
   }
-  const result=await fetchRecentFinancialRows(table,cached);
+  const result=await fetchIncrementalRows(table,cached);
+  if(result.error && !/jwt|unauthorized|401/i.test(result.error.message||'')){
+    return {data:cached.rows,error:null,fromCache:true,stale:true};
+  }
   if(!result.error) await writeFinancialCache(table,result.data,cached.fullSyncAt);
   return result;
 }
