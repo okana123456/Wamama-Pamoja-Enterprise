@@ -1865,6 +1865,12 @@ function reviewSoldItemsLoan(loanId){
   const weeks=Math.max(1,Math.round((new Date(`${loan.expected_end_date}T12:00:00Z`)-new Date(`${loan.start_date}T12:00:00Z`))/604800000));
   const interest=Math.round(principal*0.02*(weeks/4)*100)/100;
   const charge=Math.round(principal*0.06*100)/100;
+  const companionLoans=state.data.loans.filter(x=>
+    String(x.id)!==String(loan.id) &&
+    String(x.order_id||'')===String(loan.order_id||'') &&
+    String(x.member_id||'')===String(loan.member_id||'') &&
+    ['pending','active'].includes(String(x.status||'').toLowerCase())
+  );
   const issues=[];
   if(!member) issues.push('Client is not linked');
   if(!asset) issues.push('Inventory item is not linked');
@@ -1877,6 +1883,9 @@ function reviewSoldItemsLoan(loanId){
         <tr><td>Client</td><td><b>${statementHtml(member?.full_name||'Not linked')}</b><div class="muted">${statementHtml(member?.phone||'No phone')} · ID ${statementHtml(member?.national_id||'—')}</div></td></tr>
         <tr><td>Group / Officer</td><td><b>${statementHtml(group?.name||'Not linked')}</b><div class="muted">${statementHtml(officer?.full_name||'No officer')}</div></td></tr>
         <tr><td>Inventory item</td><td><b>${statementHtml(asset?.name||loan.asset_name||'Not linked')}</b><div class="muted">Quantity ${Number(loan.asset_quantity||1)} · Stock available ${Number(asset?.stock||0)}</div></td></tr>
+        <tr><td>Other items in this form</td><td>${companionLoans.length
+          ? companionLoans.map(x=>`<div><b>${statementHtml(x.asset_name||'Item')}</b> · ${KES(x.loan_value||0)} · <span class="badge ${x.status==='active'?'b-green':'b-yellow'}">${statementHtml(x.status)}</span></div>`).join('')
+          : '<span class="muted">No other item loan for this client</span>'}</td></tr>
         <tr><td>Principal</td><td><b>${KES(principal)}</b></td></tr>
         <tr><td>6% service charge</td><td><b>${KES(charge)}</b></td></tr>
         <tr><td>Interest (2% per month)</td><td><b>${KES(interest)}</b></td></tr>
@@ -4545,7 +4554,9 @@ function pageLoans(){
   }
 
   const isDuplicateLoan = l => !!(l.member_id && l.order_id && state.data.loans.some(x =>
-    x.id !== l.id && x.member_id === l.member_id && x.order_id === l.order_id && x.status === 'active'
+    x.id !== l.id && x.member_id === l.member_id && x.order_id === l.order_id &&
+    String(x.asset_id||x.asset_name||'')===String(l.asset_id||l.asset_name||'') &&
+    Number(x.loan_value||0)===Number(l.loan_value||0) && x.status === 'active'
   ));
   const duplicateCount = loans.filter(isDuplicateLoan).length;
   const loanSearch = (state._loanSearch||'').trim().toLowerCase();
@@ -4616,7 +4627,8 @@ function pageLoans(){
             const paid = loanPaid(l.id);
             const out = Number(l.total_payable)-paid;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
-            // Detect duplicate — same member, same order, more than one active loan
+            // Only an identical item loan is a duplicate. Different items in one
+            // sold-items form are intentional concurrent loans for the client.
             const isDup = isDuplicateLoan(l);
             const memberLabel = info.name || 'Client not linked';
             const memberSub = info.phone || info.nationalId || (info.missing ? 'Repair needed: loan is not connected to a member record' : '');
@@ -4659,11 +4671,14 @@ function loanActions(ev, id){
   const canApproveLoan = can('approve_loan');
   const canRepay = canApproveLoan || r==='officer' || r==='loan_officer';
 
-  // Detect if this loan is a duplicate (same member + same order, more than one active)
+  // Detect only an identical item loan. Different items in the same sold-items
+  // form are intentional concurrent loans for one client.
   const duplicateLoans = state.data.loans.filter(x =>
     x.id !== id &&
     x.member_id === l.member_id &&
     x.order_id  === l.order_id  &&
+    String(x.asset_id||x.asset_name||'') === String(l.asset_id||l.asset_name||'') &&
+    Number(x.loan_value||0) === Number(l.loan_value||0) &&
     x.status    === 'active'
   );
   const isDuplicate = duplicateLoans.length > 0;
@@ -6924,6 +6939,17 @@ function pageSoldItems(){
     </div>
 
     <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <div><h3>Available inventory</h3><div class="sub">Read-only stock and loan prices for the procurement team</div></div>
+        <div class="search-box" style="width:min(100%,320px)">
+          <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
+          <input id="sold-inventory-search" placeholder="Search inventory item" value="${statementHtml(state._soldInventorySearch||'')}" />
+        </div>
+      </div>
+      <div id="sold-inventory-results"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
       <div class="card-head"><h3>Recent sold-items records</h3><div class="sub">${history.length} record(s)</div></div>
       <div style="overflow-x:auto"><table class="tbl">
         <thead><tr>
@@ -6954,6 +6980,34 @@ function pageSoldItems(){
       </table></div>
     </div>
   `;
+
+  renderSoldItemsInventory();
+  const inventorySearch=$('sold-inventory-search');
+  if(inventorySearch){
+    inventorySearch.addEventListener('input',e=>{
+      state._soldInventorySearch=e.target.value;
+      renderSoldItemsInventory();
+    });
+  }
+}
+
+function renderSoldItemsInventory(){
+  const target=$('sold-inventory-results');
+  if(!target) return;
+  const q=String(state._soldInventorySearch||'').trim().toLowerCase();
+  const rows=(state.data.inventory||[])
+    .filter(a=>!q||[a.name,a.category,a.sku].some(v=>String(v||'').toLowerCase().includes(q)))
+    .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')))
+    .slice(0,100);
+  target.innerHTML=`<div style="overflow-x:auto"><table class="tbl">
+    <thead><tr><th>Item</th><th>Category</th><th class="num">Available stock</th><th class="num">Loan price</th><th>Status</th></tr></thead>
+    <tbody>${rows.map(a=>{
+      const stock=Number(a.stock||0);
+      return `<tr><td><b>${statementHtml(a.name||'Unnamed item')}</b>${a.sku?`<div class="muted" style="font-size:11px">${statementHtml(a.sku)}</div>`:''}</td>
+        <td>${statementHtml(a.category||'—')}</td><td class="num"><b>${stock}</b></td><td class="num">${KES(a.loan_price||0)}</td>
+        <td><span class="badge ${stock>0?'b-green':'b-red'}">${stock>0?'Available':'Out of stock'}</span></td></tr>`;
+    }).join('')||`<tr><td colspan="5"><div class="empty"><h4>No inventory item found</h4><p>Try a different item name.</p></div></td></tr>`}</tbody>
+  </table></div>${rows.length===100?'<div class="muted" style="padding:8px 14px;font-size:11px">Showing the first 100 matching items. Use search to narrow the list.</div>':''}`;
 }
 
 function openSoldItemsForm(){
@@ -6997,6 +7051,9 @@ function openSoldItemsForm(){
 
       <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">
         Loan Details — Total Payable = Principal + Interest (2%/month) + 6% Service Charge
+      </div>
+      <div class="notice notice-info" style="margin-bottom:10px">
+        A client may receive several different items in this same form. Each item becomes a separate loan for approval and keeps its own repayment schedule.
       </div>
       <div style="overflow-x:auto">
         <table class="tbl" id="si-table" style="min-width:820px;font-size:12px">
@@ -7096,6 +7153,26 @@ function siAddRow(){
   }, 30);
 }
 
+function siAddItemForClient(i){
+  const source=_soldItems[i];
+  if(!source?.member_id) return toast('Select a registered client first.','warn');
+  const next=_soldItems.length+1;
+  _soldItems.push({
+    sr:next,
+    member_id:source.member_id,
+    client_name:source.client_name,
+    phone:source.phone,
+    asset_id:'', product:'', quantity:1, stock:0, loan_amount:'',
+    loan_term:source.loan_term||'', loan_no:''
+  });
+  renderSoldItemsRows();
+  setTimeout(()=>{
+    const product=document.querySelector(`[data-si="${_soldItems.length-1}"][data-f="product"]`);
+    product?.scrollIntoView({behavior:'smooth',block:'nearest'});
+    product?.focus();
+  },30);
+}
+
 function siRemoveRow(i){
   if(_soldItems.length <= 1) return; // always keep at least 1 row
   _soldItems.splice(i, 1);
@@ -7160,6 +7237,8 @@ function renderSoldItemsRows(){
         value="${row.loan_no}" placeholder="Ref"
         onchange="siSaveField(${i},'loan_no',this.value)" /></td>
       <td style="text-align:center">
+        <button onclick="siAddItemForClient(${i})" title="Add another item for this client"
+          style="background:none;border:none;color:var(--primary);cursor:pointer;font-size:18px;padding:2px 4px;line-height:1">+</button>
         ${_soldItems.length > 1
           ? `<button onclick="siRemoveRow(${i})" title="Remove row"
                style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 4px">✕</button>`
@@ -7169,7 +7248,7 @@ function renderSoldItemsRows(){
   }).join('');
 
   tfoot.innerHTML = `<tr style="background:var(--surface-2);font-weight:700;border-top:2px solid var(--border)">
-    <td colspan="5" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} client${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''})</td>
+    <td colspan="5" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} item loan${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''} for ${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size} client${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size!==1?'s':''})</td>
     <td class="num" style="padding:8px 14px;font-size:12px">${KES(totalPrincipal)}</td>
     <td></td>
     <td class="num" style="padding:8px 14px;font-size:12px;color:var(--warning)">${KES(totalCharge)}</td>
@@ -7262,7 +7341,8 @@ function siRecalcRow(i){
   if(tfoot){
     const cells = tfoot.querySelectorAll('td');
     const filled = _soldItems.filter(r=>Number(r.loan_amount)>0).length;
-    if(cells[0]) cells[0].textContent = `TOTALS (${filled} client${filled!==1?'s':''})`;
+    const clients=new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size;
+    if(cells[0]) cells[0].textContent = `TOTALS (${filled} item loan${filled!==1?'s':''} for ${clients} client${clients!==1?'s':''})`;
     if(cells[1]) cells[1].textContent = KES(tp);
     if(cells[3]) cells[3].textContent = KES(tc);
     if(cells[4]) cells[4].textContent = KES(ti);
@@ -7285,6 +7365,13 @@ async function saveSoldItemsForm(){
   if(validRows.some(r=>!r.asset_id)) return toast('Every row must use a product selected from inventory.', 'error');
   if(validRows.some(r=>Number(String(r.loan_amount).replace(/,/g,''))<=0)) return toast('Every row must have a valid loan amount.', 'error');
   if(validRows.some(r => !parseInt(r.loan_term))) return toast('Please enter a loan term (weeks) for every client row.', 'error');
+
+  const itemKeys=new Set();
+  for(const row of validRows){
+    const key=`${row.member_id}|${row.asset_id}`;
+    if(itemKeys.has(key)) return toast(`${row.client_name} has the same inventory item more than once. Increase the quantity on one row or choose a different item.`, 'error');
+    itemKeys.add(key);
+  }
 
   const requiredStock=new Map();
   validRows.forEach(r=>requiredStock.set(r.asset_id,(requiredStock.get(r.asset_id)||0)+Math.max(1,Number(r.quantity||1))));
@@ -7325,7 +7412,7 @@ async function saveSoldItemsForm(){
   const orderIns = {
     business_id: state.staff.business_id || null,
     member_id: null, group_id: groupId || null,
-    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} client(s)`,
+    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} item loan(s)`,
     quantity: rowsWithCalc.reduce((sum,row)=>sum+Number(row.quantity||1),0), ordered_on: date, status: 'pending',
     recorded_by: state.staff.id, approved_by: null,
     notes: JSON.stringify(meta),
@@ -7366,8 +7453,9 @@ async function saveSoldItemsForm(){
     // Check for existing active loan for this member on this order (duplicate prevention)
     const existingActiveLoan = state.data.loans.find(ex =>
       ex.order_id === orderData.id &&
-      ex.status   === 'active' &&
-      (memberId ? ex.member_id === memberId : ex.asset_name === (row.product||'Sold item'))
+      ['pending','active'].includes(ex.status) &&
+      ex.member_id === memberId &&
+      String(ex.asset_id||'') === String(asset.id||'')
     );
     if(existingActiveLoan){
       errors.push(`${row.client_name}: loan already exists — skipped duplicate`);
@@ -7411,7 +7499,8 @@ async function saveSoldItemsForm(){
   if(errors.length){
     toast(`${loansCreated} loan(s) ${isPending?'submitted for approval':'created'}. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
   } else {
-    toast(`✅ ${loansCreated} sold items loan(s) ${isPending ? 'submitted for BM/Admin approval — they will appear in the Approvals Queue' : 'issued and activated'}. Total principal: ${KES(totalPrincipal)}.`, 'success');
+    const clientCount=new Set(rowsWithCalc.filter(r=>r.member_id).map(r=>String(r.member_id))).size;
+    toast(`✅ ${loansCreated} item loan(s) for ${clientCount} client(s) ${isPending ? 'submitted for BM/Admin approval — they will appear in the Approvals Queue' : 'issued and activated'}. Total principal: ${KES(totalPrincipal)}.`, 'success');
   }
 }
 
