@@ -1794,6 +1794,7 @@ function pageApprovals(){
         <td class="num">${KES(l.weekly_installment)}/wk</td>
         <td>${fmtDate(l.start_date)}</td>
         <td style="text-align:right">
+          <button class="btn btn-sm btn-outline" onclick="reviewSoldItemsLoan('${l.id}')">Review</button>
           <button class="btn btn-sm btn-primary" onclick="approveSoldItemsLoan('${l.id}',this)">Approve</button>
           <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectSoldItemsLoan('${l.id}')">Reject</button>
         </td></tr>`;
@@ -1833,7 +1834,7 @@ function pageApprovals(){
     }).join('') || `<tr><td colspan="4" class="muted" style="padding:16px;text-align:center">No pending repayments</td></tr>`, head:'<th>Member</th><th>Amount</th><th>Date</th><th></th>'});
   }
   if(can('approve_order')){
-    const list = (d.orders||[]).filter(o=>o.status==='pending');
+    const list = (d.orders||[]).filter(o=>o.status==='pending'&&(()=>{try{return JSON.parse(o.notes||'{}').source!=='sold_items';}catch{return true;}})());
     sections.push({title:'Pending purchase orders', count:list.length, rows: list.slice(0,50).map(o=>{
       return `<tr><td>${o.item_name||o.description||'—'}</td><td>${o.quantity||'—'}</td><td>${(o.ordered_on||o.created_at||'').slice(0,10)}</td>
         <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="go('orders')">Review in Orders →</button></td></tr>`;
@@ -1852,6 +1853,45 @@ function pageApprovals(){
     ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
   `;
 }
+function reviewSoldItemsLoan(loanId){
+  const loan=state.data.loans.find(x=>String(x.id)===String(loanId));
+  if(!loan) return toast('Sold-items loan not found.','error');
+  const member=state.data.members.find(x=>String(x.id)===String(loan.member_id));
+  const group=state.data.groups.find(x=>String(x.id)===String(loan.group_id));
+  const asset=state.data.inventory.find(x=>String(x.id)===String(loan.asset_id));
+  const officer=state.data.staff.find(x=>String(x.id)===String(loan.officer_id));
+  const order=state.data.orders.find(x=>String(x.id)===String(loan.order_id));
+  const principal=Number(loan.loan_value||0);
+  const weeks=Math.max(1,Math.round((new Date(`${loan.expected_end_date}T12:00:00Z`)-new Date(`${loan.start_date}T12:00:00Z`))/604800000));
+  const interest=Math.round(principal*0.02*(weeks/4)*100)/100;
+  const charge=Math.round(principal*0.06*100)/100;
+  const issues=[];
+  if(!member) issues.push('Client is not linked');
+  if(!asset) issues.push('Inventory item is not linked');
+  if(asset&&Number(asset.stock||0)<Number(loan.asset_quantity||1)) issues.push('Insufficient inventory stock');
+  if(!group) issues.push('Group is not linked');
+  modal({
+    title:'Review Sold Items Loan',
+    body:`${issues.length?`<div style="padding:10px 12px;margin-bottom:12px;border:1px solid var(--danger);background:var(--danger-50);border-radius:var(--radius-sm);color:var(--danger)"><b>Approval blocked:</b> ${issues.join('; ')}</div>`:''}
+      <div class="card card-pad" style="background:var(--surface-2)"><table class="tbl"><tbody>
+        <tr><td>Client</td><td><b>${statementHtml(member?.full_name||'Not linked')}</b><div class="muted">${statementHtml(member?.phone||'No phone')} · ID ${statementHtml(member?.national_id||'—')}</div></td></tr>
+        <tr><td>Group / Officer</td><td><b>${statementHtml(group?.name||'Not linked')}</b><div class="muted">${statementHtml(officer?.full_name||'No officer')}</div></td></tr>
+        <tr><td>Inventory item</td><td><b>${statementHtml(asset?.name||loan.asset_name||'Not linked')}</b><div class="muted">Quantity ${Number(loan.asset_quantity||1)} · Stock available ${Number(asset?.stock||0)}</div></td></tr>
+        <tr><td>Principal</td><td><b>${KES(principal)}</b></td></tr>
+        <tr><td>6% service charge</td><td><b>${KES(charge)}</b></td></tr>
+        <tr><td>Interest (2% per month)</td><td><b>${KES(interest)}</b></td></tr>
+        <tr><td>Total payable</td><td><b>${KES(loan.total_payable)}</b></td></tr>
+        <tr><td>Weekly installment</td><td><b>${KES(loan.weekly_installment)}</b> for ${weeks} weeks</td></tr>
+        <tr><td>Repayment period</td><td>${fmtDate(loan.start_date)} to ${fmtDate(loan.expected_end_date)}</td></tr>
+        <tr><td>Submitted</td><td>${fmtDate(order?.ordered_on||order?.created_at)}</td></tr>
+      </tbody></table></div>`,
+    actions:[
+      {label:'Close',cls:'btn-outline',onClick:closeModal},
+      ...(!issues.length?[{label:'Approve loan',cls:'btn-primary',onClick:async()=>{closeModal();await approveSoldItemsLoan(loanId);}}]:[]),
+      {label:'Reject',cls:'btn-danger',onClick:()=>{closeModal();rejectSoldItemsLoan(loanId);}}
+    ]
+  });
+}
 async function approveSoldItemsLoan(loanId, btn){
   if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
   const loan = state.data.loans.find(x=>x.id===loanId);
@@ -1861,17 +1901,17 @@ async function approveSoldItemsLoan(loanId, btn){
   }
   if(!(await ensureFreshToken())) return;
 
-  const { error: loanErr } = await sb.from('pb_loans')
-    .update({ status:'active' })
-    .eq('id', loanId);
+  const { data:approval, error: loanErr } = await sb.rpc('pb_approve_sold_items_loan',{p_loan_id:String(loanId)});
   if(loanErr){
     if(btn){ btn.disabled=false; btn.textContent='Approve'; }
-    return toast('Approval failed: '+loanErr.message,'error');
+    const setupHint=/could not find the function|does not exist/i.test(loanErr.message||'')?' Run the new Wamama sold-form SQL setup first.':'';
+    return toast('Approval failed: '+loanErr.message+setupHint,'error');
   }
   if(loan){ loan.status = 'active'; }
-
-  // No automatic fee entries — all charges (6%+3%+3%) are in total_payable
-  // and recovered gradually through weekly client repayments
+  const asset=loan?state.data.inventory.find(x=>String(x.id)===String(loan.asset_id)):null;
+  if(asset&&approval?.stock_remaining!==undefined) asset.stock=Number(approval.stock_remaining);
+  const order=loan?state.data.orders.find(x=>String(x.id)===String(loan.order_id)):null;
+  if(order&&approval?.order_status) order.status=approval.order_status;
 
   audit('approve_sold_items_loan','pb_loans',loanId);
   render();
@@ -3578,7 +3618,8 @@ function pageMemberProfile(){
             <h3>Repayment history</h3>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <div class="sub">Approved total: ${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
-              ${ln ? `<button class="btn btn-sm btn-primary" onclick="openStandaloneRepayment('${ln.id}','${m.id}')">📥 Record Repayment</button>` : ''}
+              ${ln ? `<button class="btn btn-sm btn-primary" onclick="openStandaloneRepayment('${ln.id}','${m.id}')">Record Repayment</button>` : ''}
+              <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Loan Deposit</button>
             </div>
           </div>
           <div style="overflow-x:auto"><table class="tbl">
@@ -4140,20 +4181,19 @@ function renderMeetList(){
             const weekly     = Number(ln.weekly_installment) || 0;
             const currentAmt = ent.repayments[ln.id] !== undefined ? ent.repayments[ln.id] : weekly;
             const dueNow     = Math.min(out,loanAmountDueAtDate(ln,m.date));
-            const heldAhead  = Math.max(0,Math.min(Number(currentAmt)||0,out)-dueNow);
-            const exceedsLoan= Number(currentAmt) > out + 0.01;
+            const heldAhead  = Math.max(0,(Number(currentAmt)||0)-dueNow);
             const isAdvance  = heldAhead > 0.005;
-            return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${exceedsLoan?'var(--danger-50)':isAdvance?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
+            return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;background:${isAdvance?'var(--warning-50)':'transparent'};border-radius:var(--radius-sm);padding:10px 0 0 0">
               <div class="row">
                 <div>
                   <label style="color:var(--primary);font-weight:600">📋 Loan Repayment: ${ln.asset_name}</label>
                   <input type="number" min="0" data-id="${mem.id}" data-loanid="${ln.id}"
                     value="${currentAmt}" ${ent.absent?'disabled':''}
                     placeholder="${weekly}"
-                    style="border-color:${exceedsLoan?'var(--danger)':isAdvance?'var(--warning)':'var(--border)'}" />
-                  <div style="font-size:11px;margin-top:3px;color:${exceedsLoan?'var(--danger)':isAdvance?'var(--warning)':'var(--text-muted)'}">
+                    style="border-color:${isAdvance?'var(--warning)':'var(--border)'}" />
+                  <div style="font-size:11px;margin-top:3px;color:${isAdvance?'var(--warning)':'var(--text-muted)'}">
                     Due by ${fmtDate(m.date)}: <b>${KES(dueNow)}</b> &middot; Weekly installment: <b>${KES(weekly)}</b>
-                    ${exceedsLoan?` &middot; Payment cannot exceed the unpaid balance of ${KES(out)}.`:isAdvance ? ` &middot; ${KES(heldAhead)} will remain in the loan deposit account for future scheduled instalments.` : ''}
+                    ${isAdvance ? ` &middot; ${KES(heldAhead)} will remain in the loan deposit account for future instalments.` : ''}
                   </div>
                 </div>
                 <div>
@@ -6857,7 +6897,7 @@ async function submitPurchase(){
 /* =====================================================================
  * PAGE: SOLD ITEMS LOAN FORM (Storekeeper)
  * Matches the physical "Sold Items Loan Form" used in the field.
- * Interest = 2% per month flat on principal. Total charges = 12% of principal (covers all fees). No separate deductions.
+ * Interest = 2% per month flat on principal. Service charge = 6% of principal.
  * ===================================================================== */
 let _soldItems = []; // rows in the current form session
 
@@ -6876,7 +6916,7 @@ function pageSoldItems(){
     <div class="page-head">
       <div>
         <h1>Sold Items Loan Form</h1>
-        <div class="desc">Record items issued to clients on credit. Interest: 2%/month · Charges: 12% of principal (all fees included).</div>
+        <div class="desc">Record inventory items issued to registered clients on credit. Interest: 2%/month · Service charge: 6%.</div>
       </div>
       <div class="actions">
         ${canCreate ? `<button class="btn btn-primary" onclick="openSoldItemsForm()">New Form</button>` : ''}
@@ -6921,7 +6961,7 @@ function openSoldItemsForm(){
     toast('You do not have permission to create sold-items client orders.', 'error');
     return;
   }
-  _soldItems = Array.from({length:10}, (_,i) => ({ sr: i+1, client_name:'', phone:'', product:'', loan_amount:'', loan_term:'', loan_no:'' }));
+  _soldItems = Array.from({length:10}, (_,i) => ({ sr:i+1, member_id:'', client_name:'', phone:'', asset_id:'', product:'', quantity:1, stock:0, loan_amount:'', loan_term:'', loan_no:'' }));
 
   modal({
     title: 'Sold Items Loan Form — Wamama Pamoja',
@@ -6956,15 +6996,15 @@ function openSoldItemsForm(){
       </div>
 
       <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">
-        Loan Details — Total Payable = Principal + Interest (2%/mo) + 12% Charges (all fees included)
+        Loan Details — Total Payable = Principal + Interest (2%/month) + 6% Service Charge
       </div>
       <div style="overflow-x:auto">
         <table class="tbl" id="si-table" style="min-width:820px;font-size:12px">
           <thead><tr>
             <th style="width:36px">SR.</th>
-            <th>Client Name</th><th>Phone No</th><th>Product</th>
+            <th>Client</th><th>Phone No</th><th>Inventory Product</th><th class="num">Qty</th>
             <th class="num">Loan Amount (KES)</th><th>Loan Term (wks)</th>
-            <th class="num">12% Charges</th><th class="num">Interest (2%/mo)</th><th class="num">Total Payable</th>
+            <th class="num">6% Charge</th><th class="num">Interest (2%/mo)</th><th class="num">Total Payable</th>
             <th style="width:64px">Loan No</th>
             <th style="width:32px"></th>
           </tr></thead>
@@ -6987,8 +7027,6 @@ function openSoldItemsForm(){
   setTimeout(()=>{
     siFilterGroups(''); // pre-populate dropdown list
     renderSoldItemsRows();
-    // Show match status for any pre-filled rows
-    setTimeout(()=> _soldItems.forEach((_,i) => siCheckMatch(i)), 60);
   }, 50);
 }
 
@@ -7021,6 +7059,12 @@ function siSelectGroup(id, name){
   if(searchInput) searchInput.value = name;
   if(hiddenInput) hiddenInput.value = id;
   if(dropdown)    dropdown.style.display = 'none';
+  _soldItems.forEach(row=>{
+    if(row.member_id && !state.data.members.some(m=>String(m.id)===String(row.member_id)&&String(m.group_id)===String(id))){
+      row.member_id=''; row.client_name=''; row.phone='';
+    }
+  });
+  renderSoldItemsRows();
   // Auto-fill meeting day/time from group data
   const g = state.data.groups.find(x=>x.id===id);
   if(g){
@@ -7037,7 +7081,7 @@ function siSelectGroup(id, name){
 
 function siAddRow(){
   const next = _soldItems.length + 1;
-  _soldItems.push({ sr: next, client_name:'', phone:'', product:'', loan_amount:'', loan_term:'', loan_no:'' });
+  _soldItems.push({ sr:next, member_id:'', client_name:'', phone:'', asset_id:'', product:'', quantity:1, stock:0, loan_amount:'', loan_term:'', loan_no:'' });
   renderSoldItemsRows();
   // Scroll to bottom of table so new row is visible
   setTimeout(()=>{
@@ -7072,26 +7116,29 @@ function renderSoldItemsRows(){
     const principal = Number(String(row.loan_amount).replace(/,/g,''))||0;
     const weeks     = parseInt(row.loan_term)||0;
     const months    = weeks / 4;
-    const charge    = principal > 0 ? Math.round(principal * 0.12 * 100)/100 : 0;
+    const charge    = principal > 0 ? Math.round(principal * 0.06 * 100)/100 : 0;
     const interest  = principal > 0 && weeks > 0 ? Math.round(principal * 0.02 * months * 100)/100 : 0;
     const payable   = principal + charge + interest;
     totalPrincipal += principal; totalCharge += charge; totalInterest += interest; totalPayable += payable;
 
     return `<tr id="si-row-${i}" style="${i%2===1?'background:var(--surface-2)':''}">
       <td style="text-align:center;color:var(--text-muted);font-size:11px">${row.sr}.</td>
-      <td><input style="min-width:130px;font-size:12px" data-si="${i}" data-f="client_name"
-        value="${row.client_name}" placeholder="Full name"
-        onchange="siSaveField(${i},'client_name',this.value)" /></td>
-      <td>
-        <input style="width:110px;font-size:12px" data-si="${i}" data-f="phone"
-          value="${row.phone}" placeholder="07XX..."
-          onchange="siSaveField(${i},'phone',this.value);siCheckMatch(${i})"
-          onblur="siSaveField(${i},'phone',this.value);siCheckMatch(${i})" />
-        <div id="si-match-${i}" style="font-size:10px;margin-top:2px"></div>
+      <td style="position:relative"><input style="min-width:165px;font-size:12px" data-si="${i}" data-f="client_name"
+        value="${statementHtml(row.client_name)}" placeholder="Search name, phone or ID" autocomplete="off" list="si-members-${i}"
+        oninput="siSaveField(${i},'client_name',this.value)" onchange="siResolveClient(${i},this.value)" />
+        <datalist id="si-members-${i}">${soldFormMemberOptions().map(m=>`<option value="${statementHtml(m.full_name)} — ${statementHtml(m.phone||m.national_id||'No phone')}"></option>`).join('')}</datalist>
+        <div id="si-match-${i}" style="font-size:10px;margin-top:2px">${row.member_id?'<span style="color:var(--success)">Client linked</span>':''}</div>
       </td>
-      <td><input style="min-width:110px;font-size:12px" data-si="${i}" data-f="product"
-        value="${row.product}" placeholder="Product"
-        onchange="siSaveField(${i},'product',this.value)" /></td>
+      <td>
+        <input style="width:110px;font-size:12px;background:var(--surface-2)" value="${statementHtml(row.phone)}" placeholder="Auto-filled" readonly />
+      </td>
+      <td><input style="min-width:165px;font-size:12px" data-si="${i}" data-f="product"
+        value="${statementHtml(row.product)}" placeholder="Search inventory" autocomplete="off" list="si-assets-${i}"
+        oninput="siSaveField(${i},'product',this.value)" onchange="siResolveAsset(${i},this.value)" />
+        <datalist id="si-assets-${i}">${state.data.inventory.filter(a=>Number(a.stock||0)>0).map(a=>`<option value="${statementHtml(a.name)}">${KES(a.loan_price||0)} · stock ${Number(a.stock||0)}</option>`).join('')}</datalist>
+        <div style="font-size:10px;margin-top:2px;color:${row.asset_id?'var(--success)':'var(--text-muted)'}">${row.asset_id?`Inventory linked · stock ${Number(row.stock||0)}`:'Select a listed inventory item'}</div>
+      </td>
+      <td><input type="number" min="1" step="1" style="width:58px;font-size:12px;text-align:right" value="${Number(row.quantity||1)}" oninput="siSaveQuantity(${i},this.value)" /></td>
       <td>
         <input type="text" inputmode="numeric" style="width:110px;font-size:12px;text-align:right"
           data-si="${i}" data-f="loan_amount"
@@ -7122,7 +7169,7 @@ function renderSoldItemsRows(){
   }).join('');
 
   tfoot.innerHTML = `<tr style="background:var(--surface-2);font-weight:700;border-top:2px solid var(--border)">
-    <td colspan="4" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} client${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''})</td>
+    <td colspan="5" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} client${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''})</td>
     <td class="num" style="padding:8px 14px;font-size:12px">${KES(totalPrincipal)}</td>
     <td></td>
     <td class="num" style="padding:8px 14px;font-size:12px;color:var(--warning)">${KES(totalCharge)}</td>
@@ -7139,28 +7186,49 @@ function siSaveField(i, field, value){
   _soldItems[i][field] = value;
 }
 
-/* Check if the phone number in row i matches a registered member and show indicator */
-function siCheckMatch(i){
-  const row = _soldItems[i];
-  const el  = document.getElementById(`si-match-${i}`);
-  if(!el) return;
-  const groupId   = document.getElementById('si-group')?.value || null;
-  const normPhone = normalisePhone(row.phone||'');
-  if(normPhone.length < 9){ el.innerHTML = ''; return; }
+function soldFormMemberOptions(){
+  const groupId=document.getElementById('si-group')?.value||'';
+  return state.data.members.filter(m=>m.status==='active'&&(!groupId||String(m.group_id)===String(groupId)));
+}
 
-  let member = state.data.members.find(m =>
-    normalisePhone(m.phone||'') === normPhone &&
-    (!groupId || m.group_id === groupId)
-  );
-  if(!member){
-    member = state.data.members.find(m => normalisePhone(m.phone||'') === normPhone);
-  }
-
+function siResolveClient(i,value){
+  const row=_soldItems[i];
+  row.client_name=value;
+  const query=String(value||'').trim().toLowerCase();
+  const phone=normalisePhone(value||'');
+  const candidates=soldFormMemberOptions();
+  const member=candidates.find(m=>query===`${String(m.full_name||'').trim().toLowerCase()} — ${String(m.phone||m.national_id||'no phone').trim().toLowerCase()}`)
+    || candidates.find(m=>String(m.full_name||'').trim().toLowerCase()===query)
+    || (phone.length>=9?candidates.find(m=>normalisePhone(m.phone||'')===phone):null)
+    || candidates.find(m=>String(m.national_id||'').trim()===String(value||'').trim());
   if(member){
-    el.innerHTML = `<span style="color:var(--success)">✅ ${member.full_name} · ID ${member.national_id||'—'}</span>`;
-  } else {
-    el.innerHTML = `<span style="color:var(--danger)">⚠ No member found — loan will be unlinked</span>`;
+    row.member_id=member.id; row.client_name=member.full_name; row.phone=member.phone||'';
+  }else{
+    row.member_id=''; row.phone='';
   }
+  renderSoldItemsRows();
+  setTimeout(()=>document.querySelector(`[data-si="${i}"][data-f="client_name"]`)?.focus(),0);
+}
+
+function siResolveAsset(i,value){
+  const row=_soldItems[i];
+  row.product=value;
+  const asset=state.data.inventory.find(a=>String(a.name||'').trim().toLowerCase()===String(value||'').trim().toLowerCase());
+  if(asset){
+    row.asset_id=asset.id; row.product=asset.name; row.stock=Number(asset.stock||0);
+    row.loan_amount=Math.round(Number(asset.loan_price||0)*Math.max(1,Number(row.quantity||1))*100)/100;
+  }else{
+    row.asset_id=''; row.stock=0;
+  }
+  renderSoldItemsRows();
+}
+
+function siSaveQuantity(i,value){
+  const row=_soldItems[i];
+  row.quantity=Math.max(1,Math.floor(Number(value)||1));
+  const asset=state.data.inventory.find(a=>String(a.id)===String(row.asset_id));
+  if(asset) row.loan_amount=Math.round(Number(asset.loan_price||0)*row.quantity*100)/100;
+  renderSoldItemsRows();
 }
 
 /* Recalculate only the computed cells for one row after amount/term changes */
@@ -7169,7 +7237,7 @@ function siRecalcRow(i){
   const principal = Number(String(row.loan_amount).replace(/,/g,''))||0;
   const weeks     = parseInt(row.loan_term)||0;
   const months    = weeks / 4;
-  const charge    = principal > 0 ? Math.round(principal * 0.12 * 100)/100 : 0;
+    const charge    = principal > 0 ? Math.round(principal * 0.06 * 100)/100 : 0;
   const interest  = principal > 0 && weeks > 0 ? Math.round(principal * 0.02 * months * 100)/100 : 0;
   const payable   = principal + charge + interest;
 
@@ -7186,9 +7254,9 @@ function siRecalcRow(i){
     const p = Number(String(r.loan_amount).replace(/,/g,''))||0;
     const w = parseInt(r.loan_term)||0;
     tp   += p;
-    tc   += p > 0 ? Math.round(p*0.12*100)/100 : 0;
+    tc   += p > 0 ? Math.round(p*0.06*100)/100 : 0;
     ti   += p > 0 && w > 0 ? Math.round(p*0.02*(w/4)*100)/100 : 0;
-    tpay += p + (p>0?Math.round(p*0.12*100)/100:0) + (p>0&&w>0?Math.round(p*0.02*(w/4)*100)/100:0);
+    tpay += p + (p>0?Math.round(p*0.06*100)/100:0) + (p>0&&w>0?Math.round(p*0.02*(w/4)*100)/100:0);
   });
   const tfoot = document.getElementById('si-totals');
   if(tfoot){
@@ -7209,11 +7277,23 @@ function siUpdateRow(i, el){
 
 async function saveSoldItemsForm(){
   if(!(await ensureFreshToken())) return;
-  const validRows = _soldItems.filter(r => r.client_name && Number(String(r.loan_amount).replace(/,/g,'')) > 0);
+  const validRows = _soldItems.filter(r => (r.client_name||r.product||Number(String(r.loan_amount).replace(/,/g,''))>0));
   if(!validRows.length) return toast('Please fill in at least one client row with a name and loan amount.', 'error');
+  const groupId       = document.getElementById('si-group')?.value || null;
+  if(!groupId) return toast('Please select the group before adding sold-item loans.', 'error');
+  if(validRows.some(r=>!r.member_id)) return toast('Every row must use a registered client selected from the client search list.', 'error');
+  if(validRows.some(r=>!r.asset_id)) return toast('Every row must use a product selected from inventory.', 'error');
+  if(validRows.some(r=>Number(String(r.loan_amount).replace(/,/g,''))<=0)) return toast('Every row must have a valid loan amount.', 'error');
   if(validRows.some(r => !parseInt(r.loan_term))) return toast('Please enter a loan term (weeks) for every client row.', 'error');
 
-  const groupId       = document.getElementById('si-group')?.value || null;
+  const requiredStock=new Map();
+  validRows.forEach(r=>requiredStock.set(r.asset_id,(requiredStock.get(r.asset_id)||0)+Math.max(1,Number(r.quantity||1))));
+  for(const [assetId,quantity] of requiredStock){
+    const asset=state.data.inventory.find(a=>String(a.id)===String(assetId));
+    if(!asset) return toast('One selected inventory item can no longer be found. Please select it again.','error');
+    if(Number(asset.stock||0)<quantity) return toast(`Insufficient stock for ${asset.name}. Required ${quantity}, available ${Number(asset.stock||0)}.`,'error');
+  }
+
   const creditOfficer = document.getElementById('si-officer')?.value || state.staff.full_name;
   const branch        = document.getElementById('si-branch')?.value || '';
   const date          = document.getElementById('si-date')?.value || todayISO();
@@ -7230,11 +7310,9 @@ async function saveSoldItemsForm(){
     const weeks     = parseInt(r.loan_term) || 0;
     const months    = weeks / 4;
     const interest  = Math.round(principal * 0.02 * months * 100) / 100;
-    // All charges absorbed into total payable — no separate deductions ever
-    // P + I + 6% service charge + 3% app fee + 3% insurance = P + I + 12%
-    const allCharges   = Math.round(principal * 0.12 * 100) / 100;
-    const totalPayable = principal + interest + allCharges;
-    return { ...r, loan_amount: principal, weeks, interest, allCharges, totalPayable };
+    const serviceCharge = Math.round(principal * 0.06 * 100) / 100;
+    const totalPayable = principal + interest + serviceCharge;
+    return { ...r, quantity:Math.max(1,Number(r.quantity||1)), loan_amount:principal, weeks, interest, serviceCharge, totalPayable };
   });
 
   const meta = {
@@ -7248,8 +7326,8 @@ async function saveSoldItemsForm(){
     business_id: state.staff.business_id || null,
     member_id: null, group_id: groupId || null,
     asset_id: null, asset_name: `Sold Items Form — ${validRows.length} client(s)`,
-    quantity: validRows.length, ordered_on: date, status: 'fulfilled',
-    recorded_by: state.staff.id, approved_by: state.staff.id,
+    quantity: rowsWithCalc.reduce((sum,row)=>sum+Number(row.quantity||1),0), ordered_on: date, status: 'pending',
+    recorded_by: state.staff.id, approved_by: null,
     notes: JSON.stringify(meta),
     desired_weeks: null, desired_weekly_installment: null
   };
@@ -7261,40 +7339,16 @@ async function saveSoldItemsForm(){
   let loansCreated = 0, errors = [];
 
   for(const row of rowsWithCalc){
-    // Match member by phone first (most reliable), then fall back to name.
-    // Phone is normalised before comparison to handle 07xx vs +2547xx variants.
-    const normRowPhone = normalisePhone(row.phone||'');
-    let member = null;
-
-    // 1. Match by phone number (exact, after normalisation)
-    if(normRowPhone.length >= 9){
-      member = state.data.members.find(m =>
-        normalisePhone(m.phone||'') === normRowPhone &&
-        (!groupId || m.group_id === groupId)
-      );
-      // If not found in selected group, try across all groups
-      if(!member){
-        member = state.data.members.find(m =>
-          normalisePhone(m.phone||'') === normRowPhone
-        );
-      }
-    }
-
-    // 2. Fall back to name match (case-insensitive) within the selected group
-    if(!member){
-      const nameLower = (row.client_name||'').trim().toLowerCase();
-      member = state.data.members.find(m =>
-        m.full_name.trim().toLowerCase() === nameLower &&
-        (!groupId || m.group_id === groupId)
-      );
-    }
+    const member=state.data.members.find(m=>String(m.id)===String(row.member_id)&&String(m.group_id)===String(groupId));
 
     if(!member){
       errors.push(`${row.client_name}: client not found. Register the client first or correct the name/phone in the sold-items form.`);
       continue;
     }
 
-    const memberId = member?.id || null;
+    const memberId = member.id;
+    const asset=state.data.inventory.find(a=>String(a.id)===String(row.asset_id));
+    if(!asset){ errors.push(`${row.client_name}: selected inventory item was not found.`); continue; }
 
     // Calculate loan schedule.
     // Repayments start AFTER one week — so start_date is set 7 days after the form date.
@@ -7326,9 +7380,9 @@ async function saveSoldItemsForm(){
       group_id:           groupId || null,
       officer_id:         officerId,
       order_id:           orderData.id,
-      asset_id:           null,
-      asset_name:         row.product || 'Sold item',
-      asset_quantity:     1,
+      asset_id:           asset.id,
+      asset_name:         asset.name,
+      asset_quantity:     row.quantity,
       loan_value:         row.loan_amount,
       weekly_installment: weeklyInstallment,
       total_payable:      row.totalPayable,
@@ -7336,22 +7390,24 @@ async function saveSoldItemsForm(){
       expected_end_date:  endDate.toISOString().slice(0, 10),
       // Sold items loans start as 'pending' — must be approved by BM or Admin
       // before they appear in the client's active portfolio and arrears tracking.
-      status:             can('approve_loan') ? 'active' : 'pending'
+      status:             'pending'
     };
 
     const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loanRow).select().single();
     if(loanErr){ errors.push(`${row.client_name}: ${loanErr.message}`); continue; }
     state.data.loans.unshift(loanData);
+    row.loan_id=loanData.id;
     loansCreated++;
     audit('sold_items_loan_issue', 'pb_loans', loanData.id, null, loanRow);
 
-    // No automatic fee entries ever — all charges (6% service charge + 3% app fee
-    // + 3% insurance = 12% total) are included in total_payable and recovered
-    // gradually as the client makes weekly repayments. Clean slate on loan creation.
   }
 
+  meta.rows=rowsWithCalc;
+  await sb.from('pb_orders').update({notes:JSON.stringify(meta)}).eq('id',orderData.id);
+  orderData.notes=JSON.stringify(meta);
+
   closeModal(); render();
-  const isPending = !can('approve_loan');
+  const isPending = true;
   if(errors.length){
     toast(`${loansCreated} loan(s) ${isPending?'submitted for approval':'created'}. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
   } else {
@@ -7370,20 +7426,15 @@ function exportSoldItemsExcel(){
     const principal = Number(String(r.loan_amount).replace(/,/g,''))||0;
     const weeks     = parseInt(r.loan_term)||0;
     const months    = weeks/4;
-    const charge    = Math.round(principal*0.12*100)/100;
+    const charge    = Math.round(principal*0.06*100)/100;
     const interest  = Math.round(principal*0.02*months*100)/100;
-    const appFee    = Math.round(principal*0.03*100)/100;
-    const insFee    = Math.round(principal*0.03*100)/100;
     return {
       'SR.': r.sr, 'Client Name': r.client_name, 'Phone No': r.phone,
       'Product': r.product, 'Loan Amount (KES)': principal,
       'Loan Term (Weeks)': r.loan_term,
       '6% Service Charge (KES)': charge,
       'Interest (2%/mo) (KES)': interest,
-      '3% Application Fee (KES)': appFee,
-      '3% Insurance Cover (KES)': insFee,
-      'Total Payable (KES)': principal + interest,
-      'Grand Total incl. Fees (KES)': principal + interest + charge + appFee + insFee,
+      'Total Payable (KES)': principal + interest + charge,
       'Loan No': r.loan_no
     };
   });
@@ -7456,7 +7507,7 @@ function renderSiEditRows(canEdit){
   tbody.innerHTML = window._siEditRows.map((row,i)=>{
     const principal = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
     const weeks     = parseInt(row.loan_term)||0;
-    const charge    = Math.round(principal*0.12*100)/100;
+    const charge    = Math.round(principal*0.06*100)/100;
     const interest  = Math.round(principal*0.02*(weeks/4)*100)/100;
     const payable   = principal+charge+interest;
     tp+=principal; tc+=charge; ti+=interest; tpay+=payable;
@@ -7536,12 +7587,10 @@ async function saveSoldItemsEdit(orderId){
   const updatedRows = window._siEditRows.map(row=>{
     const principal = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
     const weeks     = parseInt(row.loan_term)||0;
-    const charge    = Math.round(principal*0.12*100)/100;
+    const charge    = Math.round(principal*0.06*100)/100;
     const interest  = Math.round(principal*0.02*(weeks/4)*100)/100;
-    const appFee    = Math.round(principal*0.03*100)/100;
-    const insFee    = Math.round(principal*0.03*100)/100;
-    return { ...row, loan_amount:principal, weeks, charge, interest, appFee, insFee,
-      total_payable: principal+interest };
+    return { ...row, loan_amount:principal, weeks, charge, interest,
+      serviceCharge:charge, totalPayable:principal+interest+charge };
   });
 
   // Update the order notes JSON with edited rows
@@ -7584,7 +7633,8 @@ async function saveSoldItemsEdit(orderId){
       const principal  = Number(String(row.loan_amount||'').replace(/,/g,''))||0;
       const weeks      = parseInt(row.loan_term)||0;
       const interest   = Math.round(principal*0.02*(weeks/4)*100)/100;
-      const totalPayable = principal+interest;
+      const serviceCharge = Math.round(principal*0.06*100)/100;
+      const totalPayable = principal+interest+serviceCharge;
       const weeklyInst = weeks>0 ? Math.round(totalPayable/weeks*100)/100 : loan.weekly_installment;
 
       const loanUpd = {
@@ -7609,7 +7659,8 @@ async function saveSoldItemsEdit(orderId){
       if(principal>0 && principal !== loan.loan_value){
         const weeks        = parseInt(row.loan_term)||0;
         const interest     = Math.round(principal*0.02*(weeks/4)*100)/100;
-        const totalPayable = principal+interest;
+        const serviceCharge = Math.round(principal*0.06*100)/100;
+        const totalPayable = principal+interest+serviceCharge;
         const weeklyInst   = weeks>0 ? Math.round(totalPayable/weeks*100)/100 : loan.weekly_installment;
         const loanUpd = { loan_value:principal, total_payable:totalPayable, weekly_installment:weeklyInst, asset_name:row.product||loan.asset_name };
         await sb.from('pb_loans').update(loanUpd).eq('id', loan.id);
@@ -9377,6 +9428,7 @@ function pageRepayments(){
         <div class="desc">${clientReps.length} entries · Total ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}</div>
       </div>
       <div class="actions" style="gap:8px">
+        <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Loan Deposit</button>
         <button class="btn btn-outline" onclick="exportRepaymentsFiltered()">⬇ Export to Excel</button>
       </div>
     </div>
@@ -9825,7 +9877,7 @@ function openStandaloneRepayment(loanId, memberId){
       </div>
       <div class="field">
         <label>Repayment Amount (KES) *</label>
-        <input type="number" id="sr-amount" min="1" max="${outstanding||999999}" step="0.01" value="${ln.weekly_installment}" oninput="srCalcSplit(${ir},'${ln.id}')" />
+        <input type="number" id="sr-amount" min="1" step="0.01" value="${ln.weekly_installment}" oninput="srCalcSplit(${ir},'${ln.id}')" />
       </div>
       <div class="field">
         <label>Date</label>
@@ -9847,7 +9899,6 @@ function openStandaloneRepayment(loanId, memberId){
         const amount = Number(document.getElementById('sr-amount')?.value) || 0;
         const date = document.getElementById('sr-date')?.value || todayISO();
         if(!amount || amount <= 0) return toast('Please enter a valid amount.', 'error');
-        if(amount > outstanding + 1) return toast(`Amount exceeds outstanding balance of ${KES(outstanding)}.`, 'error');
 
         const interest = +(amount * ir).toFixed(2);
         const principal = +(amount - interest).toFixed(2);
@@ -9867,10 +9918,14 @@ function openStandaloneRepayment(loanId, memberId){
         if(error) return toast(error.message, 'error');
 
         state.data.repayments.unshift(data);
+        await refreshExcessRelatedData();
         audit('standalone_repayment', 'pb_repayments', data.id, null, row);
 
         const closed = row.status === 'approved' ? await closeFullyPaidLoans([ln.id], { silent:true }) : 0;
-        if(closed){
+        const deposit=repaymentDepositRecord(data.id);
+        if(deposit){
+          toast(`Repayment recorded. ${KES(deposit.excess_amount)} was protected in the loan deposit account.`, 'success');
+        } else if(closed){
           toast('Loan fully repaid and marked as completed!', 'success');
         } else {
           toast('Repayment recorded successfully.', 'success');
@@ -9894,8 +9949,49 @@ function srCalcSplit(ir,loanId){
   const heldAhead=Math.max(0,amount-dueNow);
   const preview=document.getElementById('sr-prepayment-preview');
   if(preview) preview.innerHTML=heldAhead>0.005
-    ? `<b style="color:var(--warning)">${KES(Math.min(heldAhead,Math.max(0,Number(loan?.total_payable||0)-loanPaid(loan?.id))))}</b> will remain in the loan deposit account and be released on future due dates.`
+    ? `<b style="color:var(--warning)">${KES(heldAhead)}</b> will remain in the loan deposit account and be released on future due dates.`
     : `The payment is within the amount due by ${fmtDate(date)}.`;
+}
+
+function openPreLoanDeposit(memberId=''){
+  const visibleGroups=canViewAllPortfolio()||isSupervisorScoped()?state.data.groups:visiblePortfolioGroupsForCurrentStaff();
+  const visibleGroupIds=new Set(visibleGroups.map(g=>String(g.id)));
+  const members=state.data.members.filter(m=>m.status==='active'&&visibleGroupIds.has(String(m.group_id)));
+  const selected=members.find(m=>String(m.id)===String(memberId));
+  modal({
+    title:'Record Loan Deposit',
+    body:`<div class="helper" style="margin-bottom:14px">Use this when a client pays toward a future loan before the loan is issued. It remains separate from ordinary savings and will be attached to the client’s next approved loan.</div>
+      <div class="field"><label>Client *</label>
+        <input id="preloan-member-search" list="preloan-members" value="${statementHtml(selected?`${selected.full_name} — ${selected.phone||selected.national_id||''}`:'')}" placeholder="Search name, phone or ID" autocomplete="off" />
+        <datalist id="preloan-members">${members.map(m=>`<option value="${statementHtml(m.full_name)} — ${statementHtml(m.phone||m.national_id||'No phone')}"></option>`).join('')}</datalist>
+      </div>
+      <div class="field"><label>Deposit amount (KES) *</label><input type="number" id="preloan-amount" min="1" step="0.01" /></div>
+      <div class="field"><label>Date *</label><input type="date" id="preloan-date" value="${todayISO()}" max="${todayISO()}" /></div>
+      <div class="field"><label>Reference or note</label><input id="preloan-note" placeholder="Receipt number or collection note" /></div>`,
+    actions:[
+      {label:'Cancel',cls:'btn-outline',onClick:closeModal},
+      {label:'Save Loan Deposit',cls:'btn-primary',onClick:async()=>{
+        if(!(await ensureFreshToken())) return;
+        const query=String(document.getElementById('preloan-member-search')?.value||'').trim().toLowerCase();
+        const member=members.find(m=>query===`${String(m.full_name||'').trim().toLowerCase()} — ${String(m.phone||m.national_id||'no phone').trim().toLowerCase()}`)
+          || members.find(m=>String(m.full_name||'').trim().toLowerCase()===query)
+          || members.find(m=>normalisePhone(m.phone||'')===normalisePhone(query));
+        const amount=Number(document.getElementById('preloan-amount')?.value||0);
+        const paymentDate=document.getElementById('preloan-date')?.value||todayISO();
+        const note=document.getElementById('preloan-note')?.value?.trim()||null;
+        if(!member) return toast('Select a registered client from the search list.','error');
+        if(amount<=0) return toast('Enter a valid deposit amount.','error');
+        const {data,error}=await sb.rpc('pb_record_preloan_deposit',{p_member_id:String(member.id),p_amount:amount,p_payment_date:paymentDate,p_note:note});
+        if(error){
+          const hint=/could not find the function|does not exist/i.test(error.message||'')?' Run the new Wamama sold-form SQL setup first.':'';
+          return toast('Loan deposit failed: '+error.message+hint,'error');
+        }
+        await refreshExcessRelatedData();
+        audit('preloan_deposit','pb_excess_payments',data?.id||null,null,{member_id:member.id,amount,payment_date:paymentDate});
+        closeModal(); render(); toast(`${KES(amount)} saved in ${member.full_name}'s loan deposit account.`,'success');
+      }}
+    ]
+  });
 }
 
 /* =====================================================================
