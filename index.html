@@ -1699,6 +1699,21 @@ function findDuplicatePendingLoanIds(rows){
     (l.start_date||l.created_at||'').slice(0,10)
   ]));
 }
+function groupPendingSoldItemLoans(rows){
+  const groups=new Map();
+  (rows||[]).forEach(loan=>{
+    const key=`${loan.order_id||loan.id}|${loan.member_id||loan.id}`;
+    if(!groups.has(key)) groups.set(key,{
+      key, order_id:loan.order_id||'', member_id:loan.member_id||'', loans:[]
+    });
+    groups.get(key).loans.push(loan);
+  });
+  return [...groups.values()].sort((a,b)=>{
+    const ad=String(a.loans[0]?.created_at||a.loans[0]?.start_date||'');
+    const bd=String(b.loans[0]?.created_at||b.loans[0]?.start_date||'');
+    return bd.localeCompare(ad);
+  });
+}
 function findDuplicatePendingRepaymentIds(rows){
   const pending = (rows||[]).filter(r=>r.status==='pending' && isClientRepayment(r));
   return keepFirstDuplicateIds(pending, r=>duplicateKey([
@@ -1783,23 +1798,31 @@ function pageApprovals(){
       l.order_id && (d.orders||[]).find(o => o.id === l.order_id && (()=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } })())
     );
     const duplicateIds = findDuplicatePendingLoanIds(list);
-    sections.push({title:'Sold Items Loans awaiting approval', count:list.length, rows: list.map(l=>{
-      const mem = (d.members||[]).find(x=>x.id===l.member_id);
-      const g   = (d.groups||[]).find(x=>x.id===l.group_id);
-      const isDup = duplicateIds.includes(l.id);
+    const grouped=groupPendingSoldItemLoans(list);
+    sections.push({title:`Sold Items Forms awaiting approval (${list.length} item loan${list.length!==1?'s':''})`, count:grouped.length, rows: grouped.map(entry=>{
+      const loans=entry.loans;
+      const first=loans[0];
+      const mem = (d.members||[]).find(x=>x.id===entry.member_id);
+      const g   = (d.groups||[]).find(x=>x.id===first.group_id);
+      const principal=loans.reduce((sum,l)=>sum+Number(l.loan_value||0),0);
+      const weekly=loans.reduce((sum,l)=>sum+Number(l.weekly_installment||0),0);
+      const itemNames=loans.map(l=>`${l.asset_name||'Item'}${Number(l.asset_quantity||1)>1?` x${Number(l.asset_quantity||1)}`:''}`);
+      const hasDup=loans.some(l=>duplicateIds.includes(l.id));
       return `<tr>
-        <td><b>${mem?.full_name||l.asset_name||'—'}</b><div class="muted" style="font-size:11px">${l.asset_name}</div></td>
+        <td><b>${statementHtml(mem?.full_name||'Client not linked')}</b>
+          <div class="muted" style="font-size:11px">${loans.length} item loan${loans.length!==1?'s':''}: ${statementHtml(itemNames.join(', '))}</div>
+          ${hasDup?'<span class="badge b-yellow" style="margin-top:4px">Possible identical duplicate</span>':''}</td>
         <td>${g?.name||'—'}</td>
-        <td class="num">${KES(l.loan_value)}</td>
-        <td class="num">${KES(l.weekly_installment)}/wk</td>
-        <td>${fmtDate(l.start_date)}</td>
+        <td class="num">${KES(principal)}</td>
+        <td class="num">${KES(weekly)}/wk</td>
+        <td>${fmtDate(first.start_date)}</td>
         <td style="text-align:right">
-          <button class="btn btn-sm btn-outline" onclick="reviewSoldItemsLoan('${l.id}')">Review</button>
-          <button class="btn btn-sm btn-primary" onclick="approveSoldItemsLoan('${l.id}',this)">Approve</button>
-          <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectSoldItemsLoan('${l.id}')">Reject</button>
+          <button class="btn btn-sm btn-outline" onclick="reviewSoldItemsLoanGroup('${entry.order_id}','${entry.member_id}')">Review items</button>
+          <button class="btn btn-sm btn-primary" onclick="approveSoldItemsLoanGroup('${entry.order_id}','${entry.member_id}',this)">Approve all</button>
+          <button class="btn btn-sm btn-outline" style="margin-left:4px;color:var(--danger);border-color:var(--danger)" onclick="rejectSoldItemsLoanGroup('${entry.order_id}','${entry.member_id}')">Reject all</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="6" class="muted" style="padding:16px;text-align:center">No pending sold items loans</td></tr>`,
-    head:'<th>Client / Asset</th><th>Group</th><th class="num">Principal</th><th class="num">Weekly</th><th>Start date</th><th></th>',
+    head:'<th>Client / Items</th><th>Group</th><th class="num">Combined principal</th><th class="num">Combined weekly</th><th>Start date</th><th></th>',
     action: duplicateIds.length ? `<button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingLoans()">Reject duplicate loans (${duplicateIds.length})</button>` : ''});
   }
 
@@ -1852,6 +1875,98 @@ function pageApprovals(){
       </div>`).join('')}
     ${sections.length===0?`<div class="card" style="padding:24px;text-align:center"><p class="muted">Your role has no approval queues assigned.</p></div>`:''}
   `;
+}
+function soldItemsLoanGroup(orderId,memberId){
+  return state.data.loans.filter(l=>
+    String(l.order_id||'')===String(orderId||'') &&
+    String(l.member_id||'')===String(memberId||'') &&
+    ['pending','active'].includes(String(l.status||'').toLowerCase())
+  );
+}
+function reviewSoldItemsLoanGroup(orderId,memberId){
+  const loans=soldItemsLoanGroup(orderId,memberId);
+  if(!loans.length) return toast('This sold-items application is no longer pending.','warn');
+  const member=state.data.members.find(x=>String(x.id)===String(memberId));
+  const group=state.data.groups.find(x=>String(x.id)===String(loans[0].group_id));
+  const officer=state.data.staff.find(x=>String(x.id)===String(loans[0].officer_id));
+  const issues=[];
+  if(!member) issues.push('Client is not linked');
+  if(!group) issues.push('Group is not linked');
+  const required=new Map();
+  loans.forEach(loan=>{
+    if(!loan.asset_id) issues.push(`${loan.asset_name||'An item'} is not linked to inventory`);
+    const qty=Math.max(1,Number(loan.asset_quantity||1));
+    required.set(String(loan.asset_id||''),(required.get(String(loan.asset_id||''))||0)+qty);
+  });
+  required.forEach((qty,assetId)=>{
+    const asset=state.data.inventory.find(x=>String(x.id)===assetId);
+    if(!asset) return;
+    if(Number(asset.stock||0)<qty) issues.push(`Insufficient stock for ${asset.name}: available ${Number(asset.stock||0)}, required ${qty}`);
+  });
+  const principal=loans.reduce((sum,l)=>sum+Number(l.loan_value||0),0);
+  const payable=loans.reduce((sum,l)=>sum+Number(l.total_payable||0),0);
+  const weekly=loans.reduce((sum,l)=>sum+Number(l.weekly_installment||0),0);
+  modal({
+    title:'Review Client Sold Items Form',size:'lg',
+    body:`${issues.length?`<div class="notice notice-danger"><b>Approval blocked:</b> ${statementHtml(issues.join('; '))}</div>`:''}
+      <div class="grid-2" style="margin-bottom:14px">
+        <div><span class="muted">Client</span><div><b>${statementHtml(member?.full_name||'Not linked')}</b></div><div class="muted">${statementHtml(member?.phone||'No phone')}</div></div>
+        <div><span class="muted">Group / Officer</span><div><b>${statementHtml(group?.name||'Not linked')}</b></div><div class="muted">${statementHtml(officer?.full_name||'No officer')}</div></div>
+      </div>
+      <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Item loan</th><th class="num">Qty</th><th class="num">Principal</th><th class="num">Total payable</th><th class="num">Weekly</th><th>Status</th></tr></thead>
+      <tbody>${loans.map(l=>`<tr><td><b>${statementHtml(l.asset_name||'Item')}</b></td><td class="num">${Number(l.asset_quantity||1)}</td><td class="num">${KES(l.loan_value||0)}</td><td class="num">${KES(l.total_payable||0)}</td><td class="num">${KES(l.weekly_installment||0)}</td><td><span class="badge ${l.status==='active'?'b-green':'b-yellow'}">${statementHtml(l.status)}</span></td></tr>`).join('')}</tbody>
+      <tfoot><tr style="font-weight:700;background:var(--surface-2)"><td>Combined totals</td><td class="num">${loans.reduce((sum,l)=>sum+Number(l.asset_quantity||1),0)}</td><td class="num">${KES(principal)}</td><td class="num">${KES(payable)}</td><td class="num">${KES(weekly)}</td><td></td></tr></tfoot></table></div>
+      <div class="notice notice-info" style="margin-top:12px">This appears as one application for review, but every item remains a separate loan with its own balance and repayment schedule.</div>`,
+    actions:[
+      {label:'Close',cls:'btn-outline',onClick:closeModal},
+      ...(!issues.length&&loans.some(l=>l.status==='pending')?[{label:'Approve all items',cls:'btn-primary',onClick:async()=>{closeModal();await approveSoldItemsLoanGroup(orderId,memberId);}}]:[]),
+      ...(loans.some(l=>l.status==='pending')?[{label:'Reject all',cls:'btn-danger',onClick:()=>{closeModal();rejectSoldItemsLoanGroup(orderId,memberId);}}]:[])
+    ]
+  });
+}
+async function approveSoldItemsLoanGroup(orderId,memberId,btn){
+  if(btn){btn.disabled=true;btn.textContent='Approving...';}
+  if(!(await ensureFreshToken())){if(btn){btn.disabled=false;btn.textContent='Approve all';}return;}
+  const {data,error}=await sb.rpc('pb_approve_sold_items_loan_group',{
+    p_order_id:String(orderId),p_member_id:String(memberId)
+  });
+  if(error){
+    if(btn){btn.disabled=false;btn.textContent='Approve all';}
+    const hint=/could not find the function|does not exist/i.test(error.message||'')?' Run the new grouped-loans SQL setup first.':'';
+    return toast('Approval failed: '+error.message+hint,'error');
+  }
+  const approvedIds=data?.approved_loan_ids||[];
+  state.data.loans.filter(l=>approvedIds.includes(String(l.id))).forEach(l=>l.status='active');
+  (data?.stock_updates||[]).forEach(update=>{
+    const asset=state.data.inventory.find(a=>String(a.id)===String(update.asset_id));
+    if(asset) asset.stock=Number(update.stock_remaining||0);
+  });
+  const order=state.data.orders.find(o=>String(o.id)===String(orderId));
+  if(order&&data?.order_status) order.status=data.order_status;
+  audit('approve_sold_items_loan_group','pb_orders',orderId,null,{member_id:memberId,loan_ids:approvedIds});
+  render();
+  toast(`${approvedIds.length} item loan${approvedIds.length!==1?'s':''} approved for one client application.`,'success');
+}
+async function rejectSoldItemsLoanGroup(orderId,memberId){
+  const pending=soldItemsLoanGroup(orderId,memberId).filter(l=>l.status==='pending');
+  if(!pending.length) return toast('There are no pending item loans to reject.','warn');
+  confirmDialog(`Reject all ${pending.length} pending item loans in this client application?`,async()=>{
+    if(!(await ensureFreshToken())) return;
+    const ids=pending.map(l=>l.id);
+    const {error}=await sb.from('pb_loans').update({status:'cancelled'}).in('id',ids).eq('status','pending');
+    if(error) return toast('Reject failed: '+error.message,'error');
+    pending.forEach(l=>l.status='cancelled');
+    await sb.from('pb_repayments').update({status:'cancelled'}).in('loan_id',ids).eq('status','pending');
+    state.data.repayments.filter(r=>ids.includes(r.loan_id)&&r.status==='pending').forEach(r=>r.status='cancelled');
+    const orderLoans=state.data.loans.filter(l=>String(l.order_id||'')===String(orderId));
+    if(!orderLoans.some(l=>l.status==='pending')){
+      await sb.from('pb_orders').update({status:'cancelled'}).eq('id',orderId);
+      const order=state.data.orders.find(o=>String(o.id)===String(orderId));
+      if(order) order.status='cancelled';
+    }
+    audit('reject_sold_items_loan_group','pb_orders',orderId,null,{member_id:memberId,loan_ids:ids});
+    render();toast('Client item loans rejected.','warn');
+  },{title:'Reject client sold-items application',danger:true});
 }
 function reviewSoldItemsLoan(loanId){
   const loan=state.data.loans.find(x=>String(x.id)===String(loanId));
@@ -2824,7 +2939,7 @@ function pageMembers(){
           ${paged.map(m => {
             const g  = state.data.groups.find(x=>x.id===m.group_id);
             const sv = memberSavings(m.id);
-            const ln = memberLoan(m.id);
+            const activeMemberLoans = state.data.loans.filter(l=>l.member_id===m.id&&l.status==='active');
             const isDup = isDuplicateMember(m);
             const safeDup = isSafeEmptyDuplicateMember(m);
             const isPending  = m.status === 'pending';
@@ -2848,7 +2963,7 @@ function pageMembers(){
               <td class="num">${KES(sv)}</td>
               <td>${statusBadge}${isPending&&canApprove?` <button class="btn btn-sm btn-primary" style="margin-left:6px;font-size:11px;padding:2px 8px" onclick="event.stopPropagation();approveMemberReg('${m.id}',this)">Approve</button>`:''}
               </td>
-              <td>${ln?'<span class="badge b-blue">Active loan</span>':'<span class="badge b-grey">None</span>'}</td>
+              <td>${activeMemberLoans.length?`<span class="badge b-blue">${activeMemberLoans.length} active loan${activeMemberLoans.length!==1?'s':''}</span>`:'<span class="badge b-grey">None</span>'}</td>
               <td onclick="event.stopPropagation()"><button class="act-btn" onclick="memberActions(event,'${m.id}')">···</button></td>
             </tr>`;
           }).join('') || `<tr><td colspan="7"><div class="empty"><h4>No members found</h4><p>${filterStatus==='pending'?'No clients awaiting approval.':'Register a member to one of your active groups.'}</p></div></td></tr>`}
@@ -3437,7 +3552,9 @@ function pageMemberProfile(){
   const guars = state.data.guarantors.filter(x=>x.member_id===m.id);
   const sv = state.data.savings.filter(x=>x.member_id===m.id).sort((a,b)=>b.meeting_date.localeCompare(a.meeting_date));
   const totalSv = sv.filter(s=>s.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0);
-  const ln = memberLoan(m.id);
+  const activeMemberLoans = state.data.loans.filter(l=>l.member_id===m.id&&l.status==='active');
+  const activeLoanPrincipal = activeMemberLoans.reduce((sum,l)=>sum+Number(l.loan_value||0),0);
+  const activeLoanOutstanding = activeMemberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-loanPaid(l.id)),0);
   const allLoans = state.data.loans.filter(l=>l.member_id===m.id).sort((a,b)=>new Date(b.start_date)-new Date(a.start_date));
   const orders = state.data.orders.filter(o=>o.member_id===m.id).sort((a,b)=>new Date(b.ordered_on)-new Date(a.ordered_on));
   const repayments = state.data.repayments.filter(r=>r.member_id===m.id).sort((a,b)=>b.meeting_date.localeCompare(a.meeting_date));
@@ -3467,7 +3584,7 @@ function pageMemberProfile(){
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
       <div class="kpi k-success"><div class="l">Total savings</div><div class="v">${KES(totalSv)}</div><div class="d">${memberEligible(m.id)?'<span class="badge b-green">Eligible</span>':'<span class="badge b-grey">Below threshold</span>'}${sv.filter(s=>s.status==='pending').length>0?`<span class="badge b-yellow" style="margin-left:4px">${sv.filter(s=>s.status==='pending').length} pending</span>`:''}</div></div>
-      <div class="kpi k-primary"><div class="l">Active loan</div><div class="v">${ln?KES(ln.loan_value):'—'}</div><div class="d">${ln?'Outstanding '+KES(Number(ln.total_payable)-loanPaid(ln.id)):'No active loan'}</div></div>
+      <div class="kpi k-primary"><div class="l">Active loans</div><div class="v">${activeMemberLoans.length?KES(activeLoanPrincipal):'—'}</div><div class="d">${activeMemberLoans.length?`${activeMemberLoans.length} loan${activeMemberLoans.length!==1?'s':''} · Outstanding ${KES(activeLoanOutstanding)}`:'No active loan'}</div></div>
       <div class="kpi"><div class="l">Total repaid</div><div class="v">${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}</div><div class="d">${repayments.filter(r=>r.status!=='pending').length} approved entries${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning)">${repayments.filter(r=>r.status==='pending').length} pending</span>`:''}</div></div>
       <div class="kpi k-warn"><div class="l">Member since</div><div class="v" style="font-size:16px">${fmtDate(m.registered_on)}</div></div>
     </div>
@@ -7156,18 +7273,20 @@ function siAddRow(){
 function siAddItemForClient(i){
   const source=_soldItems[i];
   if(!source?.member_id) return toast('Select a registered client first.','warn');
-  const next=_soldItems.length+1;
-  _soldItems.push({
-    sr:next,
+  let insertAt=i+1;
+  while(insertAt<_soldItems.length&&String(_soldItems[insertAt].member_id||'')===String(source.member_id)) insertAt++;
+  _soldItems.splice(insertAt,0,{
+    sr:insertAt+1,
     member_id:source.member_id,
     client_name:source.client_name,
     phone:source.phone,
     asset_id:'', product:'', quantity:1, stock:0, loan_amount:'',
     loan_term:source.loan_term||'', loan_no:''
   });
+  _soldItems.forEach((r,idx)=>r.sr=idx+1);
   renderSoldItemsRows();
   setTimeout(()=>{
-    const product=document.querySelector(`[data-si="${_soldItems.length-1}"][data-f="product"]`);
+    const product=document.querySelector(`[data-si="${insertAt}"][data-f="product"]`);
     product?.scrollIntoView({behavior:'smooth',block:'nearest'});
     product?.focus();
   },30);
@@ -7190,6 +7309,7 @@ function renderSoldItemsRows(){
   let totalPrincipal=0, totalCharge=0, totalInterest=0, totalPayable=0;
 
   tbody.innerHTML = _soldItems.map((row, i)=>{
+    const isAdditional=i>0&&row.member_id&&String(_soldItems[i-1].member_id||'')===String(row.member_id);
     const principal = Number(String(row.loan_amount).replace(/,/g,''))||0;
     const weeks     = parseInt(row.loan_term)||0;
     const months    = weeks / 4;
@@ -7198,16 +7318,18 @@ function renderSoldItemsRows(){
     const payable   = principal + charge + interest;
     totalPrincipal += principal; totalCharge += charge; totalInterest += interest; totalPayable += payable;
 
-    return `<tr id="si-row-${i}" style="${i%2===1?'background:var(--surface-2)':''}">
+    return `<tr id="si-row-${i}" style="${isAdditional?'background:var(--primary-50);box-shadow:inset 3px 0 0 var(--primary)':i%2===1?'background:var(--surface-2)':''}">
       <td style="text-align:center;color:var(--text-muted);font-size:11px">${row.sr}.</td>
-      <td style="position:relative"><input style="min-width:165px;font-size:12px" data-si="${i}" data-f="client_name"
+      <td style="position:relative">${isAdditional
+        ? `<div style="min-width:165px;padding:7px 8px"><b style="color:var(--primary)">Additional item</b><div class="muted" style="font-size:10px">${statementHtml(row.client_name)}</div></div>`
+        : `<input style="min-width:165px;font-size:12px" data-si="${i}" data-f="client_name"
         value="${statementHtml(row.client_name)}" placeholder="Search name, phone or ID" autocomplete="off" list="si-members-${i}"
         oninput="siSaveField(${i},'client_name',this.value)" onchange="siResolveClient(${i},this.value)" />
         <datalist id="si-members-${i}">${soldFormMemberOptions().map(m=>`<option value="${statementHtml(m.full_name)} — ${statementHtml(m.phone||m.national_id||'No phone')}"></option>`).join('')}</datalist>
-        <div id="si-match-${i}" style="font-size:10px;margin-top:2px">${row.member_id?'<span style="color:var(--success)">Client linked</span>':''}</div>
+        <div id="si-match-${i}" style="font-size:10px;margin-top:2px">${row.member_id?'<span style="color:var(--success)">Client linked</span>':''}</div>`}
       </td>
       <td>
-        <input style="width:110px;font-size:12px;background:var(--surface-2)" value="${statementHtml(row.phone)}" placeholder="Auto-filled" readonly />
+        ${isAdditional?'<span class="muted" style="font-size:11px">Same client</span>':`<input style="width:110px;font-size:12px;background:var(--surface-2)" value="${statementHtml(row.phone)}" placeholder="Auto-filled" readonly />`}
       </td>
       <td><input style="min-width:165px;font-size:12px" data-si="${i}" data-f="product"
         value="${statementHtml(row.product)}" placeholder="Search inventory" autocomplete="off" list="si-assets-${i}"
