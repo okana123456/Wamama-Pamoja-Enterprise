@@ -122,6 +122,13 @@ begin
           and ep.source = 'scheduled_prepayment'
           and ep.payment_date < due_row.due_date
           and ep.excess_amount > coalesce(ep.released_amount, 0)
+          and not exists (
+            select 1
+            from public.pb_prepayment_releases existing_release
+            where existing_release.prepayment_id = ep.id::text
+              and existing_release.loan_id = loan_row.id::text
+              and existing_release.due_date = due_row.due_date
+          )
           and (
             ep.loan_id = loan_row.id::text
             or not exists (
