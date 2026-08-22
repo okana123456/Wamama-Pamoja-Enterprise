@@ -996,10 +996,13 @@ async function smartLoadAll(){
       if(!refreshErr && refreshed.session) state.session = refreshed.session;
     }
   }
-  // Release only the instalments that have become due from advance loan payments.
-  // The database function is idempotent, so refreshing cannot duplicate a release.
+  // Release a small background batch of due advance payments. Repayment approvals
+  // use a targeted call below, so loading the app never scans the whole loan book.
   if(navigator.onLine && state.staff?.business_id){
-    const { error:prepaymentReleaseError } = await sb.rpc('pb_release_due_prepayments');
+    const { error:prepaymentReleaseError } = await sb.rpc('pb_release_due_prepayments',{
+      p_loan_ids:null,
+      p_limit:20
+    });
     if(prepaymentReleaseError && !/could not find the function|does not exist/i.test(prepaymentReleaseError.message||'')){
       console.warn('Could not release due loan prepayments',prepaymentReleaseError);
     }
@@ -9377,7 +9380,10 @@ async function approveRepaymentBatch(ids){
     if(error){ failures.push({id,message:error.message}); continue; }
     if(data?.[0]) approvedRows.push(data[0]);
   }
-  const {error:releaseError}=await sb.rpc('pb_release_due_prepayments');
+  const affectedLoanIds=[...new Set(approvedRows.map(row=>String(row.loan_id||'')).filter(Boolean))];
+  const {error:releaseError}=affectedLoanIds.length
+    ? await sb.rpc('pb_release_due_prepayments',{p_loan_ids:affectedLoanIds,p_limit:50})
+    : {error:null};
   if(releaseError&&!/could not find the function|does not exist/i.test(releaseError.message||'')){
     console.warn('Could not release due loan deposits after approval',releaseError);
   }
