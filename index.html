@@ -1631,7 +1631,14 @@ function go(view, ctx=null){
     toast('You do not have access to that section.','error');
     return;
   }
-  state.view = view; state.viewCtx = ctx; toggleSidebar(false); render();
+  state.view = view;
+  state.viewCtx = ctx;
+  try{
+    sessionStorage.setItem('pb_restore_view', view);
+    sessionStorage.setItem('pb_restore_ctx', JSON.stringify(ctx||null));
+  }catch{}
+  toggleSidebar(false);
+  render();
 }
 function toggleSidebar(force){
   const s = $('sidebar'), sc = $('scrim');
@@ -1678,6 +1685,28 @@ function keepFirstDuplicateIds(rows, keyFn){
   });
   return dupIds;
 }
+
+function rapidDuplicateIds(rows, keyFn, windowMs=120000){
+  const groups = new Map();
+  (rows||[]).forEach(row=>{
+    const key = keyFn(row);
+    const created = Date.parse(row.created_at||'');
+    if(!key || !Number.isFinite(created)) return;
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({row, created});
+  });
+  const duplicateIds = [];
+  groups.forEach(entries=>{
+    entries.sort((a,b)=>a.created-b.created || String(a.row.id).localeCompare(String(b.row.id)));
+    let keeper = entries[0];
+    for(let i=1;i<entries.length;i++){
+      const current = entries[i];
+      if(current.created-keeper.created <= windowMs) duplicateIds.push(current.row.id);
+      else keeper = current;
+    }
+  });
+  return duplicateIds;
+}
 function findDuplicatePendingSavingIds(rows){
   const pending = (rows||[]).filter(s=>s.status==='pending');
   return keepFirstDuplicateIds(pending, s=>duplicateKey([
@@ -1716,7 +1745,7 @@ function groupPendingSoldItemLoans(rows){
 }
 function findDuplicatePendingRepaymentIds(rows){
   const pending = (rows||[]).filter(r=>r.status==='pending' && isClientRepayment(r));
-  return keepFirstDuplicateIds(pending, r=>duplicateKey([
+  return rapidDuplicateIds(pending, r=>duplicateKey([
     r.member_id,
     r.loan_id,
     r.group_id,
@@ -3744,7 +3773,7 @@ function pageMemberProfile(){
             <h3>Repayment history</h3>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <div class="sub">Approved total: ${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
-              ${ln ? `<button class="btn btn-sm btn-primary" onclick="openStandaloneRepayment('${ln.id}','${m.id}')">Record Repayment</button>` : ''}
+              ${activeMemberLoans.length ? `<button class="btn btn-sm btn-primary" onclick="openMemberRepayment('${m.id}')">Record Repayment</button>` : ''}
               <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Loan Deposit</button>
             </div>
           </div>
@@ -10066,6 +10095,30 @@ function downloadCollectionSheet(targetDate, officerFilter){
 /* =====================================================================
  * FEATURE 3: STANDALONE REPAYMENT ENTRY
  * ===================================================================== */
+function openMemberRepayment(memberId){
+  const member = state.data.members.find(m=>String(m.id)===String(memberId));
+  const loans = state.data.loans.filter(loan=>
+    String(loan.member_id)===String(memberId) && loan.status==='active'
+  );
+  if(!loans.length){
+    toast('This member has no active loan to repay.','warn');
+    return;
+  }
+  if(loans.length===1){
+    openStandaloneRepayment(loans[0].id, memberId);
+    return;
+  }
+  modal({
+    title:'Select loan to repay',
+    body:`<div class="helper" style="margin-bottom:12px">${statementHtml(member?.full_name||'Member')} has ${loans.length} active loans. Select the exact loan receiving this payment.</div>
+      <div style="display:grid;gap:8px">${loans.map(loan=>{
+        const balance=Math.max(0,Number(loan.total_payable||0)-loanPaid(loan.id));
+        return `<button type="button" class="btn btn-outline" style="display:flex;justify-content:space-between;gap:12px;text-align:left" onclick="closeModal();openStandaloneRepayment('${loan.id}','${memberId}')"><span><b>${statementHtml(loan.asset_name||'Loan')}</b><br><small>Started ${fmtDate(loan.start_date)}</small></span><span style="white-space:nowrap"><small>Balance</small><br><b>${KES(balance)}</b></span></button>`;
+      }).join('')}</div>`,
+    actions:[{label:'Cancel',cls:'btn-outline',onClick:closeModal}]
+  });
+}
+
 function openStandaloneRepayment(loanId, memberId){
   const ln = state.data.loans.find(l => l.id === loanId);
   const mem = state.data.members.find(m => m.id === (memberId || ln?.member_id));
@@ -10147,6 +10200,9 @@ function openStandaloneRepayment(loanId, memberId){
     ]
   });
 }
+
+window.openMemberRepayment = openMemberRepayment;
+window.openStandaloneRepayment = openStandaloneRepayment;
 
 function srCalcSplit(ir,loanId){
   const amount = Number(document.getElementById('sr-amount')?.value) || 0;
