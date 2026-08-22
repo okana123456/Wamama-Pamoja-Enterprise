@@ -18,21 +18,24 @@ function_rows as (
   select
     n.nspname as schema_name,
     p.proname as function_name,
-    pg_get_function_identity_arguments(p.oid) as arguments,
+    oidvectortypes(p.proargtypes) as arguments,
+    l.lanname as language_name,
     p.prosecdef as security_definer,
     case p.provolatile
       when 'i' then 'immutable'
       when 's' then 'stable'
       else 'volatile'
     end as volatility,
-    pg_get_functiondef(p.oid) as definition
+    p.prosrc as definition
   from pg_proc p
   join pg_namespace n on n.oid = p.pronamespace
+  join pg_language l on l.oid = p.prolang
   where n.nspname = 'public'
+    and p.prokind = 'f'
     and (
-      pg_get_functiondef(p.oid) ilike '%pb_staff%'
-      or pg_get_functiondef(p.oid) ilike '%auth.uid()%'
-      or pg_get_functiondef(p.oid) ilike '%business_id%'
+      p.prosrc ilike '%pb_staff%'
+      or p.prosrc ilike '%auth.uid()%'
+      or p.prosrc ilike '%business_id%'
     )
 ),
 index_rows as (
