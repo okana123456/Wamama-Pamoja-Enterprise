@@ -980,6 +980,20 @@ async function loadBusinessTableOptimized(table){
   return result;
 }
 
+async function loadOptimizedTablesWithLimit(tables, concurrency=4){
+  const results=new Array(tables.length);
+  let nextIndex=0;
+  async function worker(){
+    while(nextIndex<tables.length){
+      const index=nextIndex++;
+      results[index]=await loadBusinessTableOptimized(tables[index]);
+    }
+  }
+  const workerCount=Math.min(Math.max(1,concurrency),tables.length);
+  await Promise.all(Array.from({length:workerCount},()=>worker()));
+  return results;
+}
+
 async function hydrateDataFromFinancialCache(tables,map){
   const cachedResults=await Promise.all(tables.map(table=>readFinancialCache(table)));
   let cacheHits=0;
@@ -1037,21 +1051,44 @@ async function smartLoadAll(){
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
   const cacheHits=await hydrateDataFromFinancialCache(tables,map);
   if(!cacheHits){ state.loading=true; render(); }
-  const results = await Promise.all(tables.map(t => loadBusinessTableOptimized(t)));
   let jwtBroken = false;
-  results.forEach((r,i) => {
-    if(!r.error){
-      state.data[map[tables[i]]] = r.data || [];
-      cacheDataKey(map[tables[i]], r.data || []);
-    } else {
-      if(!jwtBroken && r.error.message && /jwt|unauthorized|401/i.test(r.error.message)){
-        jwtBroken = true;
-        toast('Authentication error loading data. Please sign in again.', 'error');
-        sb.auth.signOut().then(()=>{ state.session=null; state.staff=null; state.perms=null; render(); });
+  const historyTables=new Set(['pb_savings','pb_repayments','pb_excess_payments']);
+  const stages=[
+    tables.filter(table=>!historyTables.has(table)),
+    tables.filter(table=>historyTables.has(table))
+  ];
+
+  for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
+    const stageTables=stages[stageIndex];
+    const results=await loadOptimizedTablesWithLimit(stageTables,stageIndex===0?4:2);
+    results.forEach((r,i)=>{
+      const table=stageTables[i];
+      const key=map[table];
+      if(!r.error){
+        state.data[key]=r.data||[];
+        cacheDataKey(key,r.data||[]);
+      }else{
+        if(!jwtBroken && r.error.message && /jwt|unauthorized|401/i.test(r.error.message)){
+          jwtBroken=true;
+          toast('Authentication error loading data. Please sign in again.','error');
+          sb.auth.signOut().then(()=>{ state.session=null; state.staff=null; state.perms=null; render(); });
+        }
+        state.data[key]=readCachedDataKey(key);
       }
-      state.data[map[tables[i]]] = readCachedDataKey(map[tables[i]]);
+    });
+
+    // On a new device, make the operational screens usable before the much
+    // larger savings and repayment histories finish their first local sync.
+    if(stageIndex===0 && !cacheHits && !jwtBroken){
+      state.data.purchases.forEach(p=>{
+        p.items=state.data.purchaseLines.filter(line=>line.purchase_id===p.id);
+      });
+      applySupervisorDataScope();
+      state.loading=false;
+      render();
+      setBanner('Core records are ready. Financial history is synchronising.');
     }
-  });
+  }
   // Fix 1: Reconstruct purchase items from purchase lines after page reload
   // Without this, p.items is undefined on reload (it only exists in-memory right after creation)
   if(!jwtBroken){
@@ -1061,6 +1098,7 @@ async function smartLoadAll(){
     applySupervisorDataScope();
     state.loading = false;
     render();
+    if(!cacheHits) setBanner('All records are up to date.','online');
     releaseDuePrepaymentsInBackground();
   }
 }
