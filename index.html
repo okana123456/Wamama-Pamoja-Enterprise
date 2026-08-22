@@ -343,7 +343,7 @@ const INCREMENTAL_CACHE_TABLES = new Set([
 ]);
 const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
 const FINANCIAL_CACHE_VERSION = 1;
-const INCREMENTAL_FULL_SYNC_MS = 14 * 24 * 60 * 60 * 1000;
+const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const INCREMENTAL_FALLBACK_DAYS = 3;
 
@@ -980,6 +980,43 @@ async function loadBusinessTableOptimized(table){
   return result;
 }
 
+async function hydrateDataFromFinancialCache(tables,map){
+  const cachedResults=await Promise.all(tables.map(table=>readFinancialCache(table)));
+  let cacheHits=0;
+  tables.forEach((table,index)=>{
+    const key=map[table];
+    const cached=cachedResults[index];
+    if(cached && Array.isArray(cached.rows)){
+      state.data[key]=cached.rows;
+      cacheHits++;
+    }else{
+      state.data[key]=[];
+    }
+  });
+  if(cacheHits){
+    state.data.purchases.forEach(p=>{
+      p.items=state.data.purchaseLines.filter(line=>line.purchase_id===p.id);
+    });
+    applySupervisorDataScope();
+    state.loading=false;
+    render();
+  }
+  return cacheHits;
+}
+
+function releaseDuePrepaymentsInBackground(){
+  if(!navigator.onLine || !state.staff?.business_id) return;
+  setTimeout(async()=>{
+    const {error}=await sb.rpc('pb_release_due_prepayments',{
+      p_loan_ids:null,
+      p_limit:10
+    });
+    if(error && !/could not find the function|does not exist/i.test(error.message||'')){
+      console.warn('Could not release due loan prepayments',error);
+    }
+  },1800);
+}
+
 async function smartLoadAll(){
   // Refresh the token before bulk fetching to avoid 401s on expired sessions
   if(navigator.onLine){
@@ -996,20 +1033,10 @@ async function smartLoadAll(){
       if(!refreshErr && refreshed.session) state.session = refreshed.session;
     }
   }
-  // Release a small background batch of due advance payments. Repayment approvals
-  // use a targeted call below, so loading the app never scans the whole loan book.
-  if(navigator.onLine && state.staff?.business_id){
-    const { error:prepaymentReleaseError } = await sb.rpc('pb_release_due_prepayments',{
-      p_loan_ids:null,
-      p_limit:20
-    });
-    if(prepaymentReleaseError && !/could not find the function|does not exist/i.test(prepaymentReleaseError.message||'')){
-      console.warn('Could not release due loan prepayments',prepaymentReleaseError);
-    }
-  }
-  state.loading = true; render();
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
+  const cacheHits=await hydrateDataFromFinancialCache(tables,map);
+  if(!cacheHits){ state.loading=true; render(); }
   const results = await Promise.all(tables.map(t => loadBusinessTableOptimized(t)));
   let jwtBroken = false;
   results.forEach((r,i) => {
@@ -1033,6 +1060,8 @@ async function smartLoadAll(){
     });
     applySupervisorDataScope();
     state.loading = false;
+    render();
+    releaseDuePrepaymentsInBackground();
   }
 }
 
