@@ -1096,8 +1096,9 @@ async function smartLoadAll(){
       });
       applySupervisorDataScope();
       state.loading=false;
-      render();
-      setBanner('Core records are ready. Financial history is synchronising.');
+      if(cacheHits) scheduleRealtimeRender();
+      else render();
+      setBanner('Core records are ready. Updating recent financial records in the background.');
     }
     await new Promise(resolve=>setTimeout(resolve,0));
   }
@@ -1109,7 +1110,7 @@ async function smartLoadAll(){
     });
     applySupervisorDataScope();
     state.loading = false;
-    render();
+    scheduleRealtimeRender();
     if(!cacheHits) setBanner('All records are up to date.','online');
     releaseDuePrepaymentsInBackground();
   }
@@ -1122,6 +1123,10 @@ function scheduleRealtimeRender(){
   if(realtimeRenderTimer) return;
   realtimeRenderTimer = setTimeout(() => {
     realtimeRenderTimer = null;
+    if(['mem-search','loan-search'].includes(document.activeElement?.id)){
+      scheduleRealtimeRender();
+      return;
+    }
     render();
   }, 500);
 }
@@ -1182,6 +1187,39 @@ function countsInBalance(row){
 }
 function memberSavings(memberId){
   return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
+}
+function buildBalanceIndexes(){
+  const savingsByMember=new Map();
+  const repaymentsByLoan=new Map();
+  for(const saving of state.data.savings||[]){
+    if(!countsInBalance(saving) || !saving.member_id) continue;
+    savingsByMember.set(saving.member_id,(savingsByMember.get(saving.member_id)||0)+Number(saving.amount||0));
+  }
+  for(const repayment of state.data.repayments||[]){
+    if(!countsInBalance(repayment) || !repayment.loan_id) continue;
+    repaymentsByLoan.set(repayment.loan_id,(repaymentsByLoan.get(repayment.loan_id)||0)+Number(repayment.amount||0));
+  }
+  return {savingsByMember,repaymentsByLoan};
+}
+function buildDuplicateMemberIds(members){
+  const ids=new Map(), phones=new Map(), namesInGroup=new Map();
+  const bump=(map,key)=>{ if(key) map.set(key,(map.get(key)||0)+1); };
+  for(const member of members||[]){
+    const id=cleanMemberText(member.national_id);
+    const phone=normalisePhone(member.phone||'');
+    const name=cleanMemberText(member.full_name);
+    bump(ids,id);
+    bump(phones,phone.length>=9?phone:'');
+    bump(namesInGroup,name?`${name}|${member.group_id||''}`:'');
+  }
+  return new Set((members||[]).filter(member=>{
+    const id=cleanMemberText(member.national_id);
+    const phone=normalisePhone(member.phone||'');
+    const name=cleanMemberText(member.full_name);
+    return (id&&(ids.get(id)||0)>1)
+      || (phone.length>=9&&(phones.get(phone)||0)>1)
+      || (name&&(namesInGroup.get(`${name}|${member.group_id||''}`)||0)>1);
+  }).map(member=>String(member.id)));
 }
 function memberLoan(memberId){
   return state.data.loans.find(l=>l.member_id===memberId && l.status==='active');
@@ -2367,25 +2405,34 @@ function pageDashboard(){
 
   const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s));
   const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && countsInBalance(r) && isClientRepayment(r));
+  const {savingsByMember,repaymentsByLoan}=buildBalanceIndexes();
   const totalSavings = savings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRepay = repayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
-  const outstandingBal = activeLoans.reduce((a,l)=>a+(Number(l.total_payable||0)-loanPaid(l.id)),0);
+  const outstandingBal = activeLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
   const interestEarned = repayments.reduce((a,r)=>a+Number(r.interest||0),0);
-  const eligibleCount = state.data.members.filter(m=>memberEligible(m.id)).length;
+  const savingsThreshold=Number(state.settings?.savings_threshold||400);
+  const eligibleCount = state.data.members.filter(m=>(savingsByMember.get(m.id)||0)>=savingsThreshold).length;
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
 
   // Officer performance — active loan officers only
   const officers = state.data.staff.filter(s => ( s.role==='officer' || s.role==='loan_officer') && s.status==='active');
   const todayISO_ = todayISO();
-  const officerPerf = officers.map(o => {
-    const oSav = state.data.savings.filter(s=>s.recorded_by===o.id && inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s)).reduce((a,b)=>a+Number(b.amount||0),0);
-    const oRep = state.data.repayments.filter(r=>r.recorded_by===o.id && inRangeFallback(r.meeting_date||'', r.created_at) && countsInBalance(r) && isClientRepayment(r)).reduce((a,b)=>a+Number(b.amount||0),0);
-    const oLoans = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active').reduce((a,b)=>a+Number(b.loan_value||0),0);
-    const oOrdersToday = state.data.orders.filter(o2=>o2.recorded_by===o.id && (o2.ordered_on||'').slice(0,10)===todayISO_).length;
-    const oLoanValuePeriod = state.data.loans.filter(l=>l.officer_id===o.id && l.status==='active' && inRangeFallback(l.start_date, l.created_at)).reduce((a,b)=>a+Number(b.loan_value||0),0);
-    return { name: o.full_name, savings: oSav, repayments: oRep, loans: oLoans, ordersToday: oOrdersToday, loanValuePeriod: oLoanValuePeriod };
-  }).sort((a,b)=>b.savings-a.savings);
+  const officerStats=new Map(officers.map(o=>[o.id,{name:o.full_name,savings:0,repayments:0,loans:0,ordersToday:0,loanValuePeriod:0}]));
+  savings.forEach(s=>{ const stat=officerStats.get(s.recorded_by); if(stat) stat.savings+=Number(s.amount||0); });
+  repayments.forEach(item=>{ const stat=officerStats.get(item.recorded_by); if(stat) stat.repayments+=Number(item.amount||0); });
+  activeLoans.forEach(l=>{
+    const stat=officerStats.get(l.officer_id);
+    if(!stat) return;
+    stat.loans+=Number(l.loan_value||0);
+    if(inRangeFallback(l.start_date,l.created_at)) stat.loanValuePeriod+=Number(l.loan_value||0);
+  });
+  state.data.orders.forEach(order=>{
+    if((order.ordered_on||'').slice(0,10)!==todayISO_) return;
+    const stat=officerStats.get(order.recorded_by);
+    if(stat) stat.ordersToday+=1;
+  });
+  const officerPerf=[...officerStats.values()].sort((a,b)=>b.savings-a.savings);
 
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
@@ -2500,9 +2547,12 @@ function dashArrFilter(){
   if(rangeVal === '6months') { const d=new Date(now); d.setMonth(d.getMonth()-6); drStart=iso(d); drEnd=today; }
   const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
 
+  const {repaymentsByLoan}=buildBalanceIndexes();
+  const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
+  const staffById=new Map(state.data.staff.map(staff=>[String(staff.id),staff]));
   const activeLoans = state.data.loans.filter(l => l.status === 'active' && l.start_date >= drStart && l.start_date <= drEnd);
   const rows = activeLoans.map(l => {
-    const paid      = loanPaid(l.id);
+    const paid      = repaymentsByLoan.get(l.id)||0;
     const startDate = new Date(l.start_date);
     const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
     const weekly    = Number(l.weekly_installment) || 0;
@@ -2544,8 +2594,8 @@ function dashArrFilter(){
   }
   body.innerHTML = display.map(function(row){
     const l = row.l, arrears = row.arrears, nextDueDate = row.nextDueDate, category = row.category;
-    const mem = state.data.members.find(function(x){ return x.id===l.member_id; });
-    const off = state.data.staff.find(function(x){ return x.id===l.officer_id; });
+    const mem = membersById.get(String(l.member_id));
+    const off = staffById.get(String(l.officer_id));
     const badgeCls = category==='arrears'?'b-red':category==='duetoday'?'b-yellow':'b-green';
     const badgeTxt = category==='arrears'?'In Arrears':category==='duetoday'?'Due Today':'Due Soon';
     return '<tr>'
@@ -2654,7 +2704,9 @@ function pageOfficerDashboard(){
   const me = state.staff;
   const teamView = isSupervisorScoped();
   const myGroups = visiblePortfolioGroupsForCurrentStaff();
-  const myMembers = state.data.members.filter(m=>myGroups.some(g=>g.id===m.group_id));
+  const myGroupIds = new Set(myGroups.map(g=>g.id));
+  const myMembers = state.data.members.filter(m=>myGroupIds.has(m.group_id));
+  const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
   const { start, end } = dashDateRange();
   const inRangeOff = (dateStr, createdAt) => {
     if(!dateStr && !createdAt) return false;
@@ -2665,11 +2717,11 @@ function pageOfficerDashboard(){
   };
   const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
   const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsInBalance(r) && isClientRepayment(r));
-  const myGroupIds = new Set(myGroups.map(g=>g.id));
+  const {repaymentsByLoan}=buildBalanceIndexes();
   const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRp = myRepay.reduce((a,b)=>a+Number(b.amount||0),0);
-  const myOutstandingBal = myLoans.reduce((a,l)=>a+(Number(l.total_payable||0)-loanPaid(l.id)),0);
+  const myOutstandingBal = myLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
   const myInterestEarned = myRepay.reduce((a,r)=>a+Number(r.interest||0),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
@@ -2677,6 +2729,23 @@ function pageOfficerDashboard(){
   const myPendingSavingsTotal = myPendingSavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const myPendingRepaymentsTotal = myPendingRepayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const todayStr = todayISO();
+  const memberCountByGroup=new Map();
+  const savingsTotalByGroup=new Map();
+  const savingsTodayByGroup=new Map();
+  const repaymentsTodayByGroup=new Map();
+  myMembers.forEach(member=>memberCountByGroup.set(member.group_id,(memberCountByGroup.get(member.group_id)||0)+1));
+  state.data.savings.forEach(saving=>{
+    if(!saving.group_id) return;
+    savingsTotalByGroup.set(saving.group_id,(savingsTotalByGroup.get(saving.group_id)||0)+Number(saving.amount||0));
+    if(saving.status!=='pending'&&(saving.meeting_date||'').slice(0,10)===todayStr){
+      savingsTodayByGroup.set(saving.group_id,(savingsTodayByGroup.get(saving.group_id)||0)+Number(saving.amount||0));
+    }
+  });
+  state.data.repayments.forEach(repayment=>{
+    if(repayment.group_id&&repayment.status!=='pending'&&(repayment.meeting_date||'').slice(0,10)===todayStr){
+      repaymentsTodayByGroup.set(repayment.group_id,(repaymentsTodayByGroup.get(repayment.group_id)||0)+Number(repayment.amount||0));
+    }
+  });
   const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
 
   const filterBtns = [
@@ -2716,17 +2785,13 @@ function pageOfficerDashboard(){
         </tr></thead>
         <tbody>
           ${myGroups.map(g=>{
-            const mc = state.data.members.filter(m=>m.group_id===g.id).length;
-            const savToday = state.data.savings
-              .filter(s=>s.group_id===g.id && s.status!=='pending' && (s.meeting_date||'').slice(0,10)===todayStr)
-              .reduce((a,b)=>a+Number(b.amount||0),0);
-            const repToday = state.data.repayments
-              .filter(r=>r.group_id===g.id && r.status!=='pending' && (r.meeting_date||'').slice(0,10)===todayStr)
-              .reduce((a,b)=>a+Number(b.amount||0),0);
+            const mc = memberCountByGroup.get(g.id)||0;
+            const savToday = savingsTodayByGroup.get(g.id)||0;
+            const repToday = repaymentsTodayByGroup.get(g.id)||0;
             return `<tr>
               <td><b>${g.name}</b></td>
               <td class="num">${mc}</td>
-              <td class="num">${KES(groupSavingsTotal(g.id))}</td>
+              <td class="num">${KES(savingsTotalByGroup.get(g.id)||0)}</td>
               <td class="num" style="color:${savToday>0?'var(--success)':'var(--text-muted)'}"><b>${savToday>0?KES(savToday):'—'}</b></td>
               <td class="num" style="color:${repToday>0?'var(--primary)':'var(--text-muted)'}"><b>${repToday>0?KES(repToday):'—'}</b></td>
               <td>${g.meeting_day||'—'}</td>
@@ -2740,9 +2805,9 @@ function pageOfficerDashboard(){
       <div style="overflow-x:auto"><table class="tbl">
         <thead><tr><th>Member</th><th>Asset</th><th class="num">Loan Value</th><th class="num">Outstanding Balance</th></tr></thead>
         <tbody>
-          ${myLoans.map(l=>{
-            const mem = state.data.members.find(x=>x.id===l.member_id);
-            const outstanding = Math.max(0, Number(l.total_payable||0) - loanPaid(l.id));
+          ${myLoans.slice(0,50).map(l=>{
+            const mem = membersById.get(String(l.member_id));
+            const outstanding = Math.max(0, Number(l.total_payable||0) - (repaymentsByLoan.get(l.id)||0));
             const isDup = false;
             return `<tr>
               <td><b>${mem?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow">Duplicate</span>`:''}<div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
@@ -2753,6 +2818,7 @@ function pageOfficerDashboard(){
           }).join('') || `<tr><td colspan="4"><div class="empty" style="padding:20px 0"><h4>No active loans</h4></div></td></tr>`}
         </tbody>
       </table></div>
+      ${myLoans.length>50?`<div class="helper" style="margin-top:10px">Showing 50 of ${myLoans.length} active loans. Open Active Loans to search or view the full portfolio.</div>`:''}
     </div>
   `;
 }
@@ -2988,6 +3054,20 @@ function pageMembers(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
   const canApprove = can('approve_group');
+  const {savingsByMember}=buildBalanceIndexes();
+  const duplicateMemberIds=buildDuplicateMemberIds(state.data.members);
+  const linkedMemberIds=new Set();
+  ['savings','repayments','loans','orders','guarantors'].forEach(key=>{
+    (state.data[key]||[]).forEach(row=>{ if(row.member_id) linkedMemberIds.add(String(row.member_id)); });
+  });
+  const activeLoanCountByMember=new Map();
+  (state.data.loans||[]).forEach(loan=>{
+    if(loan.status==='active'&&loan.member_id){
+      activeLoanCountByMember.set(loan.member_id,(activeLoanCountByMember.get(loan.member_id)||0)+1);
+    }
+  });
+  const isDuplicateFast=member=>duplicateMemberIds.has(String(member.id));
+  const isSafeDuplicateFast=member=>member.status==='inactive'&&isDuplicateFast(member)&&!linkedMemberIds.has(String(member.id));
 
   const canSeeAllPortfolio = canViewAllPortfolio();
   let list = (canSeeAllPortfolio || canApprove || isSupervisorScoped()) ? state.data.members : state.data.members.filter(m=>{
@@ -2998,9 +3078,9 @@ function pageMembers(){
   if(filterStatus !== 'all') list = list.filter(m=>m.status===filterStatus);
   const q = (state._memberSearch||'').toLowerCase();
   if(q) list = list.filter(m => (m.full_name||'').toLowerCase().includes(q) || (m.national_id||'').includes(q) || (m.phone||'').includes(q));
-  const duplicateCount = list.filter(isDuplicateMember).length;
-  const removableDuplicateCount = list.filter(isSafeEmptyDuplicateMember).length;
-  if(state._memberDuplicatesOnly) list = list.filter(isDuplicateMember);
+  const duplicateCount = list.filter(isDuplicateFast).length;
+  const removableDuplicateCount = list.filter(isSafeDuplicateFast).length;
+  if(state._memberDuplicatesOnly) list = list.filter(isDuplicateFast);
 
   const pendingCount = state.data.members.filter(m => m.status==='pending' &&
     ((canSeeAllPortfolio||canApprove||isSupervisorScoped()) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
@@ -3048,17 +3128,17 @@ function pageMembers(){
         <tbody>
           ${paged.map(m => {
             const g  = state.data.groups.find(x=>x.id===m.group_id);
-            const sv = memberSavings(m.id);
-            const activeMemberLoans = state.data.loans.filter(l=>l.member_id===m.id&&l.status==='active');
-            const isDup = isDuplicateMember(m);
-            const safeDup = isSafeEmptyDuplicateMember(m);
+            const sv = savingsByMember.get(m.id)||0;
+            const activeMemberLoanCount = activeLoanCountByMember.get(m.id)||0;
+            const isDup = isDuplicateFast(m);
+            const safeDup = isSafeDuplicateFast(m);
             const isPending  = m.status === 'pending';
             const isInactive = m.status === 'inactive';
             const statusBadge = isPending
               ? `<span class="badge b-yellow">⏳ Pending</span>`
               : isInactive
                 ? `<span class="badge b-grey">Inactive</span>`
-                : memberEligible(m.id)
+                : sv >= Number(state.settings?.savings_threshold||400)
                   ? `<span class="badge b-green">Active · Eligible</span>`
                   : `<span class="badge b-blue">Active</span>`;
             return `<tr style="cursor:pointer;${isPending?'opacity:.85':''}" onclick="state._memberProfileTab='overview'; go('memberProfile', {memberId: '${m.id}'})">
@@ -3073,7 +3153,7 @@ function pageMembers(){
               <td class="num">${KES(sv)}</td>
               <td>${statusBadge}${isPending&&canApprove?` <button class="btn btn-sm btn-primary" style="margin-left:6px;font-size:11px;padding:2px 8px" onclick="event.stopPropagation();approveMemberReg('${m.id}',this)">Approve</button>`:''}
               </td>
-              <td>${activeMemberLoans.length?`<span class="badge b-blue">${activeMemberLoans.length} active loan${activeMemberLoans.length!==1?'s':''}</span>`:'<span class="badge b-grey">None</span>'}</td>
+              <td>${activeMemberLoanCount?`<span class="badge b-blue">${activeMemberLoanCount} active loan${activeMemberLoanCount!==1?'s':''}</span>`:'<span class="badge b-grey">None</span>'}</td>
               <td onclick="event.stopPropagation()"><button class="act-btn" onclick="memberActions(event,'${m.id}')">···</button></td>
             </tr>`;
           }).join('') || `<tr><td colspan="7"><div class="empty"><h4>No members found</h4><p>${filterStatus==='pending'?'No clients awaiting approval.':'Register a member to one of your active groups.'}</p></div></td></tr>`}
@@ -3086,7 +3166,19 @@ function pageMembers(){
       <button class="btn btn-sm btn-outline" ${(_page+1)*PAGE_SIZE>=total?'disabled':''} onclick="state._membersPage=${_page+1};pageMembers()">Next →</button>
     </div>` : ''}
   `;
-  $('mem-search').addEventListener('input', e => { state._memberSearch = e.target.value; state._membersPage=0; pageMembers(); setTimeout(()=>{ const el=$('mem-search'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } },0); });
+  $('mem-search').addEventListener('input', e => {
+    state._memberSearch=e.target.value;
+    state._membersPage=0;
+    clearTimeout(state._memberSearchTimer);
+    state._memberSearchTimer=setTimeout(()=>{
+      if(state.view!=='members') return;
+      pageMembers();
+      requestAnimationFrame(()=>{
+        const el=$('mem-search');
+        if(el){ el.focus({preventScroll:true}); el.setSelectionRange(el.value.length,el.value.length); }
+      });
+    },280);
+  });
   $('mem-group').addEventListener('change',  e => { state.viewCtx = { ...ctx, groupId: e.target.value }; state._membersPage=0; pageMembers(); });
   $('mem-status').addEventListener('change', e => { state.viewCtx = { ...ctx, memberStatus: e.target.value }; state._membersPage=0; pageMembers(); });
 }
@@ -4773,6 +4865,21 @@ function pageLoans(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canSeeAll = canViewAllPortfolio() || r === 'supervisor';
   const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
+  const {repaymentsByLoan}=buildBalanceIndexes();
+  const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
+  const groupsById=new Map(state.data.groups.map(group=>[String(group.id),group]));
+  const staffById=new Map(state.data.staff.map(staff=>[String(staff.id),staff]));
+  const loanInfo=loan=>{
+    const member=membersById.get(String(loan.member_id));
+    return {
+      member,
+      group:groupsById.get(String(loan.group_id)),
+      name:member?.full_name||loan.member_name||loan.client_name||'',
+      phone:member?.phone||loan.phone||loan.client_phone||'',
+      nationalId:member?.national_id||loan.national_id||loan.id_number||'',
+      missing:!member
+    };
+  };
 
   // Compute loan date range
   const loanDateRange = () => {
@@ -4807,25 +4914,38 @@ function pageLoans(){
     loans = loans.filter(l => l.officer_id === state._loanOfficerFilter);
   }
 
-  const isDuplicateLoan = l => !!(l.member_id && l.order_id && state.data.loans.some(x =>
-    x.id !== l.id && x.member_id === l.member_id && x.order_id === l.order_id &&
-    String(x.asset_id||x.asset_name||'')===String(l.asset_id||l.asset_name||'') &&
-    Number(x.loan_value||0)===Number(l.loan_value||0) && x.status === 'active'
-  ));
+  const duplicateLoanKey=loan=>loan.member_id&&loan.order_id
+    ? `${loan.member_id}|${loan.order_id}|${String(loan.asset_id||loan.asset_name||'')}|${Number(loan.loan_value||0)}`
+    : '';
+  const duplicateLoanCounts=new Map();
+  state.data.loans.filter(loan=>loan.status==='active').forEach(loan=>{
+    const key=duplicateLoanKey(loan);
+    if(key) duplicateLoanCounts.set(key,(duplicateLoanCounts.get(key)||0)+1);
+  });
+  const isDuplicateLoan=loan=>(duplicateLoanCounts.get(duplicateLoanKey(loan))||0)>1;
   const duplicateCount = loans.filter(isDuplicateLoan).length;
   const loanSearch = (state._loanSearch||'').trim().toLowerCase();
   if(state._loanDuplicatesOnly) loans = loans.filter(isDuplicateLoan);
   if(loanSearch){
     loans = loans.filter(l => {
-      const info = loanMemberInfo(l);
-      const grp = info.group || state.data.groups.find(x=>x.id===l.group_id);
-      const off = state.data.staff.find(x=>x.id===l.officer_id);
+      const info = loanInfo(l);
+      const grp = info.group;
+      const off = staffById.get(String(l.officer_id));
       return [
         info.name, info.nationalId, info.phone, grp?.name, off?.full_name,
         l.asset_name, l.id, l.order_id, l.status, l.start_date
       ].some(v => String(v||'').toLowerCase().includes(loanSearch));
     });
   }
+
+  const LOAN_PAGE_SIZE=50;
+  const loanTotal=loans.length;
+  const loanPageCount=Math.max(1,Math.ceil(loanTotal/LOAN_PAGE_SIZE));
+  const loanPage=Math.min(Math.max(0,Number(state._loansPage||0)),loanPageCount-1);
+  state._loansPage=loanPage;
+  const pagedLoans=loans.slice(loanPage*LOAN_PAGE_SIZE,(loanPage+1)*LOAN_PAGE_SIZE);
+  const loanFirst=loanTotal?loanPage*LOAN_PAGE_SIZE+1:0;
+  const loanLast=Math.min((loanPage+1)*LOAN_PAGE_SIZE,loanTotal);
 
   const loanFilterBtns = [
     ['all','All Time'],['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','Last Month'],['3months','Last 3 Months'],['custom','Custom']
@@ -4837,12 +4957,12 @@ function pageLoans(){
     </div>
     <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
       <div class="tabs" style="margin-bottom:0; border-bottom:none;">
-        ${['active','completed','defaulted','all'].map(t => `<button class="${tab===t?'active':''}" onclick="state._loanTab='${t}';pageLoans()">${t.charAt(0).toUpperCase()+t.slice(1)}</button>`).join('')}
+        ${['active','completed','defaulted','all'].map(t => `<button class="${tab===t?'active':''}" onclick="state._loanTab='${t}';state._loansPage=0;pageLoans()">${t.charAt(0).toUpperCase()+t.slice(1)}</button>`).join('')}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         ${tab==='active' ? `<button class="btn btn-outline btn-sm" onclick="openCollectionSheetModal()" title="Export collection sheet as Excel">📋 Collection Sheet</button>` : ''}
         ${canSeeAll ? `
-        <select style="max-width:200px" onchange="state._loanOfficerFilter=this.value; pageLoans()">
+        <select style="max-width:200px" onchange="state._loanOfficerFilter=this.value;state._loansPage=0;pageLoans()">
           <option value="">All Officers</option>
           ${state.data.staff.filter(s=>s.role==='officer'||s.role==='loan_officer').map(o=>`<option value="${o.id}" ${state._loanOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}
         </select>
@@ -4851,11 +4971,11 @@ function pageLoans(){
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
       <span style="font-size:12px;color:var(--text-muted);margin-right:2px">Start date:</span>
-      ${loanFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_loanDateFilter===k?'btn-primary':'btn-outline'}" onclick="_loanDateFilter='${k}';pageLoans()">${l}</button>`).join('')}
+      ${loanFilterBtns.map(([k,l])=>`<button class="btn btn-sm ${_loanDateFilter===k?'btn-primary':'btn-outline'}" onclick="_loanDateFilter='${k}';state._loansPage=0;pageLoans()">${l}</button>`).join('')}
       ${_loanDateFilter==='custom'?`
-        <input type="date" value="${_loanCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_loanCustomStart=this.value;pageLoans()" />
+        <input type="date" value="${_loanCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_loanCustomStart=this.value;state._loansPage=0;pageLoans()" />
         <span class="muted" style="font-size:12px">to</span>
-        <input type="date" value="${_loanCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_loanCustomEnd=this.value;pageLoans()" />
+        <input type="date" value="${_loanCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_loanCustomEnd=this.value;state._loansPage=0;pageLoans()" />
       `:''}
     </div>
     <div class="toolbar" style="margin-bottom:14px">
@@ -4863,8 +4983,8 @@ function pageLoans(){
         <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
         <input id="loan-search" placeholder="Search by client name, ID, phone, group, asset, officer or loan ID" value="${state._loanSearch||''}"/>
       </div>
-      <button class="btn btn-sm ${state._loanDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="state._loanDuplicatesOnly=!state._loanDuplicatesOnly;pageLoans()">Duplicates only ${duplicateCount?`(${duplicateCount})`:''}</button>
-      ${(state._loanSearch||state._loanDuplicatesOnly)?`<button class="btn btn-sm btn-outline" onclick="state._loanSearch='';state._loanDuplicatesOnly=false;pageLoans()">Clear</button>`:''}
+      <button class="btn btn-sm ${state._loanDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="state._loanDuplicatesOnly=!state._loanDuplicatesOnly;state._loansPage=0;pageLoans()">Duplicates only ${duplicateCount?`(${duplicateCount})`:''}</button>
+      ${(state._loanSearch||state._loanDuplicatesOnly)?`<button class="btn btn-sm btn-outline" onclick="state._loanSearch='';state._loanDuplicatesOnly=false;state._loansPage=0;pageLoans()">Clear</button>`:''}
     </div>
     <div class="table-wrap">
       <table class="tbl">
@@ -4874,11 +4994,11 @@ function pageLoans(){
           <th>Status</th><th></th>
         </tr></thead>
         <tbody>
-          ${loans.map(l => {
-            const info = loanMemberInfo(l);
-            const grp = info.group || state.data.groups.find(x=>x.id===l.group_id);
-            const off = state.data.staff.find(x=>x.id===l.officer_id);
-            const paid = loanPaid(l.id);
+          ${pagedLoans.map(l => {
+            const info = loanInfo(l);
+            const grp = info.group;
+            const off = staffById.get(String(l.officer_id));
+            const paid = repaymentsByLoan.get(l.id)||0;
             const out = Number(l.total_payable)-paid;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
             // Only an identical item loan is a duplicate. Different items in one
@@ -4908,13 +5028,29 @@ function pageLoans(){
         </tbody>
       </table>
     </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+      <div class="muted" style="font-size:12px">Showing ${loanFirst}-${loanLast} of ${loanTotal} loans</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-sm btn-outline" ${loanPage<=0?'disabled':''} onclick="state._loansPage=${Math.max(0,loanPage-1)};pageLoans()">Previous</button>
+        <span class="muted" style="font-size:12px">Page ${loanPage+1} of ${loanPageCount}</span>
+        <button class="btn btn-sm btn-outline" ${loanPage>=loanPageCount-1?'disabled':''} onclick="state._loansPage=${Math.min(loanPageCount-1,loanPage+1)};pageLoans()">Next</button>
+      </div>
+    </div>
   `;
   const loanSearchEl = $('loan-search');
   if(loanSearchEl){
     loanSearchEl.addEventListener('input', e=>{
       state._loanSearch = e.target.value;
-      pageLoans();
-      setTimeout(()=>{ const el=$('loan-search'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } },0);
+      state._loansPage=0;
+      clearTimeout(state._loanSearchTimer);
+      state._loanSearchTimer=setTimeout(()=>{
+        if(state.view!=='loans') return;
+        pageLoans();
+        requestAnimationFrame(()=>{
+          const el=$('loan-search');
+          if(el){ el.focus({preventScroll:true}); el.setSelectionRange(el.value.length,el.value.length); }
+        });
+      },280);
     });
   }
 }
