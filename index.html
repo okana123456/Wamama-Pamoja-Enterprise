@@ -466,9 +466,12 @@ window.addEventListener('offline', ()=>{ setBanner('You are offline. Changes wil
 /* ----- Offline write queue ----- */
 async function queuedInsert(table, row){
   if(navigator.onLine){
-    const { error } = await sb.from(table).insert(row);
-    if(!error) return { ok:true };
-    // fall through to queue on network failures
+    const { data, error } = await sb.from(table).insert(row).select().single();
+    if(!error) return { ok:true, data };
+    const message=String(error.message||'');
+    const networkFailure=!navigator.onLine || /failed to fetch|network|load failed|fetch/i.test(message);
+    if(!networkFailure) return { ok:false, error };
+    // Only genuine connection failures belong in the offline queue.
   }
   const q = lsGet('queue', []);
   q.push({ table, row, t: Date.now() });
@@ -660,6 +663,12 @@ function canCreateClientOrders(){
   return state.staff?.role === 'admin' ||
     ['ceo','admin','branch_manager','inventory_officer','storekeeper'].includes(r) ||
     !!state.perms?.can_submit_orders;
+}
+
+function canRecordRepayment(){
+  const role=currentStaffRole();
+  return ['ceo','admin','branch_manager','supervisor','loan_officer','officer'].includes(role)
+    || !!state.perms?.can_record_repayments;
 }
 
 function canManageExcessPayments(){
@@ -1053,8 +1062,10 @@ async function smartLoadAll(){
   if(!cacheHits){ state.loading=true; render(); }
   let jwtBroken = false;
   const historyTables=new Set(['pb_savings','pb_repayments','pb_excess_payments']);
+  const coreTables=new Set(['pb_groups','pb_members','pb_staff','pb_inventory','pb_loans','pb_orders']);
   const stages=[
-    tables.filter(table=>!historyTables.has(table)),
+    tables.filter(table=>coreTables.has(table)),
+    tables.filter(table=>!coreTables.has(table)&&!historyTables.has(table)),
     tables.filter(table=>historyTables.has(table))
   ];
 
@@ -1079,7 +1090,7 @@ async function smartLoadAll(){
 
     // On a new device, make the operational screens usable before the much
     // larger savings and repayment histories finish their first local sync.
-    if(stageIndex===0 && !cacheHits && !jwtBroken){
+    if(stageIndex===0 && !jwtBroken){
       state.data.purchases.forEach(p=>{
         p.items=state.data.purchaseLines.filter(line=>line.purchase_id===p.id);
       });
@@ -1088,6 +1099,7 @@ async function smartLoadAll(){
       render();
       setBanner('Core records are ready. Financial history is synchronising.');
     }
+    await new Promise(resolve=>setTimeout(resolve,0));
   }
   // Fix 1: Reconstruct purchase items from purchase lines after page reload
   // Without this, p.items is undefined on reload (it only exists in-memory right after creation)
@@ -1111,7 +1123,7 @@ function scheduleRealtimeRender(){
   realtimeRenderTimer = setTimeout(() => {
     realtimeRenderTimer = null;
     render();
-  }, 160);
+  }, 500);
 }
 function handleRealtimeChange(payload){
   if(payload.table === 'pb_settings'){
@@ -1140,9 +1152,8 @@ function setupRealtime(){
     rtChan.on('postgres_changes', { event:'*', schema:'public', table:'pb_settings', filter:`id=eq.biz_${businessId}` }, handleRealtimeChange);
   }
   [
-    'pb_groups','pb_members','pb_guarantors','pb_inventory','pb_loans','pb_orders',
-    'pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_staff',
-    'pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'
+    'pb_groups','pb_members','pb_inventory','pb_loans','pb_orders',
+    'pb_savings','pb_repayments','pb_staff'
   ].forEach(table => {
     const opts = { event:'*', schema:'public', table };
     if(businessFilter) opts.filter = businessFilter;
@@ -3609,7 +3620,7 @@ async function mpApproveRepayment(id){
   const {data:approvedRows,error}=await sb.from('pb_repayments').update({status:'approved'}).eq('id',id).select();
   if(error) return toast(error.message,'error');
   if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
-  await refreshExcessRelatedData();
+  await refreshExcessRelatedData({repaymentIds:[id],loanIds:[r.loan_id]});
   const closed=await closeFullyPaidLoans([r.loan_id],{silent:true});
   render();
   const split=(state.data.excessPayments||[]).some(x=>String(x.original_repayment_id)===String(id));
@@ -3843,7 +3854,7 @@ function pageMemberProfile(){
             <h3>Repayment history</h3>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <div class="sub">Approved total: ${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
-              ${activeMemberLoans.length ? `<button class="btn btn-sm btn-primary" onclick="openMemberRepayment('${m.id}')">Record Repayment</button>` : ''}
+              ${activeMemberLoans.length && canRecordRepayment() ? `<button class="btn btn-sm btn-primary" onclick="openMemberRepayment('${m.id}')">Record Repayment</button>` : ''}
               <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Loan Deposit</button>
             </div>
           </div>
@@ -4450,7 +4461,6 @@ function renderMeetList(){
         }
       } else if (lid) {
         m.entries[id].repayments[lid] = el.value;
-        renderMeetList(); // re-render to show/clear excess payment highlight
       } else {
         m.entries[id][f] = el.value;
       }
@@ -4460,9 +4470,6 @@ function renderMeetList(){
       if (el.type !== 'checkbox') {
         if (lid) {
           m.entries[id].repayments[lid] = el.value;
-          // Debounce re-render so typing remains smooth
-          clearTimeout(el._excessTimer);
-          el._excessTimer = setTimeout(() => renderMeetList(), 400);
         }
         else m.entries[id][f] = el.value;
       }
@@ -4515,20 +4522,51 @@ async function submitMeeting(){
   }
 
   let okSav=0, okRep=0, fail=0;
+  const savedRepayments=[];
   for(const r of savRows){
     const res = await queuedInsert('pb_savings', r);
-    if(res.ok){ okSav++; if(!res.queued) state.data.savings.unshift({ ...r, id:'tmp_'+Math.random() }); } else fail++;
-  }
-  for(const r of repRows){
-    const res = await queuedInsert('pb_repayments', r);
-    if(res.ok){ okRep++; if(!res.queued) state.data.repayments.unshift({ ...r, id:'tmp_'+Math.random() }); } else fail++;
+    if(res.ok){
+      okSav++;
+      if(!res.queued && res.data) state.data.savings.unshift(res.data);
+    }else{
+      fail++;
+      toast(`Savings entry failed: ${res.error?.message||'Database rejected the entry.'}`,'error');
+    }
   }
   if(repRows.length && navigator.onLine){
-    try{ await refreshExcessRelatedData(); }catch(error){ console.warn('Could not refresh excess allocation data',error); }
+    const {data,error}=await sb.rpc('pb_record_repayments_batch',{p_rows:repRows});
+    if(error){
+      fail+=repRows.length;
+      toast(`Repayments were not saved: ${error.message}. Run the new repayment reliability SQL if it has not been deployed.`,'error');
+    }else{
+      const saved=Array.isArray(data?.rows)?data.rows:[];
+      const failures=Array.isArray(data?.failures)?data.failures:[];
+      saved.forEach(row=>{
+        if(row?.id && !state.data.repayments.some(existing=>existing.id===row.id)) state.data.repayments.unshift(row);
+        if(row?.id) savedRepayments.push(row);
+      });
+      okRep+=saved.length;
+      fail+=failures.length;
+      if(failures.length) toast(`${failures.length} repayment entr${failures.length===1?'y':'ies'} could not be saved: ${failures[0].message}`,'warn');
+    }
+  }else{
+    for(const r of repRows){
+      const res=await queuedInsert('pb_repayments',r);
+      if(res.ok) okRep++;
+      else fail++;
+    }
+  }
+  if(savedRepayments.length){
+    try{
+      await refreshExcessRelatedData({
+        repaymentIds:savedRepayments.map(row=>row.id),
+        loanIds:savedRepayments.map(row=>row.loan_id)
+      });
+    }catch(error){ console.warn('Could not refresh repayment allocation data',error); }
   }
   audit('meeting_submit', 'pb_meetings', meetingId, null, { savings: okSav, repayments: okRep });
 
-  await closeFullyPaidLoans(repRows.map(r=>r.loan_id), { silent:true });
+  await closeFullyPaidLoans(savedRepayments.map(r=>r.loan_id), { silent:true });
 
   toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${fail?' Failed: '+fail:''}`, fail?'warn':'success');
   state._meet = { groupId:'', date: todayISO(), entries:{} };
@@ -4885,7 +4923,7 @@ function loanActions(ev, id){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role==='admin';
   const canApproveLoan = can('approve_loan');
-  const canRepay = canApproveLoan || r==='officer' || r==='loan_officer';
+  const canRepay = canRecordRepayment();
 
   // Detect only an identical item loan. Different items in the same sold-items
   // form are intentional concurrent loans for one client.
@@ -9465,7 +9503,7 @@ async function approveOneRepayment(id, btn){
   const {approvedRows,failures}=await approveRepaymentBatch([id]);
   if(failures.length){ toast(failures[0].message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
   if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
-  await refreshExcessRelatedData();
+  await refreshExcessRelatedData({repaymentIds:[id],loanIds:[r.loan_id]});
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   render();
   const deposit=repaymentDepositRecord(id);
@@ -9494,7 +9532,7 @@ async function approveGroupRepayments(groupName){
   const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
   const {approvedRows,failures}=await approveRepaymentBatch(ids);
   (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
-  await refreshExcessRelatedData();
+  await refreshExcessRelatedData({repaymentIds:approvedRows.map(row=>row.id),loanIds:approvedRows.map(row=>row.loan_id)});
   const closed = await closeFullyPaidLoans(loanIds, { silent:true });
   const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
   render();
@@ -9515,7 +9553,7 @@ async function approveAllRepayments(){
     const loanIds = state.data.repayments.filter(r=>ids.includes(r.id)).map(r=>r.loan_id);
     const {approvedRows,failures}=await approveRepaymentBatch(ids);
     (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
-    await refreshExcessRelatedData();
+    await refreshExcessRelatedData({repaymentIds:approvedRows.map(row=>row.id),loanIds:approvedRows.map(row=>row.loan_id)});
     const closed = await closeFullyPaidLoans(loanIds, { silent:true });
     const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
     render();
@@ -9823,18 +9861,51 @@ function excessStatusBadge(status){
   return `<span class="badge ${cls}">${excessStatusLabel(status)}</span>`;
 }
 
-async function refreshExcessRelatedData(){
-  const [excessResult,savingsResult,repaymentResult,loanResult]=await Promise.all([
-    fetchBusinessTableRows('pb_excess_payments'),
-    fetchBusinessTableRows('pb_savings'),
-    fetchBusinessTableRows('pb_repayments'),
-    fetchBusinessTableRows('pb_loans')
-  ]);
-  if(excessResult.error) throw excessResult.error;
-  state.data.excessPayments=excessResult.data||[];
-  if(!savingsResult.error) state.data.savings=savingsResult.data||[];
-  if(!repaymentResult.error) state.data.repayments=repaymentResult.data||[];
-  if(!loanResult.error) state.data.loans=loanResult.data||[];
+function mergeFreshRows(existing, fresh){
+  const byId=new Map((existing||[]).map(row=>[String(row.id),row]));
+  (fresh||[]).forEach(row=>{
+    if(row?.id!=null) byId.set(String(row.id),row);
+  });
+  return [...byId.values()];
+}
+
+async function fetchBusinessRowsByIds(table,column,ids){
+  const values=[...new Set((ids||[]).filter(Boolean).map(String))];
+  if(!values.length) return {data:[],error:null};
+  let query=sb.from(table).select('*').in(column,values);
+  if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+  return await query;
+}
+
+async function refreshExcessRelatedData({loanIds=[],repaymentIds=[],memberIds=[]}={}){
+  const targeted=loanIds.length||repaymentIds.length||memberIds.length;
+  if(!targeted){
+    const [excessResult,loanResult]=await Promise.all([
+      fetchBusinessTableRows('pb_excess_payments'),
+      fetchBusinessTableRows('pb_loans')
+    ]);
+    if(excessResult.error) throw excessResult.error;
+    state.data.excessPayments=excessResult.data||[];
+    if(!loanResult.error) state.data.loans=loanResult.data||[];
+    return;
+  }
+
+  const requests=[
+    fetchBusinessRowsByIds('pb_loans','id',loanIds),
+    fetchBusinessRowsByIds('pb_repayments','id',repaymentIds),
+    fetchBusinessRowsByIds('pb_excess_payments','loan_id',loanIds),
+    fetchBusinessRowsByIds('pb_excess_payments','original_repayment_id',repaymentIds),
+    fetchBusinessRowsByIds('pb_excess_payments','member_id',memberIds)
+  ];
+  const [loanResult,repaymentResult,...excessResults]=await Promise.all(requests);
+  const firstError=[loanResult,repaymentResult,...excessResults].find(result=>result.error)?.error;
+  if(firstError) throw firstError;
+  state.data.loans=mergeFreshRows(state.data.loans,loanResult.data);
+  state.data.repayments=mergeFreshRows(state.data.repayments,repaymentResult.data);
+  state.data.excessPayments=mergeFreshRows(
+    state.data.excessPayments,
+    excessResults.flatMap(result=>result.data||[])
+  );
 }
 
 function pageExcessPayments(){
@@ -9990,7 +10061,7 @@ function repRowActions(ev, id){
       const {approvedRows,failures}=await approveRepaymentBatch([id]);
       if(failures.length) return toast(failures[0].message,'error');
       if(approvedRows?.[0]) Object.assign(rep,approvedRows[0]);
-      await refreshExcessRelatedData();
+      await refreshExcessRelatedData({repaymentIds:[id],loanIds:[rep.loan_id]});
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
       render();
       const deposit=repaymentDepositRecord(id);
@@ -10169,6 +10240,7 @@ function downloadCollectionSheet(targetDate, officerFilter){
  * FEATURE 3: STANDALONE REPAYMENT ENTRY
  * ===================================================================== */
 function openMemberRepayment(memberId){
+  if(!canRecordRepayment()) return toast('You do not have permission to record repayments.','error');
   const member = state.data.members.find(m=>String(m.id)===String(memberId));
   const loans = state.data.loans.filter(loan=>
     String(loan.member_id)===String(memberId) && loan.status==='active'
@@ -10193,6 +10265,7 @@ function openMemberRepayment(memberId){
 }
 
 function openStandaloneRepayment(loanId, memberId){
+  if(!canRecordRepayment()) return toast('You do not have permission to record repayments.','error');
   const ln = state.data.loans.find(l => l.id === loanId);
   const mem = state.data.members.find(m => m.id === (memberId || ln?.member_id));
   if(!ln){ toast('Loan not found.', 'error'); return; }
@@ -10251,11 +10324,14 @@ function openStandaloneRepayment(loanId, memberId){
           status: can('approve_repayment') ? 'approved' : 'pending'
         };
 
-        const { data, error } = await sb.from('pb_repayments').insert(row).select().single();
-        if(error) return toast(error.message, 'error');
+        const { data:result, error } = await sb.rpc('pb_record_repayments_batch',{p_rows:[row]});
+        if(error) return toast(`Repayment was not saved: ${error.message}. Run the new repayment reliability SQL if it has not been deployed.`, 'error');
+        const data=Array.isArray(result?.rows)?result.rows[0]:null;
+        const failure=Array.isArray(result?.failures)?result.failures[0]:null;
+        if(!data) return toast(failure?.message||'The database did not save this repayment.', 'error');
 
-        state.data.repayments.unshift(data);
-        await refreshExcessRelatedData();
+        if(!state.data.repayments.some(existing=>existing.id===data.id)) state.data.repayments.unshift(data);
+        await refreshExcessRelatedData({repaymentIds:[data.id],loanIds:[ln.id]});
         audit('standalone_repayment', 'pb_repayments', data.id, null, row);
 
         const closed = row.status === 'approved' ? await closeFullyPaidLoans([ln.id], { silent:true }) : 0;
@@ -10326,7 +10402,7 @@ function openPreLoanDeposit(memberId=''){
           const hint=/could not find the function|does not exist/i.test(error.message||'')?' Run the new Wamama sold-form SQL setup first.':'';
           return toast('Loan deposit failed: '+error.message+hint,'error');
         }
-        await refreshExcessRelatedData();
+        await refreshExcessRelatedData({memberIds:[member.id]});
         audit('preloan_deposit','pb_excess_payments',data?.id||null,null,{member_id:member.id,amount,payment_date:paymentDate});
         closeModal(); render(); toast(`${KES(amount)} saved in ${member.full_name}'s loan deposit account.`,'success');
       }}
@@ -10449,7 +10525,7 @@ function openEditRepayment(repaymentId){
         if(error) return toast(error.message, 'error');
 
         Object.assign(rep,updatedRepayment||{ amount, principal, interest, edit_notes:reason });
-        await refreshExcessRelatedData();
+        await refreshExcessRelatedData({repaymentIds:[repaymentId],loanIds:[rep.loan_id]});
         audit('edit_repayment', 'pb_repayments', repaymentId, { amount: oldAmount }, { amount, principal, interest, edit_notes: reason });
         const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
         closeModal();
