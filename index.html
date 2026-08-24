@@ -218,9 +218,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 @media(max-width:768px){.bottom-nav{display:flex}.content{padding-bottom:84px}}
 
 /* Status banner */
-.status-banner{position:fixed;top:0;left:0;right:0;background:var(--warning);color:#fff;text-align:center;padding:6px;font-size:12px;font-weight:600;z-index:300;display:none}
+.status-banner{position:fixed;top:calc(var(--header-h) + 10px);right:12px;max-width:min(420px,calc(100vw - 24px));background:var(--warning);color:#fff;text-align:left;padding:10px 36px 10px 12px;font-size:12px;font-weight:600;line-height:1.35;border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);z-index:34;display:none}
 .status-banner.show{display:block}
 .status-banner.online{background:var(--success)}
+.status-banner .dismiss{position:absolute;top:50%;right:8px;transform:translateY(-50%);width:24px;height:24px;border:0;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0}
+@media(max-width:768px){.status-banner{top:calc(var(--header-h) + 8px);left:12px;right:12px;max-width:none}}
 
 /* Member meeting card */
 .mc{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;margin-bottom:10px}
@@ -456,7 +458,16 @@ function toast(msg, kind='info', title=null){
 function setBanner(msg, kind=''){
   const b = document.getElementById('status-banner');
   if(!msg){ b.classList.remove('show'); return; }
-  b.textContent = msg;
+  b.replaceChildren();
+  const text=document.createElement('span');
+  text.textContent=msg;
+  const dismiss=document.createElement('button');
+  dismiss.type='button';
+  dismiss.className='dismiss';
+  dismiss.setAttribute('aria-label','Dismiss notification');
+  dismiss.textContent='×';
+  dismiss.onclick=()=>b.classList.remove('show');
+  b.append(text,dismiss);
   b.className = `status-banner show ${kind}`;
   if(kind === 'online') setTimeout(()=>b.classList.remove('show'), 2200);
 }
@@ -1111,7 +1122,7 @@ async function smartLoadAll(){
     applySupervisorDataScope();
     state.loading = false;
     scheduleRealtimeRender();
-    if(!cacheHits) setBanner('All records are up to date.','online');
+    setBanner('All records are up to date.','online');
     releaseDuePrepaymentsInBackground();
   }
 }
