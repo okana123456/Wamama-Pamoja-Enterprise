@@ -348,6 +348,8 @@ const FINANCIAL_CACHE_VERSION = 1;
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const INCREMENTAL_FALLBACK_DAYS = 3;
+const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
+const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
 
 function openFinancialCache(){
   return new Promise((resolve,reject)=>{
@@ -373,12 +375,13 @@ async function readFinancialCache(table){
     });
   }catch{return null;}
 }
-async function writeFinancialCache(table,rows,fullSyncAt){
+async function writeFinancialCache(table,rows,fullSyncAt,reconciledAt=Date.now()){
   try{
     const db=await openFinancialCache();
     await new Promise((resolve,reject)=>{
       const request=db.transaction('tables','readwrite').objectStore('tables').put({
-        key:financialCacheKey(table), rows:rows||[], fullSyncAt:fullSyncAt||Date.now(), savedAt:Date.now()
+        key:financialCacheKey(table), rows:rows||[], fullSyncAt:fullSyncAt||Date.now(),
+        reconciledAt:reconciledAt||Date.now(), savedAt:Date.now()
       });
       request.onsuccess=()=>resolve();
       request.onerror=()=>reject(request.error);
@@ -983,6 +986,21 @@ async function fetchIncrementalRows(table,cached){
   return {data:[...merged.values()],error:null,fromCache:true};
 }
 
+async function removeDeletedCachedRows(table,rows){
+  const cachedRows=Array.isArray(rows)?rows:[];
+  const ids=cachedRows.map(row=>row?.id).filter(Boolean);
+  if(!ids.length) return {data:cachedRows,error:null};
+  const existingIds=new Set();
+  for(let start=0;start<ids.length;start+=200){
+    let query=sb.from(table).select('id').in('id',ids.slice(start,start+200));
+    if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+    const {data,error}=await query;
+    if(error) return {data:cachedRows,error};
+    (data||[]).forEach(row=>existingIds.add(row.id));
+  }
+  return {data:cachedRows.filter(row=>existingIds.has(row.id)),error:null};
+}
+
 async function loadBusinessTableOptimized(table){
   if(!INCREMENTAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
   const cached=await readFinancialCache(table);
@@ -996,7 +1014,15 @@ async function loadBusinessTableOptimized(table){
   if(result.error && !/jwt|unauthorized|401/i.test(result.error.message||'')){
     return {data:cached.rows,error:null,fromCache:true,stale:true};
   }
-  if(!result.error) await writeFinancialCache(table,result.data,cached.fullSyncAt);
+  let reconciledAt=Number(cached.reconciledAt||0);
+  if(!result.error && DELETION_RECONCILE_TABLES.has(table) && Date.now()-reconciledAt>=DELETION_RECONCILE_MS){
+    const reconciled=await removeDeletedCachedRows(table,result.data);
+    if(!reconciled.error){
+      result.data=reconciled.data;
+      reconciledAt=Date.now();
+    }
+  }
+  if(!result.error) await writeFinancialCache(table,result.data,cached.fullSyncAt,reconciledAt);
   return result;
 }
 
@@ -1109,7 +1135,6 @@ async function smartLoadAll(){
       state.loading=false;
       if(cacheHits) scheduleRealtimeRender();
       else render();
-      setBanner('Core records are ready. Updating recent financial records in the background.');
     }
     await new Promise(resolve=>setTimeout(resolve,0));
   }
@@ -1122,7 +1147,6 @@ async function smartLoadAll(){
     applySupervisorDataScope();
     state.loading = false;
     scheduleRealtimeRender();
-    setBanner('All records are up to date.','online');
     releaseDuePrepaymentsInBackground();
   }
 }
@@ -9652,6 +9676,7 @@ async function approveOneRepayment(id, btn){
   if(approvedRows?.[0]) Object.assign(r,approvedRows[0]);
   await refreshExcessRelatedData({repaymentIds:[id],loanIds:[r.loan_id]});
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
+  await audit('approve_repayment','pb_repayments',id,{status:'pending'},{status:'approved',loan_id:r.loan_id,amount:r.amount});
   render();
   const deposit=repaymentDepositRecord(id);
   toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
@@ -9665,6 +9690,7 @@ async function rejectOneRepayment(id, btn){
     const { error } = await sb.from('pb_repayments').update({ status:'rejected' }).eq('id', id);
     if(error) return toast(error.message,'error');
     r.status = 'rejected';
+    await audit('reject_repayment','pb_repayments',id,{status:'pending'},{status:'rejected',loan_id:r.loan_id,amount:r.amount});
     render();
     toast('Repayment rejected.','warn');
   },{ title:'Reject Repayment', danger:true });
@@ -9681,6 +9707,12 @@ async function approveGroupRepayments(groupName){
   (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
   await refreshExcessRelatedData({repaymentIds:approvedRows.map(row=>row.id),loanIds:approvedRows.map(row=>row.loan_id)});
   const closed = await closeFullyPaidLoans(loanIds, { silent:true });
+  await audit('approve_group_repayments','pb_repayments',null,null,{
+    group_name:groupName,
+    approved_count:approvedRows.length,
+    failed_count:failures.length,
+    repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
+  });
   const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
   render();
   const message=`${approvedRows.length} repayment(s) for ${groupName} approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
@@ -9702,6 +9734,11 @@ async function approveAllRepayments(){
     (approvedRows||[]).forEach(row=>{ const local=state.data.repayments.find(r=>r.id===row.id); if(local) Object.assign(local,row); });
     await refreshExcessRelatedData({repaymentIds:approvedRows.map(row=>row.id),loanIds:approvedRows.map(row=>row.loan_id)});
     const closed = await closeFullyPaidLoans(loanIds, { silent:true });
+    await audit('approve_all_repayments','pb_repayments',null,null,{
+      approved_count:approvedRows.length,
+      failed_count:failures.length,
+      repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
+    });
     const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
     render();
     const message=`${approvedRows.length} repayment(s) approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
