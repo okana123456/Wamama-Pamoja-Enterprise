@@ -1124,6 +1124,7 @@ async function smartLoadAll(){
         state.data[key]=readCachedDataKey(key);
       }
     });
+    invalidateCollectionComplianceCache();
 
     // On a new device, make the operational screens usable before the much
     // larger savings and repayment histories finish their first local sync.
@@ -1181,6 +1182,9 @@ function handleRealtimeChange(payload){
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
   applySupervisorDataScope();
   cacheDataKey(key, state.data[key]);
+  if(['pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments'].includes(tbl)){
+    invalidateCollectionComplianceCache();
+  }
   if(['dashboard','members','groups','meeting','collection_compliance','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
@@ -1822,6 +1826,12 @@ function renderPage(){
   }
   const fn = fns[state.view] || pageDashboard;
   fn();
+}
+
+function refreshVisiblePage(pageFn){
+  invalidateCollectionComplianceCache();
+  if(state.session && !isSubscriptionLocked() && $('page')) pageFn();
+  else render();
 }
 
 /* Phase B — Approvals queue: groups, savings, repayments, orders, members awaiting sign-off. */
@@ -4132,13 +4142,17 @@ function rerenderSearchWithFocus(input,stateKey,timerKey,pageFn,inputId){
       const nextCursor=Math.min(cursor,next.value.length);
       next.setSelectionRange(nextCursor,nextCursor);
     });
-  },120);
+  },250);
 }
 function handleCollectionPortfolioSearch(input){
   rerenderSearchWithFocus(input,'_collectionPortfolioSearch','_collectionPortfolioSearchTimer',pageCollectionCompliance,'collection-portfolio-search');
 }
 function handleCollectionClientSearch(input){
+  state._collectionMemberPage=0;
   rerenderSearchWithFocus(input,'_collectionSearch','_collectionClientSearchTimer',pageCollectionCompliance,'collection-client-search');
+}
+function invalidateCollectionComplianceCache(){
+  state._collectionComplianceCache=null;
 }
 function buildCollectionCompliance(){
   const {start,end}=collectionSelectedWeek();
@@ -4146,37 +4160,98 @@ function buildCollectionCompliance(){
   const groupFilter=state._collectionGroup||'';
   const officerFilter=state._collectionOfficer||'';
   const portfolioSearch=cleanMemberText(state._collectionPortfolioSearch||'');
+  const cacheKey=[start,end,arrearsCutoff,groupFilter,officerFilter,portfolioSearch].join('|');
+  const cached=state._collectionComplianceCache;
+  if(cached?.key===cacheKey && Date.now()-cached.savedAt<15000) return cached.report;
+
+  const memberById=new Map(state.data.members.map(member=>[member.id,member]));
+  const groupById=new Map(state.data.groups.map(group=>[group.id,group]));
+  const staffById=new Map(state.data.staff.map(staff=>[staff.id,staff]));
+  const orderById=new Map(state.data.orders.map(order=>[order.id,order]));
+  const membersByGroup=new Map();
+  state.data.members.forEach(member=>{
+    if(!membersByGroup.has(member.group_id)) membersByGroup.set(member.group_id,[]);
+    membersByGroup.get(member.group_id).push(member);
+  });
+
   let groups=collectionAccessibleGroups();
   if(portfolioSearch) groups=groups.filter(group=>{
-    const officer=state.data.staff.find(s=>s.id===group.officer_id);
+    const officer=staffById.get(group.officer_id);
     return cleanMemberText(`${group.name} ${group.mpesa_code||''} ${officer?.full_name||''} ${officer?.email||''}`).includes(portfolioSearch);
   });
   if(groupFilter) groups=groups.filter(g=>g.id===groupFilter);
   if(officerFilter) groups=groups.filter(g=>g.officer_id===officerFilter);
 
+  const selectedGroupIds=new Set(groups.map(group=>group.id));
+  const currentGroupByLoan=new Map();
+  const loansByGroup=new Map();
+  state.data.loans.forEach(loan=>{
+    const member=memberById.get(loan.member_id);
+    const currentGroup=groupById.get(member?.group_id||loan.group_id)||null;
+    currentGroupByLoan.set(loan.id,currentGroup);
+    if(!currentGroup || !selectedGroupIds.has(currentGroup.id) || !loanOverlapsWeek(loan,start,end)) return;
+    if(!loansByGroup.has(currentGroup.id)) loansByGroup.set(currentGroup.id,[]);
+    loansByGroup.get(currentGroup.id).push(loan);
+  });
+
+  const paidByLoan=new Map();
+  const collectedByLoan=new Map();
+  state.data.repayments.forEach(repayment=>{
+    if(!countsInBalance(repayment) || !repayment.loan_id) return;
+    const paymentDate=String(repayment.meeting_date||repayment.created_at||'').slice(0,10);
+    const amount=Number(repayment.amount||0);
+    if(paymentDate<=arrearsCutoff) paidByLoan.set(repayment.loan_id,(paidByLoan.get(repayment.loan_id)||0)+amount);
+    if(paymentDate>=start&&paymentDate<=end) collectedByLoan.set(repayment.loan_id,(collectedByLoan.get(repayment.loan_id)||0)+amount);
+  });
+
+  const savingsByMember=new Map();
+  state.data.savings.forEach(saving=>{
+    if(!countsInBalance(saving) || !saving.member_id) return;
+    const savingDate=String(saving.meeting_date||saving.created_at||'').slice(0,10);
+    if(savingDate<=arrearsCutoff) savingsByMember.set(saving.member_id,(savingsByMember.get(saving.member_id)||0)+Number(saving.amount||0));
+  });
+
+  const depositsByMember=new Map();
+  (state.data.excessPayments||[]).forEach(deposit=>{
+    if(!deposit.member_id || ['refunded','cancelled','rejected','transferred_to_savings'].includes(String(deposit.status||'pending').toLowerCase())) return;
+    const depositDate=String(deposit.payment_date||deposit.created_at||'').slice(0,10);
+    if(depositDate>arrearsCutoff) return;
+    const available=Math.max(0,Number(deposit.excess_amount||0)-Number(deposit.released_amount||0));
+    depositsByMember.set(deposit.member_id,(depositsByMember.get(deposit.member_id)||0)+available);
+  });
+
+  const pendingFundingMembers=new Set(state.data.orders
+    .filter(order=>order.member_id&&['pending','approved'].includes(String(order.status||'').toLowerCase()))
+    .map(order=>order.member_id));
+
   const groupRows=[]; const memberRows=[];
   groups.forEach(group=>{
-    const allGroupMembers=state.data.members.filter(m=>m.group_id===group.id);
+    const allGroupMembers=membersByGroup.get(group.id)||[];
     const activeMembers=allGroupMembers.filter(m=>m.status==='active');
-    const loans=state.data.loans.filter(l=>currentPortfolioGroupForLoan(l)?.id===group.id&&loanOverlapsWeek(l,start,end));
+    const loans=loansByGroup.get(group.id)||[];
+    const loansByMember=new Map();
+    loans.forEach(loan=>{
+      if(!loansByMember.has(loan.member_id)) loansByMember.set(loan.member_id,[]);
+      loansByMember.get(loan.member_id).push(loan);
+    });
     const loanMemberIds=new Set(loans.map(l=>l.member_id).filter(Boolean));
     const reportMembers=allGroupMembers.filter(m=>m.status==='active'||loanMemberIds.has(m.id));
     reportMembers.forEach(member=>{
-      const memberLoans=loans.filter(l=>l.member_id===member.id);
+      const memberLoans=loansByMember.get(member.id)||[];
       const products=memberLoans.reduce((sum,l)=>sum+Math.max(1,Number(l.asset_quantity||1)),0);
-      const olb=memberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-repaymentPaidByDate(l.id,arrearsCutoff)),0);
+      const olb=memberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-(paidByLoan.get(l.id)||0)),0);
       const expected=memberLoans.reduce((sum,l)=>sum+loanExpectedWithinWeek(l,start,end),0);
-      const collected=memberLoans.reduce((sum,l)=>sum+amountCollectedWithinWeek(l.id,start,end),0);
-      const arrears=memberLoans.reduce((sum,l)=>sum+loanArrearsAtDate(l,arrearsCutoff),0);
-      const savings=savingsByDate(member.id,arrearsCutoff);
-      const loanDeposits=loanDepositsByDate(member.id,arrearsCutoff);
-      const pendingFunding=state.data.orders.some(o=>o.member_id===member.id&&['pending','approved'].includes(String(o.status||'').toLowerCase()));
+      const collected=memberLoans.reduce((sum,l)=>sum+(collectedByLoan.get(l.id)||0),0);
+      const arrears=memberLoans.reduce((sum,l)=>sum+Math.max(0,loanExpectedByDate(l,arrearsCutoff)-(paidByLoan.get(l.id)||0)-5),0);
+      const savings=savingsByMember.get(member.id)||0;
+      const loanDeposits=depositsByMember.get(member.id)||0;
+      const pendingFunding=pendingFundingMembers.has(member.id);
       memberRows.push({group,member,loans:memberLoans,products,olb,expected,collected,arrears,savings,loanDeposits,pendingFunding});
     });
     const rows=memberRows.filter(r=>r.group.id===group.id);
     groupRows.push({
       group,
-      officer:state.data.staff.find(s=>s.id===group.officer_id),
+      officer:staffById.get(group.officer_id),
       members:activeMembers.length,
       olb:rows.reduce((s,r)=>s+r.olb,0),
       products:rows.reduce((s,r)=>s+r.products,0),
@@ -4188,27 +4263,33 @@ function buildCollectionCompliance(){
       arrearsClients:rows.filter(r=>r.arrears>0).length
     });
   });
-  return {start,end,arrearsCutoff,groupRows,memberRows};
+  const report={start,end,arrearsCutoff,groupRows,memberRows,indexes:{memberById,groupById,orderById,currentGroupByLoan}};
+  state._collectionComplianceCache={key:cacheKey,savedAt:Date.now(),report};
+  return report;
 }
 function safeOrderMeta(order){ try{return JSON.parse(order?.notes||'{}')||{};}catch{return {};} }
 function collectionExceptions(report){
   const {start,end}=report;
+  const memberById=report.indexes?.memberById||new Map(state.data.members.map(member=>[member.id,member]));
+  const groupById=report.indexes?.groupById||new Map(state.data.groups.map(group=>[group.id,group]));
+  const orderById=report.indexes?.orderById||new Map(state.data.orders.map(order=>[order.id,order]));
+  const currentGroupByLoan=report.indexes?.currentGroupByLoan||new Map();
   const groups=report.groupRows.map(r=>r.group);
   const groupIds=new Set(groups.map(g=>g.id));
   const memberIds=new Set(report.memberRows.map(r=>r.member.id));
   const issues=[];
   const relevantLoans=state.data.loans.filter(l=>{
     const d=String(l.start_date||'').slice(0,10);
-    return (groupIds.has(currentPortfolioGroupForLoan(l)?.id)||memberIds.has(l.member_id)) && d>=start && d<=end && !['cancelled','rejected'].includes(String(l.status||'').toLowerCase());
+    return (groupIds.has(currentGroupByLoan.get(l.id)?.id)||memberIds.has(l.member_id)) && d>=start && d<=end && !['cancelled','rejected'].includes(String(l.status||'').toLowerCase());
   });
   relevantLoans.forEach(loan=>{
-    const member=state.data.members.find(m=>m.id===loan.member_id);
-    const group=currentPortfolioGroupForLoan(loan);
-    const storedLoanGroup=state.data.groups.find(g=>g.id===loan.group_id);
+    const member=memberById.get(loan.member_id);
+    const group=currentGroupByLoan.get(loan.id)||null;
+    const storedLoanGroup=groupById.get(loan.group_id);
     if(!member) issues.push({type:'Loan has no client',detail:`${loan.asset_name||'Loan'} (${String(loan.id).slice(0,8)}) is not linked to a valid client.`,group:'Unassigned'});
     else if(!group) issues.push({type:'Client has no valid group',detail:`${member.full_name} has a loan but no valid group assignment.`,group:'Unassigned'});
     else if(loan.group_id&&member.group_id&&loan.group_id!==member.group_id) issues.push({type:'Historical loan group differs from current client group',detail:`${member.full_name}'s client profile is currently in ${group.name}, while this loan still stores ${storedLoanGroup?.name||'an unavailable group'}. Collection reports use the current client group.`,group:group.name});
-    const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
+    const order=loan.order_id?orderById.get(loan.order_id):null;
     if(order?.member_id&&loan.member_id&&order.member_id!==loan.member_id) issues.push({type:'Possible wrong client upload',detail:`Loan ${loan.asset_name||String(loan.id).slice(0,8)} and its order are assigned to different clients.`,group:group?.name||'Unassigned'});
   });
   const relevantOrders=state.data.orders.filter(o=>{
@@ -4237,11 +4318,12 @@ function collectionExceptions(report){
   });
   return issues;
 }
-function setCollectionFilter(key,value){ state[key]=value; pageCollectionCompliance(); }
+function setCollectionFilter(key,value){ state[key]=value; state._collectionMemberPage=0; invalidateCollectionComplianceCache(); pageCollectionCompliance(); }
 function openGroupCollectionCompliance(groupId,date){
   state._collectionGroup=groupId||'';
   state._collectionWeekStart=mondayOfWeek(date||collectionTodayISO());
   state._collectionTab='members';
+  state._collectionMemberPage=0;
   go('collection_compliance');
 }
 function pageCollectionCompliance(){
@@ -4259,6 +4341,12 @@ function pageCollectionCompliance(){
   };
   const q=cleanMemberText(state._collectionSearch);
   const visibleMembers=report.memberRows.filter(r=>!q||cleanMemberText(`${r.member.full_name} ${r.member.phone} ${r.member.national_id} ${r.group.name} ${r.loans.map(l=>l.asset_name).join(' ')}`).includes(q));
+  const memberPageSize=50;
+  const memberTotalPages=Math.max(1,Math.ceil(visibleMembers.length/memberPageSize));
+  let memberPage=Math.max(0,Number(state._collectionMemberPage||0));
+  if(memberPage>=memberTotalPages){ memberPage=memberTotalPages-1; state._collectionMemberPage=memberPage; }
+  const memberPageStart=memberPage*memberPageSize;
+  const memberPageRows=visibleMembers.slice(memberPageStart,memberPageStart+memberPageSize);
   const tab=state._collectionTab;
   $('page').innerHTML=`
     <div class="page-head"><div><h1>Collection Compliance</h1><div class="desc">Weekly group performance, funding checks and upload exceptions.</div></div>
@@ -4289,8 +4377,8 @@ function pageCollectionCompliance(){
       </tbody></table></div>`:''}
     ${tab==='members'?`<div class="toolbar"><div class="search-box grow"><span class="ic">${searchIcon()}</span><input id="collection-client-search" placeholder="Search client, phone, ID, group or product" value="${state._collectionSearch}" oninput="handleCollectionClientSearch(this)"></div></div>
       <div class="table-wrap"><table class="tbl" style="min-width:1280px"><thead><tr><th>Client / Group</th><th>Products in repayment</th><th class="num">Total OLB</th><th class="num">Weekly expected</th><th class="num">Collected</th><th class="num">Savings</th><th class="num">Loan deposits / prepayments</th><th class="num">Arrears</th><th>Funding check</th></tr></thead><tbody>
-      ${visibleMembers.slice(0,500).map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num"><b>${KES(r.savings)}</b></td><td class="num"><b>${KES(r.loanDeposits)}</b></td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="9"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
-      </tbody></table></div>${visibleMembers.length>500?`<div class="helper" style="margin-top:8px">Showing the first 500 clients. Export Excel for all ${visibleMembers.length} records.</div>`:''}`:''}
+      ${memberPageRows.map(r=>`<tr><td><b>${r.member.full_name}</b><div class="muted" style="font-size:11px">${r.member.phone||'No phone'} - ${r.group.name}</div></td><td>${r.products}<div class="muted" style="font-size:11px">${r.loans.map(l=>`${l.asset_name||'Product'}${Number(l.asset_quantity||1)>1?` x${l.asset_quantity}`:''}`).join(', ')||'No product in repayment'}</div></td><td class="num">${KES(r.olb)}</td><td class="num">${KES(r.expected)}</td><td class="num">${KES(r.collected)}</td><td class="num"><b>${KES(r.savings)}</b></td><td class="num"><b>${KES(r.loanDeposits)}</b></td><td class="num" style="color:${r.arrears>0?'var(--danger)':'var(--success)'}"><b>${KES(r.arrears)}</b></td><td><span class="badge ${r.arrears>0?'b-red':r.pendingFunding?'b-yellow':'b-green'}">${r.arrears>0?'Arrears - review before funding':r.pendingFunding?'Pending funding - compliant':'Compliant'}</span></td></tr>`).join('')||`<tr><td colspan="9"><div class="empty"><h4>No clients found</h4><p>Choose another group or search term.</p></div></td></tr>`}
+      </tbody></table></div>${visibleMembers.length>memberPageSize?`<div class="card" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:10px"><div class="muted">Showing ${memberPageStart+1}-${Math.min(memberPageStart+memberPageRows.length,visibleMembers.length)} of ${visibleMembers.length} clients</div><div style="display:flex;gap:8px"><button class="btn btn-outline" ${memberPage<=0?'disabled':''} onclick="state._collectionMemberPage=${memberPage-1};pageCollectionCompliance()">Previous</button><button class="btn btn-outline" ${memberPage>=memberTotalPages-1?'disabled':''} onclick="state._collectionMemberPage=${memberPage+1};pageCollectionCompliance()">Next</button></div></div>`:''}`:''}
     ${tab==='exceptions'?`<div class="card">${issues.length?issues.map(i=>`<div class="compliance-issue"><span class="issue-mark"></span><div><b>${i.type}</b><div class="muted" style="font-size:12px;margin-top:2px">${i.detail}</div><div style="font-size:11px;margin-top:3px">Group: ${i.group}</div></div></div>`).join(''):`<div class="empty"><h4>No upload exceptions detected</h4><p>No high-confidence order, loan, client or group mismatch was found for this week.</p></div>`}</div>`:''}
   `;
 }
@@ -5281,7 +5369,7 @@ function openLoanRestructure(l){
           before,
           { start_date: effectDate, weekly: finalWeekly, weeks: finalWeeks, end: upd.expected_end_date, reason }
         );
-        closeModal(); render();
+        closeModal(); refreshVisiblePage(renderPage);
         toast(`Loan restructured — new weekly: ${KES(finalWeekly)} for ${finalWeeks} weeks, ending ${fmtDate(upd.expected_end_date)}.`,'success');
       }}
     ]
@@ -6251,7 +6339,7 @@ function approveOrder(o){
           if(feeData) state.data.repayments.unshift(feeData);
         }
 
-        closeModal(); render();
+        closeModal(); refreshVisiblePage(renderPage);
         toast(`Loan issued successfully${requiresDeposit?' — 25% deposit recorded':''}${chargeAppFee||chargeInsFee?' — selected fees recorded':''}.`,'success');
       }}
     ]
@@ -7924,7 +8012,7 @@ async function saveSoldItemsForm(){
   await sb.from('pb_orders').update({notes:JSON.stringify(meta)}).eq('id',orderData.id);
   orderData.notes=JSON.stringify(meta);
 
-  closeModal(); render();
+  closeModal(); refreshVisiblePage(renderPage);
   const isPending = true;
   if(errors.length){
     toast(`${loansCreated} loan(s) ${isPending?'submitted for approval':'created'}. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
@@ -8260,7 +8348,7 @@ async function deleteSoldItemsForm(orderId){
 
         audit('delete_sold_items_form','pb_orders', orderId, { rows: rows.length, principal }, null);
         closeModal();
-        render();
+        refreshVisiblePage(renderPage);
         if(!hadError){
           toast(`Sold items form and ${linkedLoans.length} loan(s) deleted successfully.`, 'success');
         } else {
@@ -9476,7 +9564,7 @@ async function approveOneSaving(id, btn){
   const { error } = await sb.from('pb_savings').update({ status:'approved' }).eq('id', id);
   if(error){ toast(error.message,'error'); if(btn){ btn.disabled=false; btn.textContent='✓'; } return; }
   s.status = 'approved';
-  render();
+  refreshVisiblePage(pageSavingsApprovals);
   toast('Savings entry approved.','success');
 }
 
@@ -9488,7 +9576,7 @@ async function rejectOneSaving(id, btn){
     const { error } = await sb.from('pb_savings').update({ status:'rejected' }).eq('id', id);
     if(error) return toast(error.message,'error');
     s.status = 'rejected';
-    render();
+    refreshVisiblePage(pageSavingsApprovals);
     toast('Savings entry rejected.','warn');
   },{ title:'Reject Savings Entry', danger:true });
 }
@@ -9503,7 +9591,7 @@ async function approveGroupSavings(groupName){
   const { error } = await sb.from('pb_savings').update({ status:'approved' }).in('id', ids);
   if(error) return toast(error.message,'error');
   state.data.savings.filter(s=>ids.includes(s.id)).forEach(s=>s.status='approved');
-  render();
+  refreshVisiblePage(pageSavingsApprovals);
   toast(`${ids.length} savings entr${ids.length!==1?'ies':'y'} for ${groupName} approved.`,'success');
 }
 
@@ -9515,7 +9603,7 @@ async function approveAllSavings(){
     const { error } = await sb.from('pb_savings').update({ status:'approved' }).in('id', ids);
     if(error) return toast(error.message,'error');
     state.data.savings.filter(s=>ids.includes(s.id)).forEach(s=>s.status='approved');
-    render();
+    refreshVisiblePage(pageSavingsApprovals);
     toast(`${ids.length} savings entr${ids.length!==1?'ies':'y'} approved.`,'success');
   },{ title:'Approve All Savings' });
 }
@@ -9650,11 +9738,24 @@ function isHeldPrepaymentSource(repayment){
 async function approveRepaymentBatch(ids){
   const approvedRows=[];
   const failures=[];
-  for(const id of [...new Set((ids||[]).filter(Boolean))]){
+  const uniqueIds=[...new Set((ids||[]).filter(Boolean))];
+  for(let start=0;start<uniqueIds.length;start+=50){
+    const chunk=uniqueIds.slice(start,start+50);
     const {data,error}=await sb.from('pb_repayments')
-      .update({status:'approved'}).eq('id',id).eq('status','pending').select();
-    if(error){ failures.push({id,message:error.message}); continue; }
-    if(data?.[0]) approvedRows.push(data[0]);
+      .update({status:'approved'}).in('id',chunk).eq('status','pending').select();
+    if(!error){
+      approvedRows.push(...(data||[]));
+      continue;
+    }
+
+    // If one row in a batch is invalid, preserve the old partial-success
+    // behaviour by retrying only that small batch one entry at a time.
+    for(const id of chunk){
+      const {data:singleData,error:singleError}=await sb.from('pb_repayments')
+        .update({status:'approved'}).eq('id',id).eq('status','pending').select();
+      if(singleError) failures.push({id,message:singleError.message});
+      else if(singleData?.[0]) approvedRows.push(singleData[0]);
+    }
   }
   const affectedLoanIds=[...new Set(approvedRows.map(row=>String(row.loan_id||'')).filter(Boolean))];
   const {error:releaseError}=affectedLoanIds.length
@@ -9677,7 +9778,7 @@ async function approveOneRepayment(id, btn){
   await refreshExcessRelatedData({repaymentIds:[id],loanIds:[r.loan_id]});
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   await audit('approve_repayment','pb_repayments',id,{status:'pending'},{status:'approved',loan_id:r.loan_id,amount:r.amount});
-  render();
+  refreshVisiblePage(pageRepaymentApprovals);
   const deposit=repaymentDepositRecord(id);
   toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
 }
@@ -9691,7 +9792,7 @@ async function rejectOneRepayment(id, btn){
     if(error) return toast(error.message,'error');
     r.status = 'rejected';
     await audit('reject_repayment','pb_repayments',id,{status:'pending'},{status:'rejected',loan_id:r.loan_id,amount:r.amount});
-    render();
+    refreshVisiblePage(pageRepaymentApprovals);
     toast('Repayment rejected.','warn');
   },{ title:'Reject Repayment', danger:true });
 }
@@ -9714,7 +9815,7 @@ async function approveGroupRepayments(groupName){
     repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
   });
   const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
-  render();
+  refreshVisiblePage(pageRepaymentApprovals);
   const message=`${approvedRows.length} repayment(s) for ${groupName} approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
   const firstFailure=failures[0];
   const failedRepayment=firstFailure?state.data.repayments.find(r=>String(r.id)===String(firstFailure.id)):null;
@@ -9740,7 +9841,7 @@ async function approveAllRepayments(){
       repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
     });
     const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
-    render();
+    refreshVisiblePage(pageRepaymentApprovals);
     const message=`${approvedRows.length} repayment(s) approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
     const firstFailure=failures[0];
     const failedRepayment=firstFailure?state.data.repayments.find(r=>String(r.id)===String(firstFailure.id)):null;
@@ -10056,9 +10157,15 @@ function mergeFreshRows(existing, fresh){
 async function fetchBusinessRowsByIds(table,column,ids){
   const values=[...new Set((ids||[]).filter(Boolean).map(String))];
   if(!values.length) return {data:[],error:null};
-  let query=sb.from(table).select('*').in(column,values);
-  if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
-  return await query;
+  const rows=[];
+  for(let start=0;start<values.length;start+=100){
+    let query=sb.from(table).select('*').in(column,values.slice(start,start+100));
+    if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+    const {data,error}=await query;
+    if(error) return {data:rows,error};
+    rows.push(...(data||[]));
+  }
+  return {data:rows,error:null};
 }
 
 async function refreshExcessRelatedData({loanIds=[],repaymentIds=[],memberIds=[]}={}){
@@ -10529,7 +10636,7 @@ function openStandaloneRepayment(loanId, memberId){
           toast('Repayment recorded successfully.', 'success');
         }
         closeModal();
-        render();
+        refreshVisiblePage(renderPage);
       }}
     ]
   });
