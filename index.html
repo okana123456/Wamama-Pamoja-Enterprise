@@ -10247,6 +10247,7 @@ function repRowActions(ev, id){
       if(approvedRows?.[0]) Object.assign(rep,approvedRows[0]);
       await refreshExcessRelatedData({repaymentIds:[id],loanIds:[rep.loan_id]});
       const closed = await closeFullyPaidLoans([rep.loan_id], { silent:true });
+      await audit('approve_repayment','pb_repayments',id,{status:'pending'},{status:'approved',loan_id:rep.loan_id,amount:rep.amount});
       render();
       const deposit=repaymentDepositRecord(id);
       toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
