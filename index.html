@@ -3992,7 +3992,7 @@ function pageMemberProfile(){
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <div class="sub">Approved total: ${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
               ${activeMemberLoans.length && canRecordRepayment() ? `<button class="btn btn-sm btn-primary" onclick="openMemberRepayment('${m.id}')">Record Repayment</button>` : ''}
-              <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Loan Deposit</button>
+              <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Pre-loan Product Deposit</button>
             </div>
           </div>
           <div style="overflow-x:auto"><table class="tbl">
@@ -10131,7 +10131,7 @@ function pageRepayments(){
         <div class="desc">${clientReps.length} entries · Total ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}</div>
       </div>
       <div class="actions" style="gap:8px">
-        <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Loan Deposit</button>
+        <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Pre-loan Product Deposit</button>
         <button class="btn btn-outline" onclick="exportRepaymentsFiltered()">⬇ Export to Excel</button>
       </div>
     </div>
@@ -10290,7 +10290,7 @@ function pageExcessPayments(){
 
   $('page').innerHTML=`
     <div class="page-head">
-      <div><h1>Loan Deposits / Prepayments</h1><div class="desc">Advance loan payments held separately and released as each scheduled instalment becomes due. Normal savings are not included.</div></div>
+      <div><h1>Scheduled Loan Prepayments</h1><div class="desc">Advance payments on existing loans are held separately and released as each scheduled instalment becomes due. Normal savings and pre-loan product deposits are not included.</div></div>
       <button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Refresh</button>
     </div>
     <div class="kpi-grid" style="margin-bottom:14px">
@@ -10330,7 +10330,7 @@ function pageExcessPayments(){
           <td style="font-size:12px">${row.resolution_reference?`<b>${statementHtml(row.resolution_reference)}</b><br>`:''}${resolver?`<span class="muted">By ${statementHtml(resolver.full_name)}</span>`:''}</td>
           <td>${row.status==='pending'&&row.source!=='scheduled_prepayment'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
         </tr>`;
-      }).join(''):`<tr><td colspan="11"><div class="empty"><h4>No loan deposits or prepayments found</h4><p>${_excessStatusFilter==='pending'?'There are no available prepayments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
+      }).join(''):`<tr><td colspan="11"><div class="empty"><h4>No scheduled prepayments found</h4><p>${_excessStatusFilter==='pending'?'There are no available scheduled prepayments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
     </table></div>`;
 }
 
@@ -10734,7 +10734,7 @@ function openPreLoanDeposit(memberId=''){
   const members=state.data.members.filter(m=>m.status==='active'&&visibleGroupIds.has(String(m.group_id)));
   const selected=members.find(m=>String(m.id)===String(memberId));
   modal({
-    title:'Record Loan Deposit',
+    title:'Record Pre-loan Product Deposit',
     body:`<div class="helper" style="margin-bottom:14px">Use this when a client pays toward a future loan before the loan is issued. It remains separate from ordinary savings and will be attached to the client’s next approved loan.</div>
       <div class="field"><label>Client *</label>
         <input id="preloan-member-search" list="preloan-members" value="${statementHtml(selected?`${selected.full_name} — ${selected.phone||selected.national_id||''}`:'')}" placeholder="Search name, phone or ID" autocomplete="off" />
@@ -10745,7 +10745,7 @@ function openPreLoanDeposit(memberId=''){
       <div class="field"><label>Reference or note</label><input id="preloan-note" placeholder="Receipt number or collection note" /></div>`,
     actions:[
       {label:'Cancel',cls:'btn-outline',onClick:closeModal},
-      {label:'Save Loan Deposit',cls:'btn-primary',onClick:async()=>{
+      {label:'Save Pre-loan Deposit',cls:'btn-primary',onClick:async()=>{
         if(!(await ensureFreshToken())) return;
         const query=String(document.getElementById('preloan-member-search')?.value||'').trim().toLowerCase();
         const member=members.find(m=>query===`${String(m.full_name||'').trim().toLowerCase()} — ${String(m.phone||m.national_id||'no phone').trim().toLowerCase()}`)
@@ -10763,7 +10763,7 @@ function openPreLoanDeposit(memberId=''){
         }
         await refreshExcessRelatedData({memberIds:[member.id]});
         audit('preloan_deposit','pb_excess_payments',data?.id||null,null,{member_id:member.id,amount,payment_date:paymentDate});
-        closeModal(); render(); toast(`${KES(amount)} saved in ${member.full_name}'s loan deposit account.`,'success');
+        closeModal(); render(); toast(`${KES(amount)} saved as ${member.full_name}'s pre-loan product deposit.`,'success');
       }}
     ]
   });
