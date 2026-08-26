@@ -5562,6 +5562,61 @@ function loanServiceCharge(principal){
 function loanTotalWithServiceCharge(schedule, principal){
   return Math.round(((Number(schedule?.totalPayable)||0) + loanServiceCharge(principal)) * 100) / 100;
 }
+function availablePreLoanDeposit(memberId){
+  return (state.data.excessPayments||[])
+    .filter(row=>String(row.member_id)===String(memberId)
+      && row.status==='pending'
+      && row.source==='pre_loan_deposit'
+      && !row.loan_id)
+    .reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0);
+}
+function minimumWeeklyForLoanTerm(principal,weeks){
+  principal=Number(principal)||0;
+  weeks=Math.max(1,Math.min(48,Math.floor(Number(weeks)||1)));
+  if(principal<=0) return 0;
+  let low=0.01,high=Math.max(principal,1);
+  for(let i=0;i<60;i++){
+    const mid=(low+high)/2;
+    const schedule=computeSchedule(principal,mid,'flat',new Date());
+    const total=loanTotalWithServiceCharge(schedule,principal);
+    if(Math.ceil(total/mid)<=weeks) high=mid;
+    else low=mid;
+  }
+  return Math.ceil(high*100)/100;
+}
+function recalculateApprovalTerms(grossPrincipal,fromWeeks=false){
+  const available=Number(document.getElementById('al-deposit')?.max||0);
+  let deposit=Math.max(0,Number(document.getElementById('al-deposit')?.value||0));
+  deposit=Math.min(deposit,available,Math.max(0,Number(grossPrincipal)-0.01));
+  const depositInput=document.getElementById('al-deposit');
+  if(depositInput) depositInput.value=deposit.toFixed(2);
+  const financed=Math.max(0,Number(grossPrincipal)-deposit);
+  const weeks=Math.max(1,Math.min(48,Math.floor(Number(document.getElementById('al-weeks')?.value||1))));
+  const weeklyInput=document.getElementById('wi');
+  if(fromWeeks&&weeklyInput) weeklyInput.value=minimumWeeklyForLoanTerm(financed,weeks).toFixed(2);
+  const weekly=Number(weeklyInput?.value||0);
+  const schedule=weekly>0?computeSchedule(financed,weekly,'flat',new Date(document.getElementById('sd')?.value||todayISO())):null;
+  const total=schedule?loanTotalWithServiceCharge(schedule,financed):0;
+  const actualWeeks=weekly>0?Math.ceil(total/weekly):0;
+  const setText=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};
+  setText('al-financed-value',KES(financed));
+  setText('al-service-value',KES(loanServiceCharge(financed)));
+  setText('al-total-value',KES(total));
+  setText('al-actual-weeks',actualWeeks?`${actualWeeks} week${actualWeeks===1?'':'s'}`:'—');
+  const applicationFee=Math.round(financed*0.03*100)/100;
+  const appFeeInput=document.getElementById('chk-app-fee');
+  const insuranceInput=document.getElementById('chk-ins-fee');
+  if(appFeeInput) appFeeInput.value=applicationFee;
+  if(insuranceInput) insuranceInput.value=applicationFee;
+  setText('al-app-fee-value',KES(applicationFee));
+  setText('al-ins-fee-value',KES(applicationFee));
+  const out=document.getElementById('al-out');
+  if(out) out.innerHTML=actualWeeks>48
+    ? `<span style="color:var(--danger);font-weight:600">${KES(weekly)} per week would take ${actualWeeks} weeks. Increase it to at least ${KES(minimumWeeklyForLoanTerm(financed,48))}.</span>`
+    : actualWeeks>weeks
+      ? `<span style="color:var(--danger);font-weight:600">${KES(weekly)} per week would take ${actualWeeks} weeks, not the selected ${weeks}. Use at least ${KES(minimumWeeklyForLoanTerm(financed,weeks))} per week.</span>`
+      : `The deposit reduces the financed amount before interest and the 6% charge are calculated.`;
+}
 
 /* =====================================================================
  * PAGE: INVENTORY
@@ -6187,10 +6242,19 @@ function approveOrder(o){
   const requiresDeposit = principal > 20000;
   const depositAmount = requiresDeposit ? Math.round(principal * 0.25) : 0;
 
+  // Deposits paid before funding reduce the amount that is actually financed.
+  const availableDeposit = availablePreLoanDeposit(member.id);
+  const initialDeposit = Math.min(availableDeposit, Math.max(0, principal - 0.01));
+  const initialFinancedPrincipal = Math.max(0, principal - initialDeposit);
+  const initialWeeks = Math.max(1, Math.min(48, Number(o.desired_weeks)||1));
+  const initialWeekly = initialDeposit > 0
+    ? minimumWeeklyForLoanTerm(initialFinancedPrincipal, initialWeeks)
+    : (Number(o.desired_weekly_installment)||minimumWeeklyForLoanTerm(initialFinancedPrincipal, initialWeeks));
+
   // === Optional 3% fees — approver decides based on item type ===
-  const serviceCharge = loanServiceCharge(principal);
-  const applicationFee = Math.round(principal * 0.03 * 100) / 100;
-  const insuranceFee   = Math.round(principal * 0.03 * 100) / 100;
+  const serviceCharge = loanServiceCharge(initialFinancedPrincipal);
+  const applicationFee = Math.round(initialFinancedPrincipal * 0.03 * 100) / 100;
+  const insuranceFee   = Math.round(initialFinancedPrincipal * 0.03 * 100) / 100;
 
   const assetSummaryRows = resolvedLines.map(l=>`<tr><td>${l.asset.name} × ${l.quantity}</td><td><b>${KES(l.loan_price*l.quantity)}</b></td></tr>`).join('');
 
@@ -6199,20 +6263,24 @@ function approveOrder(o){
     body:`<form id="al">
       <table class="summary-table">
         ${assetSummaryRows}
-        <tr><td>Total loan principal</td><td><b>${KES(principal)}</b></td></tr>
-        <tr><td>6% service charge included in repayments</td><td><b>${KES(serviceCharge)}</b></td></tr>
+        <tr><td>Product value</td><td><b>${KES(principal)}</b></td></tr>
+        <tr><td>Available pre-loan deposit</td><td><b style="color:var(--success)">${KES(availableDeposit)}</b></td></tr>
+        <tr><td>Amount financed after deposit</td><td><b id="al-financed-value">${KES(initialFinancedPrincipal)}</b></td></tr>
+        <tr><td>6% service charge on financed amount</td><td><b id="al-service-value">${KES(serviceCharge)}</b></td></tr>
         <tr><td style="font-size:11px;color:var(--text-muted)">Member savings (5× limit: ${KES(maxAllowedLoan)})</td><td style="font-size:11px;color:var(--text-muted)">${KES(memberTotalSavings)}</td></tr>
       </table>
+      ${availableDeposit>0?`<div class="field" style="margin-top:12px"><label>Pre-loan deposit to apply (KES)</label><input id="al-deposit" type="number" min="0" max="${initialDeposit}" step="0.01" value="${initialDeposit.toFixed(2)}" oninput="recalculateApprovalTerms(${principal},true)" /><div class="muted" style="font-size:11px;margin-top:4px">This is deducted from the product value before calculating interest, charges and weekly instalments.</div></div>`:
+      `<input id="al-deposit" type="hidden" min="0" max="0" value="0" />`}
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin:12px 0;font-size:13px">
         <div style="font-weight:700;margin-bottom:8px">Upfront Fees (optional — for foodstuffs & building materials)</div>
         <div style="display:flex;flex-direction:column;gap:8px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="chk-app-fee" value="${applicationFee}" />
-            <span>3% Application Fee — <b>${KES(applicationFee)}</b> (deducted upfront)</span>
+            <span>3% Application Fee — <b id="al-app-fee-value">${KES(applicationFee)}</b> (deducted upfront)</span>
           </label>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="chk-ins-fee" value="${insuranceFee}" />
-            <span>3% Insurance Cover — <b>${KES(insuranceFee)}</b> (deducted upfront)</span>
+            <span>3% Insurance Cover — <b id="al-ins-fee-value">${KES(insuranceFee)}</b> (deducted upfront)</span>
           </label>
         </div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:8px">If not checked, the client repays all charges gradually through weekly installments.</div>
@@ -6224,9 +6292,10 @@ function approveOrder(o){
       </div>` : ''}
       <div class="divider"></div>
       <div class="grid-2">
-        <div class="field"><label>Desired Number of Weeks</label><input id="al-weeks" type="number" min="1" max="48" placeholder="e.g. 10" value="${o.desired_weeks||''}" /></div>
-        <div class="field"><label>Weekly Installment (KES)</label><input id="wi" type="number" min="1" placeholder="e.g. 500" value="${o.desired_weekly_installment||''}" /></div>
+        <div class="field"><label>Desired Number of Weeks</label><input id="al-weeks" type="number" min="1" max="48" placeholder="e.g. 10" value="${initialWeeks}" oninput="recalculateApprovalTerms(${principal},true)" /></div>
+        <div class="field"><label>Weekly Installment (KES)</label><input id="wi" type="number" min="1" placeholder="e.g. 500" value="${initialWeekly.toFixed(2)}" oninput="recalculateApprovalTerms(${principal},false)" /></div>
       </div>
+      <div class="summary-table" style="padding:10px 12px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:12px"><span>Total payable</span><b id="al-total-value">—</b></div><div style="display:flex;justify-content:space-between;gap:12px;margin-top:5px"><span>Calculated repayment period</span><b id="al-actual-weeks">—</b></div></div>
       <div class="field"><label>Loan start date</label><input id="sd" type="date" value="${todayISO()}" /></div>
       <div id="al-out" class="muted" style="font-size:12px"></div>
     </form>`,
@@ -6251,16 +6320,36 @@ function approveOrder(o){
           if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
           return;
         }
+        const requestedDeposit = Math.max(0,Number($('al-deposit')?.value||0));
+        const {data:freshDepositRows,error:freshDepositError}=await sb.from('pb_excess_payments')
+          .select('id,excess_amount,released_amount')
+          .eq('member_id',member.id).eq('status','pending').eq('source','pre_loan_deposit').is('loan_id',null);
+        if(freshDepositError){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast('Could not verify the client loan deposit: '+freshDepositError.message,'error');
+        }
+        const freshAvailable=(freshDepositRows||[]).reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0);
+        if(requestedDeposit>freshAvailable+0.005){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast(`Only ${KES(freshAvailable)} is currently available in this client's pre-loan deposit account. Reopen approval to refresh the amount.`,'error');
+        }
+        const depositToApply=Math.min(requestedDeposit,Math.max(0,principal-0.01));
+        const financedPrincipal=Math.round((principal-depositToApply)*100)/100;
         const weekly = Number($('wi').value)||0;
         const weeksInput = Number($('al-weeks').value)||0;
         const start = new Date($('sd').value);
         if(weekly <= 0) return toast('Weekly installment must be greater than zero.','error');
-        const r = computeSchedule(principal, weekly, 'flat', start);
-        const totalPayableWithCharge = loanTotalWithServiceCharge(r, principal);
+        const r = computeSchedule(financedPrincipal, weekly, 'flat', start);
+        const totalPayableWithCharge = loanTotalWithServiceCharge(r, financedPrincipal);
         const serviceChargeWeeks = weekly > 0 ? Math.ceil(totalPayableWithCharge / weekly) : r.weeks;
         const effectiveWeeks = weeksInput > 0 ? weeksInput : serviceChargeWeeks;
+        if(weeksInput>0 && serviceChargeWeeks>weeksInput){
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast(`${KES(weekly)} per week would take ${serviceChargeWeeks} weeks, but ${weeksInput} weeks was selected. Increase the weekly instalment to at least ${KES(minimumWeeklyForLoanTerm(financedPrincipal,weeksInput))}.`,'error');
+        }
         if(effectiveWeeks > 48 || serviceChargeWeeks > 48){
-          return toast('The maximum allowed loan term is 48 weeks. Please increase the weekly payment or reduce the weeks.','error');
+          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+          return toast(`${KES(weekly)} per week would take ${serviceChargeWeeks} weeks. Increase it to at least ${KES(minimumWeeklyForLoanTerm(financedPrincipal,48))} to remain within the 48-week maximum.`,'error');
         }
         const end = new Date(start); end.setDate(end.getDate() + 7*serviceChargeWeeks);
         const primaryLine = resolvedLines[0];
@@ -6271,13 +6360,27 @@ function approveOrder(o){
           member_id: member.id, group_id: member.group_id, officer_id: resolvedOfficerId,
           order_id: o.id, asset_id: primaryLine.asset.id, asset_name: o.asset_name,
           asset_quantity: resolvedLines.reduce((a,l)=>a+l.quantity,0),
-          loan_value: principal, weekly_installment: weekly, total_payable: totalPayableWithCharge,
+          loan_value: financedPrincipal, gross_loan_value: principal, deposit_applied: depositToApply,
+          agreed_term_weeks: serviceChargeWeeks, weekly_installment: weekly, total_payable: totalPayableWithCharge,
           start_date: $('sd').value, expected_end_date: end.toISOString().slice(0,10), status:'active'
         };
         const { data: loanData, error: loanErr } = await sb.from('pb_loans').insert(loan).select().single();
         if(loanErr){
           if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
           return toast('Loan save failed: '+loanErr.message,'error');
+        }
+
+        if(depositToApply>0){
+          const {data:depositResult,error:depositError}=await sb.rpc('pb_apply_preloan_deposit_to_loan',{
+            p_member_id:String(member.id),p_loan_id:String(loanData.id),p_amount:depositToApply
+          });
+          const applied=Number(depositResult?.applied_amount||0);
+          if(depositError || Math.abs(applied-depositToApply)>0.01){
+            await sb.from('pb_loans').delete().eq('id',loanData.id);
+            if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
+            return toast('Loan was not issued because the deposit could not be applied safely. '+(depositError?.message||'Please reopen the approval and try again.'),'error');
+          }
+          await refreshExcessRelatedData({memberIds:[member.id],loanIds:[loanData.id]});
         }
 
         for(const line of resolvedLines){
@@ -6290,17 +6393,18 @@ function approveOrder(o){
         state.data.loans.unshift(loanData);
         audit('loan_issue','pb_loans',loanData.id,null,loan);
 
-        const interestRatio = totalPayableWithCharge > 0 ? (totalPayableWithCharge - principal) / totalPayableWithCharge : 0;
+        const interestRatio = totalPayableWithCharge > 0 ? (totalPayableWithCharge - financedPrincipal) / totalPayableWithCharge : 0;
 
         // 25% deposit for loans > KES 20,000
-        if(requiresDeposit && depositAmount > 0){
-          const depositInterest = +(depositAmount * interestRatio).toFixed(2);
-          const depositPrincipal = +(depositAmount - depositInterest).toFixed(2);
+        const remainingRequiredDeposit=Math.max(0,depositAmount-depositToApply);
+        if(requiresDeposit && remainingRequiredDeposit > 0){
+          const depositInterest = +(remainingRequiredDeposit * interestRatio).toFixed(2);
+          const depositPrincipal = +(remainingRequiredDeposit - depositInterest).toFixed(2);
           const dep = {
             business_id: state.staff.business_id || null,
             loan_id: loanData.id, member_id: member.id, group_id: member.group_id,
             recorded_by: state.staff.id,
-            amount: depositAmount, principal: depositPrincipal, interest: depositInterest,
+            amount: remainingRequiredDeposit, principal: depositPrincipal, interest: depositInterest,
             meeting_date: $('sd').value,
             notes: 'Auto-recorded 25% upfront deposit (loan > KES 20,000)', status: 'approved'
           };
@@ -6312,13 +6416,15 @@ function approveOrder(o){
         // Optional upfront fees — only if approver checked the boxes
         const chargeAppFee = document.getElementById('chk-app-fee')?.checked;
         const chargeInsFee = document.getElementById('chk-ins-fee')?.checked;
+        const actualApplicationFee=Math.round(financedPrincipal*0.03*100)/100;
+        const actualInsuranceFee=Math.round(financedPrincipal*0.03*100)/100;
 
-        if(chargeAppFee && applicationFee > 0){
+        if(chargeAppFee && actualApplicationFee > 0){
           const feeRow = {
             business_id: state.staff.business_id || null,
             loan_id: loanData.id, member_id: member.id, group_id: member.group_id,
             recorded_by: state.staff.id,
-            amount: applicationFee, principal: applicationFee, interest: 0,
+            amount: actualApplicationFee, principal: actualApplicationFee, interest: 0,
             meeting_date: $('sd').value,
             notes: 'Upfront 3% Application Fee (approver selected)', status: 'approved'
           };
@@ -6326,12 +6432,12 @@ function approveOrder(o){
           if(feeData) state.data.repayments.unshift(feeData);
         }
 
-        if(chargeInsFee && insuranceFee > 0){
+        if(chargeInsFee && actualInsuranceFee > 0){
           const feeRow = {
             business_id: state.staff.business_id || null,
             loan_id: loanData.id, member_id: member.id, group_id: member.group_id,
             recorded_by: state.staff.id,
-            amount: insuranceFee, principal: insuranceFee, interest: 0,
+            amount: actualInsuranceFee, principal: actualInsuranceFee, interest: 0,
             meeting_date: $('sd').value,
             notes: 'Upfront 3% Insurance Cover (approver selected)', status: 'approved'
           };
@@ -6340,52 +6446,13 @@ function approveOrder(o){
         }
 
         closeModal(); refreshVisiblePage(renderPage);
-        toast(`Loan issued successfully${requiresDeposit?' — 25% deposit recorded':''}${chargeAppFee||chargeInsFee?' — selected fees recorded':''}.`,'success');
+        toast(`Loan issued successfully${depositToApply>0?` — ${KES(depositToApply)} pre-loan deposit deducted before financing`:''}${remainingRequiredDeposit>0?' — required deposit recorded':''}${chargeAppFee||chargeInsFee?' — selected fees recorded':''}.`,'success');
       }}
     ]
   });
   setTimeout(() => {
-    let _updating = false;
-    const updFromWeeks = () => {
-      if(_updating) return; _updating = true;
-      const weeks = Number($('al-weeks').value)||0;
-      if(weeks > 0){
-        const rate = state.settings?.monthly_interest_rate || 2.5;
-        const weeklyRate = (rate / 100) / 4;
-        const totalPayable = (principal * (1 + weeklyRate * weeks)) + loanServiceCharge(principal);
-        const wi = Math.ceil(totalPayable / weeks);
-        $('wi').value = wi;
-      }
-      _updating = false;
-      updSummary();
-    };
-    const updFromInstallment = () => {
-      if(_updating) return; _updating = true;
-      const weekly = Number($('wi').value)||0;
-      if(weekly > 0){
-        const s = new Date($('sd').value||todayISO());
-        const r = computeSchedule(principal, weekly, 'flat', s);
-        const totalPayable = loanTotalWithServiceCharge(r, principal);
-        $('al-weeks').value = Math.ceil(totalPayable / weekly);
-      }
-      _updating = false;
-      updSummary();
-    };
-    const updSummary = () => {
-      const w = Number($('wi').value)||0;
-      if(!w){ $('al-out').innerHTML = ''; return; }
-      const s = new Date($('sd').value||todayISO());
-      const r = computeSchedule(principal, w, 'flat', s);
-      const service = loanServiceCharge(principal);
-      const totalPayable = loanTotalWithServiceCharge(r, principal);
-      const weeks = Math.ceil(totalPayable / w);
-      const over52 = weeks > 48;
-      $('al-out').innerHTML = `Total payable ${KES(totalPayable)} incl. 6% charge ${KES(service)} - Total interest ${KES(r.totalInterest)} - ${weeks} weeks${over52 ? ' <span class="danger-text">(exceeds 48-week limit)</span>' : ''}`;
-    };
-    $('al-weeks').addEventListener('input', updFromWeeks);
-    $('wi').addEventListener('input', updFromInstallment);
-    $('sd').addEventListener('change', updSummary);
-    updSummary();
+    $('sd')?.addEventListener('change',()=>recalculateApprovalTerms(principal,false));
+    recalculateApprovalTerms(principal,false);
   }, 50);
 }
 
