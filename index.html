@@ -1958,6 +1958,7 @@ async function rejectDuplicatePendingRepayments(){
     if(error) return toast(error.message,'error');
     state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='rejected');
     audit('bulk_reject_duplicate_repayments','pb_repayments',null,null,{ count:ids.length, ids });
+    state._repaymentApprovalsFreshAt=0;
     render();
     toast(`${ids.length} duplicate repayment${ids.length!==1?'s':''} rejected.`, 'success');
   },{ title:'Reject duplicate repayments', danger:true });
@@ -9676,6 +9677,16 @@ async function approveAllSavings(){
 }
 
 function pageRepaymentApprovals(){
+  const freshAt=Number(state._repaymentApprovalsFreshAt||0);
+  if(Date.now()-freshAt>15000){
+    $('page').innerHTML=`<div class="card" style="padding:32px;text-align:center"><div class="spinner" style="margin-bottom:12px"></div><h3>Checking live repayment approvals...</h3><p class="muted">Fetching the current pending list from Supabase.</p></div>`;
+    refreshPendingRepaymentApprovals()
+      .then(()=>pageRepaymentApprovals())
+      .catch(error=>{
+        $('page').innerHTML=`<div class="card" style="padding:32px;text-align:center"><h3>Could not refresh repayments</h3><p class="muted">${escapeHtml(error.message||'Please try again.')}</p><button class="btn btn-primary" onclick="state._repaymentApprovalsFreshAt=0;pageRepaymentApprovals()">Retry</button></div>`;
+      });
+    return;
+  }
   const pending = state.data.repayments
     .filter(r => r.status === 'pending' && isClientRepayment(r))
     .sort((a,b)=>String(b.created_at||b.meeting_date||'').localeCompare(String(a.created_at||a.meeting_date||'')));
@@ -9802,6 +9813,26 @@ function isHeldPrepaymentSource(repayment){
   return !!deposit && Number(deposit.amount_applied_to_loan||0)<=0.005;
 }
 
+async function refreshPendingRepaymentApprovals(){
+  const result=await fetchPagedBusinessRows(
+    'pb_repayments',
+    query=>query.eq('status','pending').order('created_at',{ascending:false})
+  );
+  if(result.error) throw result.error;
+  const pendingRows=(result.data||[]).filter(isClientRepayment);
+  const pendingById=new Map(pendingRows.map(row=>[row.id,row]));
+  const existing=state.data.repayments||[];
+  state.data.repayments=[
+    ...existing
+      .filter(row=>!(row.status==='pending' && isClientRepayment(row)) || pendingById.has(row.id))
+      .map(row=>pendingById.has(row.id)?{...row,...pendingById.get(row.id),status:'pending'}:row),
+    ...pendingRows.filter(row=>!existing.some(old=>old.id===row.id))
+  ];
+  state._repaymentApprovalsFreshAt=Date.now();
+  await writeFinancialCache('pb_repayments',state.data.repayments,Date.now());
+  return pendingRows;
+}
+
 async function approveRepaymentBatch(ids){
   const approvedRows=[];
   const failures=[];
@@ -9845,6 +9876,7 @@ async function approveOneRepayment(id, btn){
   await refreshExcessRelatedData({repaymentIds:[id],loanIds:[r.loan_id]});
   const closed = await closeFullyPaidLoans([r.loan_id], { silent:true });
   await audit('approve_repayment','pb_repayments',id,{status:'pending'},{status:'approved',loan_id:r.loan_id,amount:r.amount});
+  state._repaymentApprovalsFreshAt=0;
   refreshVisiblePage(pageRepaymentApprovals);
   const deposit=repaymentDepositRecord(id);
   toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment approved.','success');
@@ -9859,6 +9891,7 @@ async function rejectOneRepayment(id, btn){
     if(error) return toast(error.message,'error');
     r.status = 'rejected';
     await audit('reject_repayment','pb_repayments',id,{status:'pending'},{status:'rejected',loan_id:r.loan_id,amount:r.amount});
+    state._repaymentApprovalsFreshAt=0;
     refreshVisiblePage(pageRepaymentApprovals);
     toast('Repayment rejected.','warn');
   },{ title:'Reject Repayment', danger:true });
@@ -9882,6 +9915,7 @@ async function approveGroupRepayments(groupName){
     repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
   });
   const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
+  state._repaymentApprovalsFreshAt=0;
   refreshVisiblePage(pageRepaymentApprovals);
   const message=`${approvedRows.length} repayment(s) for ${groupName} approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
   const firstFailure=failures[0];
@@ -9908,6 +9942,7 @@ async function approveAllRepayments(){
       repayment_ids:approvedRows.slice(0,100).map(row=>row.id)
     });
     const depositCount=ids.filter(id=>repaymentDepositRecord(id)).length;
+    state._repaymentApprovalsFreshAt=0;
     refreshVisiblePage(pageRepaymentApprovals);
     const message=`${approvedRows.length} repayment(s) approved${depositCount?`; ${depositCount} advance payment(s) moved to loan deposits`:''}${closed?`; ${closed} loan(s) closed`:''}.`;
     const firstFailure=failures[0];
