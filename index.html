@@ -344,12 +344,16 @@ const INCREMENTAL_CACHE_TABLES = new Set([
   'pb_reconciliations','pb_expenses'
 ]);
 const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
-const FINANCIAL_CACHE_VERSION = 1;
+const FINANCIAL_CACHE_VERSION = 2;
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
+const CORE_PORTFOLIO_FULL_SYNC_MS = 2 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const INCREMENTAL_FALLBACK_DAYS = 3;
 const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
 const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
+const CORE_PORTFOLIO_TABLES = new Set([
+  'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory'
+]);
 
 function openFinancialCache(){
   return new Promise((resolve,reject)=>{
@@ -1004,7 +1008,8 @@ async function removeDeletedCachedRows(table,rows){
 async function loadBusinessTableOptimized(table){
   if(!INCREMENTAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
   const cached=await readFinancialCache(table);
-  const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=INCREMENTAL_FULL_SYNC_MS;
+  const fullSyncMs=CORE_PORTFOLIO_TABLES.has(table)?CORE_PORTFOLIO_FULL_SYNC_MS:INCREMENTAL_FULL_SYNC_MS;
+  const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=fullSyncMs;
   if(needsFull){
     const result=await fetchBusinessTableRows(table);
     if(!result.error) await writeFinancialCache(table,result.data,Date.now());
