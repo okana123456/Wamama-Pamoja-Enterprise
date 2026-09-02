@@ -2765,6 +2765,14 @@ function pageOfficerDashboard(){
   const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsInBalance(r) && isClientRepayment(r));
   const {repaymentsByLoan}=buildBalanceIndexes();
   const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
+  const myArrearsRows = buildArrearsRows({
+    portfolioView:false,
+    teamView,
+    groupIds:myGroupIds,
+    dateRange:{start:'2000-01-01',end:'2999-12-31'},
+    tab:'arrears'
+  }).filter(r=>teamView || r.officer?.id===me.id || r.loan.officer_id===me.id || myGroupIds.has(r.group?.id));
+  const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRp = myRepay.reduce((a,b)=>a+Number(b.amount||0),0);
   const myOutstandingBal = myLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
@@ -2813,6 +2821,7 @@ function pageOfficerDashboard(){
       <div class="kpi"><div class="l">Repayments recorded</div><div class="v">${KES(totalRp)}</div><div class="d">Interest ${KES(myInterestEarned)}</div></div>
       <div class="kpi k-warn"><div class="l">${teamView ? 'Team active loans' : 'Active loans I manage'}</div><div class="v">${myLoans.length}</div></div>
       <div class="kpi k-danger"><div class="l">Outstanding balance</div><div class="v">${KES(myOutstandingBal)}</div><div class="d">across my active loans</div></div>
+      <div class="kpi k-danger"><div class="l">Accounts in arrears</div><div class="v">${myArrearsRows.length}</div><div class="d">${KES(myArrearsTotal)} overdue</div></div>
       <div class="kpi k-primary"><div class="l">Loans Issued Today</div><div class="v">${KES(myLoansIssuedToday)}</div><div class="d">active loans started today</div></div>
       ${(myPendingSavings.length + myPendingRepayments.length) > 0 ? `
       <div class="kpi" style="border-top:3px solid var(--warning);background:var(--warning-50)">
@@ -2845,6 +2854,22 @@ function pageOfficerDashboard(){
           }).join('') || `<tr><td colspan="6"><div class="empty" style="padding:20px 0"><h4>No groups assigned</h4></div></td></tr>`}
         </tbody>
       </table></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head"><h3>${teamView ? 'Team accounts in arrears' : 'My accounts in arrears'}</h3><div class="sub">${myArrearsRows.length} account${myArrearsRows.length!==1?'s':''} · ${KES(myArrearsTotal)}</div></div>
+      <div style="overflow-x:auto"><table class="tbl">
+        <thead><tr><th>Member</th><th>Group</th><th>Asset</th><th class="num">Arrears</th><th>Next Due</th></tr></thead>
+        <tbody>
+          ${myArrearsRows.slice(0,50).map(r=>`<tr>
+            <td><b>${r.member?.full_name||'—'}</b><div class="muted" style="font-size:11px">${r.member?.phone||''}</div></td>
+            <td>${r.group?.name||'—'}</td>
+            <td>${r.loan.asset_name||'—'}</td>
+            <td class="num"><b style="color:var(--danger)">${KES(r.arrears)}</b></td>
+            <td>${fmtDate(r.nextDueDate)}</td>
+          </tr>`).join('') || `<tr><td colspan="5"><div class="empty" style="padding:20px 0"><h4>No arrears in your portfolio</h4></div></td></tr>`}
+        </tbody>
+      </table></div>
+      ${myArrearsRows.length>50?`<div class="helper" style="margin-top:10px">Showing 50 of ${myArrearsRows.length}. Open Due & Arrears to view the full list.</div>`:''}
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-head"><h3>My Active Loans</h3><div class="sub">${myLoans.length} active loans</div></div>
@@ -4125,6 +4150,54 @@ function currentPortfolioOfficerForLoan(loan){
   const group=currentPortfolioGroupForLoan(loan);
   return state.data.staff.find(s=>s.id===(group?.officer_id||loan?.officer_id))||null;
 }
+function buildArrearsRows(options={}){
+  const portfolioView = options.portfolioView ?? canViewAllPortfolio();
+  const teamView = options.teamView ?? isSupervisorScoped();
+  const groupIds = options.groupIds instanceof Set ? options.groupIds : new Set(options.groupIds||[]);
+  const { start: drStart, end: drEnd } = options.dateRange || arrearDateRange();
+  const tab = options.tab || null;
+  const officerFilter = options.officerFilter || '';
+  const today = todayISO();
+  const msPerWeek = 7 * 24 * 3600 * 1000;
+  const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
+  const activeLoans = (state.data.loans||[]).filter(l => {
+    if(l.status !== 'active') return false;
+    const startDate = String(l.start_date||'').slice(0,10);
+    if(startDate < drStart || startDate > drEnd) return false;
+    const group = currentPortfolioGroupForLoan(l);
+    const officer = currentPortfolioOfficerForLoan(l);
+    return portfolioView || groupIds.has(group?.id) || officer?.id === state.staff.id || l.officer_id === state.staff.id;
+  });
+
+  let rows = activeLoans.map(l => {
+    const member = state.data.members.find(x => x.id === l.member_id);
+    const group = currentPortfolioGroupForLoan(l);
+    const officer = currentPortfolioOfficerForLoan(l);
+    const paid = loanPaid(l.id);
+    const startDate = new Date(l.start_date);
+    const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
+    const weekly = Number(l.weekly_installment) || 0;
+    const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
+    const arrears = Math.max(0, expectedPaid - paid - 5);
+
+    let nextDueDate = null;
+    for (let w = 1; w <= 1040; w++) {
+      const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
+      const ds = d.toISOString().slice(0,10);
+      if (ds >= today) { nextDueDate = ds; break; }
+    }
+
+    let category = 'ontrack';
+    if (nextDueDate === today) category = 'duetoday';
+    else if (arrears > 0) category = 'arrears';
+    else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
+
+    return { loan:l, member, group, officer, paid, arrears, nextDueDate, expectedInstallment:weekly, category };
+  });
+  if(tab && tab !== 'all') rows = rows.filter(r => r.category === tab);
+  if(officerFilter) rows = rows.filter(r => r.officer?.id === officerFilter || r.loan.officer_id === officerFilter);
+  return rows;
+}
 function collectionSelectedWeek(){
   const start=mondayOfWeek(state._collectionWeekStart||collectionTodayISO());
   return { start,end:addDateDays(start,6) };
@@ -4797,47 +4870,7 @@ function pageArrears(){
   const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
   const myGroupIds = portfolioView ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
-  const { start: drStart, end: drEnd } = arrearDateRange();
-
-  // Active loans matching visibility rules AND start_date within selected range
-  const activeLoans = state.data.loans.filter(l =>
-    l.status === 'active'
-    && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(currentPortfolioGroupForLoan(l)?.id) || currentPortfolioOfficerForLoan(l)?.id === state.staff.id)
-  );
-
-  const today = todayISO();
-  const msPerWeek = 7 * 24 * 3600 * 1000;
-  const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
-
-  const report = activeLoans.map(l => {
-    const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = currentPortfolioGroupForLoan(l);
-    const off = currentPortfolioOfficerForLoan(l);
-    const paid = loanPaid(l.id);
-
-    const startDate = new Date(l.start_date);
-    const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
-    const weekly = Number(l.weekly_installment) || 0;
-    const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears = Math.max(0, expectedPaid - paid - 5);
-
-    let nextDueDate = null;
-    for (let w = 1; w <= 1040; w++) {
-      const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
-      const ds = d.toISOString().slice(0,10);
-      // >= today so a payment due TODAY is captured, not skipped to next week
-      if (ds >= today) { nextDueDate = ds; break; }
-    }
-
-    let category = 'ontrack';
-    // Due Today takes priority so officers can collect BEFORE it becomes arrears
-    if (nextDueDate === today) category = 'duetoday';
-    else if (arrears > 0) category = 'arrears';
-    else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
-
-    return { loan: l, member: mem, group: g, officer: off, paid, arrears, nextDueDate, expectedInstallment: weekly, category };
-  });
+  const report = buildArrearsRows({ portfolioView, teamView, groupIds:myGroupIds });
 
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
