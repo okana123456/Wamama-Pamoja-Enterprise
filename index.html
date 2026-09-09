@@ -1236,7 +1236,7 @@ async function audit(action, entity=null, entity_id=null, oldV=null, newV=null){
  * DERIVED METRICS
  * ===================================================================== */
 function countsInBalance(row){
-  return !['pending','rejected','cancelled'].includes(String(row?.status || 'approved').toLowerCase());
+  return !row?.voided_at && !['pending','rejected','cancelled'].includes(String(row?.status || 'approved').toLowerCase());
 }
 function memberSavings(memberId){
   return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
@@ -2549,15 +2549,15 @@ function pageDashboard(){
   };
 
   const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s));
-  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && countsInBalance(r) && isClientRepayment(r));
+  const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
   const {savingsByMember,repaymentsByLoan}=buildBalanceIndexes();
   const totalSavings = savings.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalRepay = repayments.reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalRepay = repayments.reduce((a,b)=>a+repaymentCashReceived(b),0);
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
   const activeLoanBalances = activeLoans.map(loanBalanceInfo);
   const outstandingBal = activeLoanBalances.reduce((a,l)=>a+l.outstandingPI,0);
   const outstandingPrincipal = activeLoanBalances.reduce((a,l)=>a+l.outstandingPrincipal,0);
-  const interestEarned = repayments.reduce((a,r)=>a+Number(r.interest||0),0);
+  const interestEarned = repayments.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   const savingsThreshold=Number(state.settings?.savings_threshold||400);
   const eligibleCount = state.data.members.filter(m=>(savingsByMember.get(m.id)||0)>=savingsThreshold).length;
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
@@ -2875,7 +2875,7 @@ function pageOfficerDashboard(){
     return false;
   };
   const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
-  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsInBalance(r) && isClientRepayment(r));
+  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
   const {repaymentsByLoan}=buildBalanceIndexes();
   const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
   const myArrearsRows = buildArrearsRows({
@@ -2887,9 +2887,9 @@ function pageOfficerDashboard(){
   }).filter(r=>teamView || r.officer?.id===me.id || r.loan.officer_id===me.id || myGroupIds.has(r.group?.id));
   const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalRp = myRepay.reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalRp = myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
   const myOutstandingBal = myLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
-  const myInterestEarned = myRepay.reduce((a,r)=>a+Number(r.interest||0),0);
+  const myInterestEarned = myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
   const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending');
@@ -3913,18 +3913,7 @@ async function mpDeleteRepayment(id){
   },{ title:'Delete Repayment Entry', danger:true });
 }
 function mpRepaymentMenu(ev, id, isPending){
-  const isAdmin = state.staff.role==='admin';
-  const isOfficer = ( state.staff.role==='officer' || state.staff.role==='loan_officer');
-  const items = [{ label:'✏ Edit Entry', onClick:()=>openEditRepayment(id) }];
-  if(isPending && isAdmin){
-    items.push('sep');
-    items.push({ label:'✓ Approve', onClick:()=>mpApproveRepayment(id) });
-  }
-  if(isAdmin || isOfficer){
-    items.push('sep');
-    items.push({ label:'🗑 Delete entry', danger:true, onClick:()=>mpDeleteRepayment(id) });
-  }
-  showActMenu(ev, items);
+  repRowActions(ev,id);
 }
 
 /* =====================================================================
@@ -3937,7 +3926,7 @@ function pageMemberProfile(){
   const g = state.data.groups.find(x=>x.id===m.group_id);
   const guars = state.data.guarantors.filter(x=>x.member_id===m.id);
   const sv = state.data.savings.filter(x=>x.member_id===m.id).sort((a,b)=>b.meeting_date.localeCompare(a.meeting_date));
-  const totalSv = sv.filter(s=>s.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalSv = sv.filter(countsInBalance).reduce((a,b)=>a+Number(b.amount||0),0);
   const activeMemberLoans = state.data.loans.filter(l=>l.member_id===m.id&&l.status==='active');
   const activeLoanPrincipal = activeMemberLoans.reduce((sum,l)=>sum+Number(l.loan_value||0),0);
   const activeLoanOutstanding = activeMemberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-loanPaid(l.id)),0);
@@ -4034,13 +4023,13 @@ function pageMemberProfile(){
           let running = 0;
           const rowsHtml = [...svFiltered].reverse().map(s=>{
             const isPending = s.status === 'pending';
-            if(!isPending) running += Number(s.amount||0);
+            if(countsInBalance(s)) running += Number(s.amount||0);
             const officer = state.data.staff.find(x=>x.id===s.recorded_by);
             return `<tr${isPending?' style="background:var(--warning-50)"':''}>
               <td>${fmtDate(s.meeting_date)}</td>
               <td class="num">${KES(s.amount)}${s.edit_notes?'<span title="Edited" style="margin-left:4px;font-size:10px;color:var(--warning);cursor:help">✎</span>':''}</td>
-              <td class="num" style="color:${isPending?'var(--text-muted)':'var(--success)'}">${isPending?'—':KES(running)}</td>
-              <td>${isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':'<span class="badge b-green">Approved</span>'}</td>
+              <td class="num" style="color:${countsInBalance(s)?'var(--success)':'var(--text-muted)'}">${countsInBalance(s)?KES(running):'—'}</td>
+              <td>${isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':countsInBalance(s)?'<span class="badge b-green">Approved</span>':`<span class="badge b-grey">${statementHtml(s.status||'Excluded')}</span>`}</td>
               <td>${officer?.full_name||'—'}</td>
               ${canEdit?`<td><button class="act-btn" onclick="mpSavingMenu(event,'${s.id}',${isPending})">···</button></td>`:''}
             </tr>`;
@@ -4137,7 +4126,7 @@ function pageMemberProfile(){
           <div class="card-head">
             <h3>Repayment history</h3>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <div class="sub">Approved total: ${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
+              <div class="sub">Payments received: ${KES(repayments.filter(countsAsCashReceived).reduce((a,b)=>a+repaymentCashReceived(b),0))}${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning);font-weight:600">${repayments.filter(r=>r.status==='pending').length} pending approval</span>`:''}</div>
               ${activeMemberLoans.length && canRecordRepayment() ? `<button class="btn btn-sm btn-primary" onclick="openMemberRepayment('${m.id}')">Record Repayment</button>` : ''}
               <button class="btn btn-sm btn-outline" onclick="openPreLoanDeposit('${m.id}')">Record Pre-loan Product Deposit</button>
             </div>
@@ -4160,14 +4149,15 @@ function pageMemberProfile(){
                 const loan = state.data.loans.find(x=>x.id===r.loan_id);
                 const canEdit = state.staff.role==='admin' || ( state.staff.role==='officer' || state.staff.role==='loan_officer');
                 const isPending = r.status === 'pending';
-                return `<tr${isPending?' style="background:var(--warning-50)"':''}>
+                const isVoided = !!r.voided_at;
+                return `<tr${isVoided?' style="opacity:.65;background:var(--surface-2)"':isPending?' style="background:var(--warning-50)"':''}>
                   <td><b>${loan?loanDisplayCode(loan):'—'}</b><div class="muted" style="font-size:11px">${loan?.asset_name||''}</div></td>
                   <td>${fmtDate(r.meeting_date)}</td>
-                  <td class="num"><b>${KES(r.amount)}</b>${r.edit_notes?'<span title="Edited" style="margin-left:4px;font-size:10px;color:var(--warning);cursor:help">✎</span>':''}</td>
-                  <td class="num">${KES(r.principal)}</td>
-                  <td class="num">${KES(r.interest)}</td>
+                  <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${repaymentDepositAmount(r)>0?`<div class="muted" style="font-size:10px">${KES(repaymentAppliedAmount(r))} applied · ${KES(repaymentDepositAmount(r))} deposit</div>`:''}${r.edit_notes?'<span title="Edited" style="margin-left:4px;font-size:10px;color:var(--warning);cursor:help">✎</span>':''}</td>
+                  <td class="num">${KES(repaymentAppliedPrincipal(r))}</td>
+                  <td class="num">${KES(repaymentAppliedInterest(r))}</td>
                   <td class="num">${balanceAfterByRepayment.has(String(r.id)) ? KES(balanceAfterByRepayment.get(String(r.id))) : '—'}</td>
-                  <td>${isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':'<span class="badge b-green">Approved</span>'}</td>
+                  <td>${isVoided?'<span class="badge b-grey">Voided</span>':isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':countsAsCashReceived(r)?'<span class="badge b-green">Received</span>':`<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
                   <td>${officer?.full_name||'—'}</td>
                   ${canEdit?`<td><button class="act-btn" onclick="mpRepaymentMenu(event,'${r.id}',${isPending})">···</button></td>`:''}
                 </tr>`;
@@ -6824,7 +6814,7 @@ function buildReportRows(kind){
         dateInReportRange(s.meeting_date,s.created_at,range)
       );
       const periodRepayments = (state.data.repayments||[]).filter(r=>
-        countsInBalance(r) && isClientRepayment(r) && matchesGroup(r) && (r.recorded_by===o.id || officerGroupIds.has(r.group_id)) &&
+        countsAsCashReceived(r) && isClientRepayment(r) && matchesGroup(r) && (r.recorded_by===o.id || officerGroupIds.has(r.group_id)) &&
         dateInReportRange(r.meeting_date,r.created_at,range)
       );
       const officerLoans = filteredLoans.filter(l=>l.officer_id===o.id || officerGroupIds.has(l.group_id));
@@ -6845,7 +6835,7 @@ function buildReportRows(kind){
         LoansDisbursed: periodLoans.reduce((sum,l)=>sum+Number(l.loan_value||0),0),
         LoansClosed: closedLoans.length,
         ClientAccountsClosed: closedClientIds.size,
-        Collections: periodRepayments.reduce((sum,r)=>sum+Number(r.amount||0),0),
+        Collections: periodRepayments.reduce((sum,r)=>sum+repaymentCashReceived(r),0),
         OutstandingPrincipal: balances.reduce((sum,b)=>sum+b.outstandingPrincipal,0),
         OutstandingPI: balances.reduce((sum,b)=>sum+b.outstandingPI,0)
       };
@@ -8974,8 +8964,8 @@ function reconAutoTotals(groupId){
     .filter(s=>s.group_id===gid && s.meeting_date===date)
     .reduce((a,b)=>a+Number(b.amount||0),0);
   const rp = state.data.repayments
-    .filter(r=>r.group_id===gid && r.meeting_date===date)
-    .reduce((a,b)=>a+Number(b.amount||0),0);
+    .filter(r=>r.group_id===gid && r.meeting_date===date && countsAsCashReceived(r))
+    .reduce((a,b)=>a+repaymentCashReceived(b),0);
   if($('rec-sv')) $('rec-sv').value = sv;
   if($('rec-rp')) $('rec-rp').value = rp;
   reconRecalc();
@@ -9070,12 +9060,12 @@ function pageAccounting(){
   const filterBtns = [['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']];
 
   // === INCOME ===
-  const savingsInPeriod = state.data.savings.filter(s=>inRange(s.meeting_date||''));
+  const savingsInPeriod = state.data.savings.filter(s=>inRange(s.meeting_date||'') && countsInBalance(s));
   const totalSavingsIn = savingsInPeriod.reduce((a,b)=>a+Number(b.amount||0),0);
-  const repayInPeriod = state.data.repayments.filter(r=>inRange(r.meeting_date||'') && isClientRepayment(r));
-  const totalPrincipalIn = repayInPeriod.reduce((a,b)=>a+Number(b.principal||0),0);
-  const totalInterestIn = repayInPeriod.reduce((a,b)=>a+Number(b.interest||0),0);
-  const totalRepayIn = repayInPeriod.reduce((a,b)=>a+Number(b.amount||0),0);
+  const repayInPeriod = state.data.repayments.filter(r=>inRange(r.meeting_date||'') && isClientRepayment(r) && countsAsCashReceived(r));
+  const totalPrincipalIn = repayInPeriod.reduce((a,b)=>a+repaymentAppliedPrincipal(b),0);
+  const totalInterestIn = repayInPeriod.reduce((a,b)=>a+repaymentAppliedInterest(b),0);
+  const totalRepayIn = repayInPeriod.reduce((a,b)=>a+repaymentCashReceived(b),0);
 
   // === FIX 4: Registration Fees ===
   const membersRegisteredInPeriod = state.data.members.filter(m=>inRange(m.registered_on||''));
@@ -9117,7 +9107,7 @@ function pageAccounting(){
   // By-group savings breakdown
   const groupBreakdown = state.data.groups.map(g=>{
     const sv = savingsInPeriod.filter(s=>s.group_id===g.id).reduce((a,b)=>a+Number(b.amount||0),0);
-    const rp = repayInPeriod.filter(r=>r.group_id===g.id).reduce((a,b)=>a+Number(b.amount||0),0);
+    const rp = repayInPeriod.filter(r=>r.group_id===g.id).reduce((a,b)=>a+repaymentCashReceived(b),0);
     return { name:g.name, savings:sv, repayments:rp, total:sv+rp };
   }).filter(g=>g.total>0).sort((a,b)=>b.total-a.total);
 
@@ -9646,11 +9636,11 @@ function pageSavings(){
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
   ];
 
-  const totalAmt = filtered.reduce((a,b)=>a+Number(b.amount||0),0);
+  const totalAmt = filtered.filter(countsInBalance).reduce((a,b)=>a+Number(b.amount||0),0);
 
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>Savings Ledger</h1><div class="desc">${filtered.length} entries · Total ${KES(totalAmt)}</div></div>
+      <div><h1>Savings Ledger</h1><div class="desc">${filtered.length} entries · Approved total ${KES(totalAmt)}</div></div>
       <div class="actions">
         <button class="btn btn-outline" onclick="exportSavingsFiltered()">⬇ Export to Excel</button>
       </div>
@@ -9840,6 +9830,16 @@ function repDateRange(){
 }
 
 function pageSavingsApprovals(){
+  const freshAt=Number(state._savingsApprovalsFreshAt||0);
+  if(Date.now()-freshAt>15000){
+    $('page').innerHTML=`<div class="card" style="padding:32px;text-align:center"><div class="spinner" style="margin-bottom:12px"></div><h3>Checking live savings approvals...</h3><p class="muted">Fetching the current pending list from Supabase.</p></div>`;
+    refreshPendingSavingsApprovals()
+      .then(()=>pageSavingsApprovals())
+      .catch(error=>{
+        $('page').innerHTML=`<div class="card" style="padding:32px;text-align:center"><h3>Could not refresh savings approvals</h3><p class="muted">${escapeHtml(error.message||'Please try again.')}</p><button class="btn btn-primary" onclick="state._savingsApprovalsFreshAt=0;pageSavingsApprovals()">Retry</button></div>`;
+      });
+    return;
+  }
   const pending = state.data.savings
     .filter(s => s.status === 'pending')
     .sort((a,b)=>String(b.created_at||b.meeting_date||'').localeCompare(String(a.created_at||a.meeting_date||'')));
@@ -9933,6 +9933,26 @@ function pageSavingsApprovals(){
         </div>
       </div>` : ''}
   `;
+}
+
+async function refreshPendingSavingsApprovals(){
+  const result=await fetchPagedBusinessRows(
+    'pb_savings',
+    query=>query.eq('status','pending').order('created_at',{ascending:false})
+  );
+  if(result.error) throw result.error;
+  const pendingRows=result.data||[];
+  const pendingById=new Map(pendingRows.map(row=>[row.id,row]));
+  const existing=state.data.savings||[];
+  state.data.savings=[
+    ...existing
+      .filter(row=>row.status!=='pending' || pendingById.has(row.id))
+      .map(row=>pendingById.has(row.id)?{...row,...pendingById.get(row.id),status:'pending'}:row),
+    ...pendingRows.filter(row=>!existing.some(old=>old.id===row.id))
+  ];
+  state._savingsApprovalsFreshAt=Date.now();
+  await writeFinancialCache('pb_savings',state.data.savings,Date.now());
+  return pendingRows;
 }
 
 async function approveOneSaving(id, btn){
@@ -10117,6 +10137,36 @@ function repaymentDepositRecord(repaymentId){
     String(row.original_repayment_id)===String(repaymentId)
     && row.source==='scheduled_prepayment'
   )||null;
+}
+
+function repaymentCashReceived(repayment){
+  if(!repayment || repayment.voided_at) return 0;
+  const deposit=repaymentDepositRecord(repayment.id);
+  return Number(deposit?.original_payment_amount ?? repayment.amount ?? 0);
+}
+
+function countsAsCashReceived(repayment){
+  if(!repayment || repayment.voided_at || String(repayment.status||'').toLowerCase()==='pending') return false;
+  return countsInBalance(repayment) || !!repaymentDepositRecord(repayment.id);
+}
+
+function repaymentDepositAmount(repayment){
+  const deposit=repaymentDepositRecord(repayment?.id);
+  return Math.max(0,Number(deposit?.excess_amount||0));
+}
+
+function repaymentAppliedAmount(repayment){
+  if(!repayment || repayment.voided_at) return 0;
+  const deposit=repaymentDepositRecord(repayment.id);
+  return Math.max(0,Number(deposit?.amount_applied_to_loan ?? repayment.amount ?? 0));
+}
+
+function repaymentAppliedPrincipal(repayment){
+  return repaymentAppliedAmount(repayment)>0 ? Number(repayment?.principal||0) : 0;
+}
+
+function repaymentAppliedInterest(repayment){
+  return repaymentAppliedAmount(repayment)>0 ? Number(repayment?.interest||0) : 0;
 }
 
 function isHeldPrepaymentSource(repayment){
@@ -10465,10 +10515,10 @@ function pageRepayments(){
     ['today','Today'],['yesterday','Yesterday'],['week','This Week'],['month','This Month'],['custom','Custom Range']
   ];
 
-  const countedClientReps=clientReps.filter(countsInBalance);
-  const totalAmt      = countedClientReps.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalPrincipal= countedClientReps.reduce((a,b)=>a+Number(b.principal||0),0);
-  const totalInterest = countedClientReps.reduce((a,b)=>a+Number(b.interest||0),0);
+  const countedClientReps=clientReps.filter(countsAsCashReceived);
+  const totalAmt      = countedClientReps.reduce((a,b)=>a+repaymentCashReceived(b),0);
+  const totalPrincipal= countedClientReps.reduce((a,b)=>a+repaymentAppliedPrincipal(b),0);
+  const totalInterest = countedClientReps.reduce((a,b)=>a+repaymentAppliedInterest(b),0);
 
   $('page').innerHTML = `
     <div class="page-head">
@@ -10517,19 +10567,20 @@ function pageRepayments(){
             const ln = state.data.loans.find(x=>x.id===r.loan_id);
             const rec = state.data.staff.find(x=>x.id===r.recorded_by);
             const isPending = r.status === 'pending';
+            const isVoided = !!r.voided_at;
             const isFee = !isClientRepayment(r);
             const heldDeposit=isHeldPrepaymentSource(r);
             const deposit=heldDeposit?repaymentDepositRecord(r.id):null;
-            return `<tr${isPending ? ' style="background:var(--warning-50)"' : heldDeposit ? ' style="background:#fff8e1"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
+            return `<tr${isVoided ? ' style="opacity:.65;background:var(--surface-2)"' : isPending ? ' style="background:var(--warning-50)"' : heldDeposit ? ' style="background:#fff8e1"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
               <td>${fmtDate(r.meeting_date)}</td>
               <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${isFee?`<span style="color:var(--warning);font-size:10px">${r.notes}</span>`:mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td style="font-size:12px">${ln?.asset_name||'—'}</td>
-              <td class="num"><b>${KES(r.amount)}</b>${heldDeposit?`<div style="font-size:10px;color:var(--warning)">${KES(deposit?.excess_amount||r.amount)} held for future due dates</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
+              <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${repaymentDepositAmount(r)>0?`<div style="font-size:10px;color:var(--text-muted)">${KES(r.amount)} applied · ${KES(repaymentDepositAmount(r))} to loan deposit</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
               </td>
-              <td class="num">${KES(r.principal)}</td>
-              <td class="num" style="color:var(--warning)">${KES(r.interest)}</td>
-              <td>${isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${String(r.status||'Excluded')}</span>`}</td>
+              <td class="num">${KES(repaymentAppliedPrincipal(r))}</td>
+              <td class="num" style="color:var(--warning)">${KES(repaymentAppliedInterest(r))}</td>
+              <td>${isVoided ? `<span class="badge b-grey" title="${statementHtml(r.void_reason||'')}">Voided</span>` : isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${String(r.status||'Excluded')}</span>`}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
               <td>${ln?`<button class="btn btn-outline btn-sm" onclick="openWamamaRepaymentStatement('${ln.id}')">Statement</button>`:'&mdash;'}</td>
@@ -10606,8 +10657,12 @@ async function refreshExcessRelatedData({loanIds=[],repaymentIds=[],memberIds=[]
   if(firstError) throw firstError;
   state.data.loans=mergeFreshRows(state.data.loans,loanResult.data);
   state.data.repayments=mergeFreshRows(state.data.repayments,repaymentResult.data);
+  const repaymentIdSet=new Set(repaymentIds.map(String));
+  const existingExcess=(state.data.excessPayments||[]).filter(row=>
+    !repaymentIdSet.has(String(row.original_repayment_id||''))
+  );
   state.data.excessPayments=mergeFreshRows(
-    state.data.excessPayments,
+    existingExcess,
     excessResults.flatMap(result=>result.data||[])
   );
 }
@@ -10754,7 +10809,10 @@ function repRowActions(ev, id){
   const rep = state.data.repayments.find(x=>x.id===id);
   const canApproveRep = can('approve_repayment');
   const canEdit = canApproveRep || ( state.staff.role === 'officer' || state.staff.role === 'loan_officer');
-  const items = [
+  const appRole=state.staff?.app_role||state.staff?.role||'';
+  const canVoid=['admin','ceo'].includes(appRole) || state.staff?.role==='admin';
+  const protectedDeposit=repaymentDepositRecord(id);
+  const items = rep?.voided_at ? [] : [
     { label: '✏ Edit entry', onClick: () => openEditRepayment(id) }
   ];
   if(canApproveRep && rep && rep.status === 'pending'){
@@ -10773,7 +10831,10 @@ function repRowActions(ev, id){
       toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
-  if(canEdit){
+  if(canVoid && rep && !rep.voided_at){
+    items.push('sep');
+    items.push({ label: 'Void incorrect repayment', danger:true, onClick:()=>openVoidRepayment(id) });
+  } else if(canEdit && !protectedDeposit && rep && !rep.voided_at){
     items.push('sep');
     items.push({ label: '🗑 Delete entry', danger: true, onClick: () => confirmDialog(
       'Delete this repayment entry? This cannot be undone.',
@@ -10790,6 +10851,37 @@ function repRowActions(ev, id){
     )});
   }
   showActMenu(ev, items);
+}
+
+function openVoidRepayment(id){
+  const repayment=state.data.repayments.find(row=>String(row.id)===String(id));
+  if(!repayment) return toast('Repayment entry not found.','error');
+  const member = state.data.members.find(m=>String(m.id)===String(repayment.member_id));
+  modal({
+    title:'Void incorrect repayment',
+    body:`<div class="helper" style="margin-bottom:14px">This removes the payment from collection totals and loan balances while keeping an audit trail. Any unreleased loan-deposit portion will be cancelled at the same time.</div>
+      <div class="card card-pad" style="margin-bottom:14px"><b>${statementHtml(member?.full_name||'Member')}</b><br><span class="muted">Received ${KES(repaymentCashReceived(repayment))} on ${fmtDate(repayment.meeting_date)}</span></div>
+      <div class="field"><label>Reason for voiding *</label><textarea id="void-repayment-reason" rows="3" placeholder="Example: Duplicate repayment entered in error"></textarea></div>`,
+    actions:[
+      {label:'Cancel',cls:'btn-outline',onClick:closeModal},
+      {label:'Void repayment',cls:'btn-danger',onClick:async()=>{
+        const reason=String(document.getElementById('void-repayment-reason')?.value||'').trim();
+        if(reason.length<5) return toast('Enter a clear reason for voiding this repayment.','error');
+        if(!(await ensureFreshToken())) return;
+        const before={...repayment,cash_received:repaymentCashReceived(repayment),loan_deposit:repaymentDepositAmount(repayment)};
+        const {data,error}=await sb.rpc('pb_void_repayment',{p_repayment_id:String(id),p_reason:reason});
+        if(error) return toast(`Repayment could not be voided: ${error.message}`,'error');
+        repayment.voided_at=data?.voided_at||new Date().toISOString();
+        repayment.voided_by=data?.voided_by||state.staff.id;
+        repayment.void_reason=reason;
+        await refreshExcessRelatedData({repaymentIds:[id],loanIds:[repayment.loan_id],memberIds:[repayment.member_id]});
+        cacheDataKey('repayments',state.data.repayments);
+        cacheDataKey('excessPayments',state.data.excessPayments);
+        await audit('void_repayment','pb_repayments',id,before,{voided_at:repayment.voided_at,voided_by:repayment.voided_by,void_reason:reason});
+        closeModal(); render(); toast('Incorrect repayment voided and removed from financial totals.','success');
+      }}
+    ]
+  });
 }
 
 function exportRepaymentsFiltered(){
@@ -10822,9 +10914,11 @@ function exportRepaymentsFiltered(){
       Member: mem?.full_name||'—',
       Group: grp?.name||'—',
       'Loan Asset': ln?.asset_name||'—',
-      'Total Amount': Number(r.amount),
-      Principal: Number(r.principal),
-      Interest: Number(r.interest),
+      'Payment Received': repaymentCashReceived(r),
+      'Applied to Loan': repaymentAppliedAmount(r),
+      'Loan Deposit': repaymentDepositAmount(r),
+      Principal: repaymentAppliedPrincipal(r),
+      Interest: repaymentAppliedInterest(r),
       'Recorded By': rec?.full_name||'—'
     };
   });
