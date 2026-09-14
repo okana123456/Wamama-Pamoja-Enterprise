@@ -9960,9 +9960,11 @@ async function approveSavingsBatch(ids){
   if(!uniqueIds.length) return {approvedRows:[],failures:[]};
   const {data,error}=await sb.rpc('pb_approve_savings',{p_saving_ids:uniqueIds});
   if(error){
-    const setupHint=/could not find the function|does not exist/i.test(error.message||'')
-      ? ' Run the reliable savings approvals SQL in Supabase first.' : '';
-    return {approvedRows:[],failures:[{message:(error.message||'Savings approval failed.')+setupHint}]};
+    const setupMissing=/could not find the function|does not exist|can_approve_savings/i.test(error.message||'');
+    const message=setupMissing
+      ? 'Savings approval setup is incomplete. Please contact the system administrator.'
+      : (error.message||'Savings approval failed.');
+    return {approvedRows:[],failures:[{message}]};
   }
   const approvedRows=Array.isArray(data?.rows)?data.rows:[];
   const requestedCount=Number(data?.requested_count??uniqueIds.length);

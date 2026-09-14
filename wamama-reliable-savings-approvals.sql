@@ -3,6 +3,9 @@
 
 begin;
 
+alter table public.pb_permissions
+  add column if not exists can_approve_savings boolean not null default false;
+
 create or replace function public.pb_approve_savings(p_saving_ids text[])
 returns jsonb
 language plpgsql
