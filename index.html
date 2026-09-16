@@ -2602,7 +2602,7 @@ function pageDashboard(){
   savings.forEach(s=>{ const stat=officerStats.get(s.recorded_by); if(stat) stat.savings+=Number(s.amount||0); });
   repayments.forEach(item=>{ const stat=officerStats.get(item.recorded_by); if(stat) stat.repayments+=Number(item.amount||0); });
   activeLoans.forEach(l=>{
-    const stat=officerStats.get(l.officer_id);
+    const stat=officerStats.get(currentPortfolioOfficerForLoan(l)?.id);
     if(!stat) return;
     stat.loans+=Number(l.loan_value||0);
     if(inRangeFallback(l.start_date,l.created_at)) stat.loanValuePeriod+=Number(l.loan_value||0);
@@ -6865,7 +6865,10 @@ function buildReportRows(kind){
         countsAsCashReceived(r) && isClientRepayment(r) && matchesGroup(r) && (r.recorded_by===o.id || officerGroupIds.has(r.group_id)) &&
         dateInReportRange(r.meeting_date,r.created_at,range)
       );
-      const officerLoans = filteredLoans.filter(l=>l.officer_id===o.id || officerGroupIds.has(l.group_id));
+      const officerLoans = (state.data.loans||[]).filter(l=>
+        (!groupFilter || currentPortfolioGroupForLoan(l)?.id===groupFilter) &&
+        matchesLoanStatus(l) && loanBelongsToCurrentOfficer(l,o.id)
+      );
       const periodLoans = officerLoans.filter(l=>dateInReportRange(l.start_date,l.created_at,range));
       const closedLoans = officerLoans.filter(l=>l.status==='completed' && dateInReportRange(l.updated_at||l.expected_end_date||l.start_date,l.updated_at,range));
       const closedClientIds = new Set(closedLoans.map(l=>l.member_id).filter(Boolean).filter(memberId=>{
@@ -6873,7 +6876,7 @@ function buildReportRows(kind){
         return memberLoans.length && memberLoans.every(l=>l.status==='completed');
       }));
       const balances = officerLoans.filter(l=>l.status==='active').map(loanBalanceInfo);
-      const officerArrears = arrearsRows.filter(r=>r.officer?.id===o.id || officerGroupIds.has(r.group?.id)).reduce((sum,r)=>sum+Number(r.arrears||0),0);
+      const officerArrears = arrearsRows.filter(r=>loanBelongsToCurrentOfficer(r.loan,o.id)).reduce((sum,r)=>sum+Number(r.arrears||0),0);
       return {
         Officer:o.full_name,
         PARArrears: officerArrears,
