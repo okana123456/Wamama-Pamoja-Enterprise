@@ -352,7 +352,7 @@ const INCREMENTAL_FALLBACK_DAYS = 3;
 const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
 const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_TABLES = new Set([
-  'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory','pb_repayments','pb_savings'
+  'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory'
 ]);
 // These small assignment tables must be authoritative on every login. Keeping
 // them incremental can leave two devices showing different officer portfolios.
