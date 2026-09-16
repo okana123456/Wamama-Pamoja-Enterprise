@@ -906,6 +906,10 @@ async function ensureFreshToken(){
 }
 
 async function afterLogin(offline){
+  if(offline){
+    state._portfolioDataVerified = false;
+    state._portfolioRefreshFailed = true;
+  }
   clearLegacyHeavyCache();
   await loadSettings();
   await loadBillingStatus({ silent:true });
@@ -1099,6 +1103,8 @@ function releaseDuePrepaymentsInBackground(){
 }
 
 async function smartLoadAll(){
+  state._portfolioDataVerified = false;
+  state._portfolioRefreshFailed = false;
   // Refresh the token before bulk fetching to avoid 401s on expired sessions
   if(navigator.onLine){
     const { data: sessionData, error: sessionErr } = await sb.auth.getSession();
@@ -1126,6 +1132,8 @@ async function smartLoadAll(){
     tables.filter(table=>!coreTables.has(table)&&!historyTables.has(table)),
     tables.filter(table=>historyTables.has(table))
   ];
+  const failedPortfolioTables = new Set();
+  const portfolioTables = new Set(['pb_groups','pb_members','pb_staff','pb_loans','pb_repayments']);
 
   for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
     const stageTables=stages[stageIndex];
@@ -1133,6 +1141,7 @@ async function smartLoadAll(){
     results.forEach((r,i)=>{
       const table=stageTables[i];
       const key=map[table];
+      if(portfolioTables.has(table) && (r.error || r.stale)) failedPortfolioTables.add(table);
       if(!r.error){
         state.data[key]=r.data||[];
         cacheDataKey(key,r.data||[]);
@@ -1168,6 +1177,8 @@ async function smartLoadAll(){
       p.items = state.data.purchaseLines.filter(l => l.purchase_id === p.id);
     });
     applySupervisorDataScope();
+    state._portfolioDataVerified = failedPortfolioTables.size === 0;
+    state._portfolioRefreshFailed = failedPortfolioTables.size > 0;
     state.loading = false;
     scheduleRealtimeRender();
     releaseDuePrepaymentsInBackground();
@@ -2532,6 +2543,13 @@ function arrearDateRange(){
 }
 
 function pageDashboard(){
+  if(state._portfolioDataVerified === false){
+    $('page').innerHTML = `<div class="card" style="padding:32px;text-align:center">
+      <h3>${state._portfolioRefreshFailed ? 'Could not verify current financial figures' : 'Checking current financial figures...'}</h3>
+      <p class="muted">${state._portfolioRefreshFailed ? 'The dashboard is holding old balances and arrears until the latest loans and repayments are checked.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
+      ${state._portfolioRefreshFailed ? '<button class="btn btn-primary" onclick="smartLoadAll()">Retry refresh</button>' : ''}</div>`;
+    return;
+  }
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
   const showAdminDash = r === 'ceo' || r === 'admin' || r === 'branch_manager';
