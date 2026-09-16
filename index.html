@@ -344,7 +344,7 @@ const INCREMENTAL_CACHE_TABLES = new Set([
   'pb_reconciliations','pb_expenses'
 ]);
 const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
-const FINANCIAL_CACHE_VERSION = 3;
+const FINANCIAL_CACHE_VERSION = 4;
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_FULL_SYNC_MS = 2 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
@@ -352,7 +352,7 @@ const INCREMENTAL_FALLBACK_DAYS = 3;
 const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
 const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_TABLES = new Set([
-  'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory'
+  'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory','pb_repayments','pb_savings'
 ]);
 // These small assignment tables must be authoritative on every login. Keeping
 // them incremental can leave two devices showing different officer portfolios.
@@ -729,6 +729,10 @@ function visiblePortfolioGroupsForCurrentStaff(){
   if(canViewAllPortfolio() || isSupervisorScoped()) return state.data.groups;
   return state.data.groups.filter(g => g.officer_id === state.staff.id);
 }
+function loanBelongsToCurrentOfficer(loan, officerId){
+  const group = currentPortfolioGroupForLoan(loan);
+  return group ? group.officer_id === officerId : loan.officer_id === officerId;
+}
 
 function currentStaffCanSeePortfolioRecord(record){
   if(canViewAllPortfolio() || isSupervisorScoped()) return true;
@@ -745,7 +749,11 @@ function applySupervisorDataScope(){
     .filter(m => visibleOfficerIds.has(m.officer_id) || groupIds.has(m.group_id))
     .map(m => m.id));
   const loanIds = new Set(state.data.loans
-    .filter(l => visibleOfficerIds.has(l.officer_id) || groupIds.has(l.group_id) || memberIds.has(l.member_id))
+    .filter(l => {
+      const member = state.data.members.find(m => m.id === l.member_id);
+      const group = state.data.groups.find(g => g.id === (member?.group_id || l.group_id));
+      return group ? groupIds.has(group.id) : visibleOfficerIds.has(l.officer_id);
+    })
     .map(l => l.id));
 
   state.data.groups = state.data.groups.filter(g => groupIds.has(g.id));
@@ -2859,6 +2867,27 @@ function pageInventoryDashboard(){
   `;
 }
 
+function openMyPendingApprovals(){
+  const me = state.staff;
+  const teamView = isSupervisorScoped();
+  const members = new Map(state.data.members.map(m=>[m.id,m]));
+  const groups = new Map(state.data.groups.map(g=>[g.id,g]));
+  const entries = [
+    ...state.data.savings.filter(s=>s.status==='pending' && (teamView || s.recorded_by===me.id))
+      .map(s=>({kind:'Saving',row:s})),
+    ...state.data.repayments.filter(r=>r.status==='pending' && isClientRepayment(r) && (teamView || r.recorded_by===me.id))
+      .map(r=>({kind:'Repayment',row:r}))
+  ].sort((a,b)=>String(b.row.created_at||b.row.meeting_date||'').localeCompare(String(a.row.created_at||a.row.meeting_date||'')));
+  modal({
+    title:'Pending entries awaiting approval', size:'modal-lg',
+    body: `<p class="muted" style="margin-top:0">These entries have been submitted. A manager or administrator must approve them.</p>
+      <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Type</th><th>Member</th><th>Group</th><th>Date</th><th class="num">Amount</th></tr></thead><tbody>
+      ${entries.map(({kind,row})=>`<tr><td>${kind}</td><td>${escapeHtml(members.get(row.member_id)?.full_name||'—')}</td><td>${escapeHtml(groups.get(row.group_id)?.name||'—')}</td><td>${fmtDate(row.meeting_date||row.created_at)}</td><td class="num">${KES(row.amount)}</td></tr>`).join('') || '<tr><td colspan="5">No pending entries found.</td></tr>'}
+      </tbody></table></div>`,
+    actions:[{label:'Close',cls:'btn-outline',onClick:closeModal}]
+  });
+}
+
 function pageOfficerDashboard(){
   const me = state.staff;
   const teamView = isSupervisorScoped();
@@ -2877,14 +2906,14 @@ function pageOfficerDashboard(){
   const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
   const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
   const {repaymentsByLoan}=buildBalanceIndexes();
-  const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id || myGroupIds.has(l.group_id)));
+  const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || loanBelongsToCurrentOfficer(l,me.id)));
   const myArrearsRows = buildArrearsRows({
     portfolioView:false,
     teamView,
     groupIds:myGroupIds,
     dateRange:{start:'2000-01-01',end:'2999-12-31'},
     tab:'arrears'
-  }).filter(r=>teamView || r.officer?.id===me.id || r.loan.officer_id===me.id || myGroupIds.has(r.group?.id));
+  }).filter(r=>teamView || loanBelongsToCurrentOfficer(r.loan,me.id));
   const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRp = myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
@@ -2892,7 +2921,7 @@ function pageOfficerDashboard(){
   const myInterestEarned = myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
-  const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending');
+  const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending' && isClientRepayment(r));
   const myPendingSavingsTotal = myPendingSavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const myPendingRepaymentsTotal = myPendingRepayments.reduce((a,b)=>a+Number(b.amount||0),0);
   const todayStr = todayISO();
@@ -2941,6 +2970,7 @@ function pageOfficerDashboard(){
         <div class="l" style="color:var(--warning)">Pending Admin Approval</div>
         <div class="v" style="font-size:18px">${myPendingSavings.length + myPendingRepayments.length} <span style="font-size:13px;font-weight:500;color:var(--text-muted)">entries</span></div>
         <div class="d">${myPendingSavings.length > 0 ? `Savings: ${KES(myPendingSavingsTotal)} (${myPendingSavings.length})` : ''}${myPendingSavings.length > 0 && myPendingRepayments.length > 0 ? ' · ' : ''}${myPendingRepayments.length > 0 ? `Repayments: ${KES(myPendingRepaymentsTotal)} (${myPendingRepayments.length})` : ''}</div>
+        <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="openMyPendingApprovals()">View pending entries</button>
       </div>` : ''}
     </div>
     <div class="card" style="margin-top:16px">
@@ -4290,7 +4320,7 @@ function buildArrearsRows(options={}){
     if(startDate < drStart || startDate > drEnd) return false;
     const group = currentPortfolioGroupForLoan(l);
     const officer = currentPortfolioOfficerForLoan(l);
-    return portfolioView || groupIds.has(group?.id) || officer?.id === state.staff.id || l.officer_id === state.staff.id;
+    return portfolioView || (group ? groupIds.has(group.id) : loanBelongsToCurrentOfficer(l,state.staff.id));
   });
 
   let rows = activeLoans.map(l => {
