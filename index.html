@@ -2757,17 +2757,14 @@ function dashArrFilter(){
     }
 
     let category = 'ontrack';
-    // Due Today takes priority so officers can act BEFORE it becomes arrears —
-    // even if there's a small earlier arrears balance, today's due payment
-    // still needs to be flagged separately for proactive collection.
-    if (nextDueDate === today) category = 'duetoday';
-    else if (arrears > 0) category = 'arrears';
+    if (arrears > 0) category = 'arrears';
+    else if (nextDueDate === today) category = 'duetoday';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
 
     return { l, arrears, nextDueDate, category };
   }).filter(r => r.category !== 'ontrack');
 
-  const filtered = offVal ? rows.filter(r => r.l.officer_id === offVal) : rows;
+  const filtered = offVal ? rows.filter(r => currentPortfolioOfficerForLoan(r.l)?.id === offVal) : rows;
   const catOrder = { arrears:0, duetoday:1, duethisweek:2 };
   const display  = filtered.slice().sort((a,b)=>(catOrder[a.category]||3)-(catOrder[b.category]||3)).slice(0,10);
 
@@ -2780,7 +2777,7 @@ function dashArrFilter(){
   body.innerHTML = display.map(function(row){
     const l = row.l, arrears = row.arrears, nextDueDate = row.nextDueDate, category = row.category;
     const mem = membersById.get(String(l.member_id));
-    const off = staffById.get(String(l.officer_id));
+    const off = staffById.get(String(currentPortfolioOfficerForLoan(l)?.id));
     const badgeCls = category==='arrears'?'b-red':category==='duetoday'?'b-yellow':'b-green';
     const badgeTxt = category==='arrears'?'In Arrears':category==='duetoday'?'Due Today':'Due Soon';
     return '<tr>'
@@ -4360,13 +4357,13 @@ function buildArrearsRows(options={}){
     }
 
     let category = 'ontrack';
-    if (nextDueDate === today) category = 'duetoday';
-    else if (arrears > 0) category = 'arrears';
+    if (arrears > 0) category = 'arrears';
+    else if (nextDueDate === today) category = 'duetoday';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
 
     return { loan:l, member, group, officer, paid, arrears, nextDueDate, expectedInstallment:weekly, category };
   });
-  if(tab && tab !== 'all') rows = rows.filter(r => r.category === tab);
+  if(tab && tab !== 'all') rows = rows.filter(r => tab === 'duetoday' ? r.nextDueDate === today : r.category === tab);
   if(officerFilter) rows = rows.filter(r => r.officer?.id === officerFilter || r.loan.officer_id === officerFilter);
   return rows;
 }
@@ -5046,7 +5043,7 @@ function pageArrears(){
 
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
-  let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
+  let filtered = report.filter(r => tab === 'all' ? true : tab === 'duetoday' ? r.nextDueDate === todayISO() : r.category === tab);
   if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   const officersWithLoans = (portfolioView || teamView)
@@ -5060,10 +5057,10 @@ function pageArrears(){
   $('page').innerHTML = `
     <div class="page-head">
       <div><h1>Due & Arrears</h1><div class="desc">Track missed payments and upcoming collections.</div></div>
-      ${report.filter(r=>r.category==='duetoday').length > 0 ? `
+      ${report.filter(r=>r.nextDueDate===todayISO()).length > 0 ? `
       <div class="actions">
         <button class="btn btn-primary" onclick="state._arrearsTab='duetoday';pageArrears()" style="background:var(--warning);border-color:var(--warning)">
-          🔔 ${report.filter(r=>r.category==='duetoday').length} Due Today — Collect Now
+          🔔 ${report.filter(r=>r.nextDueDate===todayISO()).length} Due Today — Collect Now
         </button>
       </div>` : ''}
     </div>
@@ -5082,7 +5079,7 @@ function pageArrears(){
       <div class="tabs" style="margin-bottom:0;border-bottom:none">
         ${[
           ['arrears',     `In Arrears (${report.filter(r=>r.category==='arrears').length})`],
-          ['duetoday',    `Due Today (${report.filter(r=>r.category==='duetoday').length})`],
+          ['duetoday',    `Due Today (${report.filter(r=>r.nextDueDate===todayISO()).length})`],
           ['duethisweek', `Due Next 7 Days (${report.filter(r=>r.category==='duethisweek').length})`],
           ['all',         `All Active (${report.length})`]
         ].map(([k, label]) => `<button class="${tab===k?'active':''}" onclick="state._arrearsTab='${k}';pageArrears()">${label}</button>`).join('')}
@@ -5157,15 +5154,15 @@ function exportArrearsCollectionSheet(){
     }
     let category = 'ontrack';
     // Due Today takes priority so officers can collect BEFORE it becomes arrears
-    if (nextDueDate === today) category = 'duetoday';
-    else if (arrears > 0) category = 'arrears';
+    if (arrears > 0) category = 'arrears';
+    else if (nextDueDate === today) category = 'duetoday';
     else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
     return { loan: l, member: mem, group: g, officer: off, paid, arrears, nextDueDate, expectedInstallment: weekly, category };
   });
 
   const tab = state._arrearsTab || 'arrears';
   const offFilter = state._arrearsOfficerFilter || '';
-  let filtered = report.filter(r => tab === 'all' ? true : r.category === tab);
+  let filtered = report.filter(r => tab === 'all' ? true : tab === 'duetoday' ? r.nextDueDate === today : r.category === tab);
   if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   if(!filtered.length){ toast('No records in current view to export.','warn'); return; }
