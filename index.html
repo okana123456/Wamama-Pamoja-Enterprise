@@ -1177,6 +1177,7 @@ async function smartLoadAll(){
     applySupervisorDataScope();
     state._portfolioDataVerified = failedPortfolioTables.size === 0;
     state._portfolioRefreshFailed = failedPortfolioTables.size > 0;
+    if(state._portfolioSyncSetupNeeded) console.warn('Wamama support code WPE-01: savings or repayment incremental sync needs setup.');
     state.loading = false;
     scheduleRealtimeRender();
     releaseDuePrepaymentsInBackground();
@@ -2543,8 +2544,8 @@ function arrearDateRange(){
 function pageDashboard(){
   if(state._portfolioDataVerified === false){
     $('page').innerHTML = `<div class="card" style="padding:32px;text-align:center">
-      <h3>${state._portfolioSyncSetupNeeded ? 'Financial sync setup needed' : state._portfolioRefreshFailed ? 'Could not verify current financial figures' : 'Checking current financial figures...'}</h3>
-      <p class="muted">${state._portfolioSyncSetupNeeded ? 'Ask the administrator to enable incremental savings and repayment sync in Supabase.' : state._portfolioRefreshFailed ? 'The dashboard is holding old balances and arrears until the latest loans and repayments are checked.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
+      <h3>${state._portfolioRefreshFailed ? 'Financial figures are temporarily unavailable' : 'Checking current financial figures...'}</h3>
+      <p class="muted">${state._portfolioRefreshFailed ? 'We could not confirm the latest balances and arrears. Please contact support and mention code WPE-01.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
       ${state._portfolioRefreshFailed && !state._portfolioSyncSetupNeeded ? '<button class="btn btn-primary" onclick="smartLoadAll()">Retry refresh</button>' : ''}</div>`;
     return;
   }
