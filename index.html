@@ -348,7 +348,6 @@ const FINANCIAL_CACHE_VERSION = 4;
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_FULL_SYNC_MS = 2 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
-const INCREMENTAL_FALLBACK_DAYS = 3;
 const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
 const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_TABLES = new Set([
@@ -981,14 +980,11 @@ async function fetchIncrementalRows(table,cached){
     query=>query.gte('updated_at',cursor).order('updated_at',{ascending:false})
   );
 
-  // This fallback keeps older deployments usable until the incremental-sync SQL is run.
+  // Financial history cannot be verified from a recent-created-rows fallback:
+  // an older repayment may have been approved or voided since the last sync.
   if(changedResult.error && /updated_at|column .* does not exist/i.test(changedResult.error.message||'')){
     if(!PENDING_SYNC_TABLES.has(table)) return fetchBusinessTableRows(table);
-    const cutoff=new Date(Date.now()-INCREMENTAL_FALLBACK_DAYS*24*60*60*1000).toISOString();
-    changedResult=await fetchPagedBusinessRows(
-      table,
-      query=>query.gte('created_at',cutoff).order('created_at',{ascending:false})
-    );
+    return {data:cachedRows,error:changedResult.error,fromCache:true,syncSetupNeeded:true};
   }
   if(changedResult.error) return {data:cachedRows,error:changedResult.error,fromCache:true};
 
@@ -1037,7 +1033,7 @@ async function loadBusinessTableOptimized(table){
   }
   const result=await fetchIncrementalRows(table,cached);
   if(result.error && !/jwt|unauthorized|401/i.test(result.error.message||'')){
-    return {data:cached.rows,error:null,fromCache:true,stale:true};
+    return {data:cached.rows,error:null,fromCache:true,stale:true,syncSetupNeeded:!!result.syncSetupNeeded};
   }
   let reconciledAt=Number(cached.reconciledAt||0);
   if(!result.error && DELETION_RECONCILE_TABLES.has(table) && Date.now()-reconciledAt>=DELETION_RECONCILE_MS){
@@ -1105,6 +1101,7 @@ function releaseDuePrepaymentsInBackground(){
 async function smartLoadAll(){
   state._portfolioDataVerified = false;
   state._portfolioRefreshFailed = false;
+  state._portfolioSyncSetupNeeded = false;
   // Refresh the token before bulk fetching to avoid 401s on expired sessions
   if(navigator.onLine){
     const { data: sessionData, error: sessionErr } = await sb.auth.getSession();
@@ -1142,6 +1139,7 @@ async function smartLoadAll(){
       const table=stageTables[i];
       const key=map[table];
       if(portfolioTables.has(table) && (r.error || r.stale)) failedPortfolioTables.add(table);
+      if(r.syncSetupNeeded) state._portfolioSyncSetupNeeded = true;
       if(!r.error){
         state.data[key]=r.data||[];
         cacheDataKey(key,r.data||[]);
@@ -2545,9 +2543,9 @@ function arrearDateRange(){
 function pageDashboard(){
   if(state._portfolioDataVerified === false){
     $('page').innerHTML = `<div class="card" style="padding:32px;text-align:center">
-      <h3>${state._portfolioRefreshFailed ? 'Could not verify current financial figures' : 'Checking current financial figures...'}</h3>
-      <p class="muted">${state._portfolioRefreshFailed ? 'The dashboard is holding old balances and arrears until the latest loans and repayments are checked.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
-      ${state._portfolioRefreshFailed ? '<button class="btn btn-primary" onclick="smartLoadAll()">Retry refresh</button>' : ''}</div>`;
+      <h3>${state._portfolioSyncSetupNeeded ? 'Financial sync setup needed' : state._portfolioRefreshFailed ? 'Could not verify current financial figures' : 'Checking current financial figures...'}</h3>
+      <p class="muted">${state._portfolioSyncSetupNeeded ? 'Ask the administrator to enable incremental savings and repayment sync in Supabase.' : state._portfolioRefreshFailed ? 'The dashboard is holding old balances and arrears until the latest loans and repayments are checked.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
+      ${state._portfolioRefreshFailed && !state._portfolioSyncSetupNeeded ? '<button class="btn btn-primary" onclick="smartLoadAll()">Retry refresh</button>' : ''}</div>`;
     return;
   }
   const r = state.staff?.app_role || state.staff?.role || 'officer';
