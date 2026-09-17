@@ -1256,6 +1256,14 @@ async function audit(action, entity=null, entity_id=null, oldV=null, newV=null){
 function countsInBalance(row){
   return !row?.voided_at && !['pending','rejected','cancelled'].includes(String(row?.status || 'approved').toLowerCase());
 }
+function installmentsPastDue(startDateValue, asOfDate=todayISO()){
+  const start=Date.parse(`${String(startDateValue||'').slice(0,10)}T00:00:00Z`);
+  const asOf=Date.parse(`${String(asOfDate||'').slice(0,10)}T00:00:00Z`);
+  if(!Number.isFinite(start)||!Number.isFinite(asOf)||asOf<=start) return 0;
+  const daysSinceStart=Math.floor((asOf-start)/(24*60*60*1000));
+  // An installment becomes overdue the day after its weekly due date.
+  return Math.max(0,Math.ceil(daysSinceStart/7)-1);
+}
 function memberSavings(memberId){
   return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
@@ -2721,7 +2729,6 @@ function dashArrFilter(){
   const offVal   = offSel   ? offSel.value   : '';
   const rangeVal = rangeSel ? rangeSel.value : 'all';
   const today     = todayISO();
-  const msPerWeek = 7 * 24 * 3600 * 1000;
   const now = new Date();
   const iso = d => kenyaDateISO(d);
   let drStart = '2000-01-01', drEnd = '2999-12-31';
@@ -2738,7 +2745,7 @@ function dashArrFilter(){
   const rows = activeLoans.map(l => {
     const paid      = repaymentsByLoan.get(l.id)||0;
     const startDate = new Date(l.start_date);
-    const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
+    const weeksElapsed = installmentsPastDue(l.start_date,today);
     const weekly    = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
     // KES 5 tolerance prevents phantom arrears from rounding — e.g. weekly=310.75
@@ -4326,7 +4333,6 @@ function buildArrearsRows(options={}){
   const tab = options.tab || null;
   const officerFilter = options.officerFilter || '';
   const today = todayISO();
-  const msPerWeek = 7 * 24 * 3600 * 1000;
   const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
   const activeLoans = (state.data.loans||[]).filter(l => {
     if(l.status !== 'active') return false;
@@ -4343,7 +4349,7 @@ function buildArrearsRows(options={}){
     const officer = currentPortfolioOfficerForLoan(l);
     const paid = loanPaid(l.id);
     const startDate = new Date(l.start_date);
-    const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
+    const weeksElapsed = installmentsPastDue(l.start_date,today);
     const weekly = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
     const arrears = Math.max(0, expectedPaid - paid - 5);
@@ -5131,7 +5137,6 @@ function exportArrearsCollectionSheet(){
   );
 
   const today = todayISO();
-  const msPerWeek = 7 * 24 * 3600 * 1000;
   const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
 
   const report = activeLoans.map(l => {
@@ -5140,7 +5145,7 @@ function exportArrearsCollectionSheet(){
     const off = currentPortfolioOfficerForLoan(l);
     const paid = loanPaid(l.id);
     const startDate = new Date(l.start_date);
-    const weeksElapsed = Math.max(0, Math.floor((new Date(today) - startDate) / msPerWeek));
+    const weeksElapsed = installmentsPastDue(l.start_date,today);
     const weekly = Number(l.weekly_installment) || 0;
     const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
     const arrears = Math.max(0, expectedPaid - paid - 5);
