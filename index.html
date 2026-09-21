@@ -1926,10 +1926,8 @@ function findDuplicatePendingLoanIds(rows){
   return keepFirstDuplicateIds(pending, l=>duplicateKey([
     l.member_id,
     l.group_id,
-    l.order_id || '',
-    l.asset_name || '',
-    Number(l.loan_value||0).toFixed(2),
-    (l.start_date||l.created_at||'').slice(0,10)
+    String(l.asset_id||l.asset_name||'').trim().toLowerCase(),
+    Number(l.loan_value||0).toFixed(2)
   ]));
 }
 function groupPendingSoldItemLoans(rows){
@@ -5244,8 +5242,8 @@ function pageLoans(){
     loans = loans.filter(l => l.officer_id === state._loanOfficerFilter);
   }
 
-  const duplicateLoanKey=loan=>loan.member_id&&loan.order_id
-    ? `${loan.member_id}|${loan.order_id}|${String(loan.asset_id||loan.asset_name||'')}|${Number(loan.loan_value||0)}`
+  const duplicateLoanKey=loan=>loan.member_id
+    ? `${loan.member_id}|${String(loan.asset_id||loan.asset_name||'').trim().toLowerCase()}|${Number(loan.loan_value||0).toFixed(2)}`
     : '';
   const duplicateLoanCounts=new Map();
   state.data.loans.filter(loan=>loan.status==='active').forEach(loan=>{
@@ -5391,12 +5389,11 @@ function loanActions(ev, id){
   const canApproveLoan = can('approve_loan');
   const canRepay = canRecordRepayment();
 
-  // Detect only an identical item loan. Different items in the same sold-items
-  // form are intentional concurrent loans for one client.
+  // Detect the same active item loan even if a repeated submission created a
+  // different order header. Different items remain separate valid loans.
   const duplicateLoans = state.data.loans.filter(x =>
     x.id !== id &&
     x.member_id === l.member_id &&
-    x.order_id  === l.order_id  &&
     String(x.asset_id||x.asset_name||'') === String(l.asset_id||l.asset_name||'') &&
     Number(x.loan_value||0) === Number(l.loan_value||0) &&
     x.status    === 'active'
@@ -5408,10 +5405,15 @@ function loanActions(ev, id){
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
     ...(isDuplicate ? [{
-      label:'⚠ Delete duplicate loan', danger:true, onClick: ()=>confirmDialog(
-        `This loan appears to be a duplicate of another active loan for the same member (${state.data.members.find(m=>m.id===l.member_id)?.full_name||'—'}) on the same order. Delete this duplicate?`,
+      label:'⚠ Delete unused duplicate', danger:true, onClick: ()=>confirmDialog(
+        `This is an identical active loan for ${state.data.members.find(m=>m.id===l.member_id)?.full_name||'this client'}. It can only be deleted here if it has no repayment or prepayment history. Continue?`,
         async()=>{
           if(!(await ensureFreshToken())) return;
+          const { count: repaymentCount, error: repaymentCheckError } = await sb.from('pb_repayments').select('id',{count:'exact',head:true}).eq('loan_id',id);
+          if(repaymentCheckError) return toast('Could not verify this loan safely. Please try again.','error');
+          const { count: depositCount, error: depositCheckError } = await sb.from('pb_excess_payments').select('id',{count:'exact',head:true}).eq('loan_id',id);
+          if(depositCheckError) return toast('Could not verify this loan safely. Please try again.','error');
+          if(repaymentCount||depositCount) return toast('This duplicate has payment history. Open the client profile and use an accounting reversal before removing it.','error');
           const { error } = await sb.from('pb_loans').delete().eq('id', id);
           if(error) return toast('Delete failed: '+error.message,'error');
           state.data.loans = state.data.loans.filter(x=>x.id!==id);
@@ -5419,7 +5421,7 @@ function loanActions(ev, id){
           render();
           toast('Duplicate loan deleted.','success');
         },
-        { title:'Delete Duplicate Loan', danger:true }
+        { title:'Delete Unused Duplicate', danger:true }
       )
     }] : []),
     ...(canApproveLoan && l.status==='active' ? [
@@ -8341,6 +8343,25 @@ async function saveSoldItemsForm(){
     return { ...r, quantity:Math.max(1,Number(r.quantity||1)), loan_amount:principal, weeks, interest, serviceCharge, totalPayable };
   });
 
+  // Recheck the live database immediately before saving. This catches a
+  // repeated form submission even when it generated a different order id or
+  // this device has an older cached copy of the portfolio.
+  const memberIds=[...new Set(rowsWithCalc.map(r=>String(r.member_id)))];
+  const { data: liveLoans, error: liveLoanError } = await sb.from('pb_loans')
+    .select('id,member_id,asset_id,asset_name,loan_value,status')
+    .in('member_id',memberIds)
+    .in('status',['pending','active']);
+  if(liveLoanError) return toast('Could not verify existing client loans. Nothing was saved; please try again.','error');
+  const duplicateRows=rowsWithCalc.filter(row=>(liveLoans||[]).some(existing=>
+    String(existing.member_id)===String(row.member_id) &&
+    String(existing.asset_id||existing.asset_name||'').trim().toLowerCase()===String(row.asset_id||row.product||'').trim().toLowerCase() &&
+    Number(existing.loan_value||0)===Number(row.loan_amount||0)
+  ));
+  if(duplicateRows.length){
+    const names=[...new Set(duplicateRows.map(r=>r.client_name||'Client'))].join(', ');
+    return toast(`Nothing was saved. An identical pending or active loan already exists for: ${names}. Review the existing loan before submitting again.`,'error');
+  }
+
   const meta = {
     source:'sold_items', credit_officer: creditOfficer, group_name: group?.name || '',
     branch, location, meeting_day: meetingDay, meeting_time: meetingTime,
@@ -8388,13 +8409,12 @@ async function saveSoldItemsForm(){
     // Weekly installment derived from full P+I+C total so passbook figure matches exactly
     const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
 
-    // Check for existing active loan for this member on this order
-    // Check for existing active loan for this member on this order (duplicate prevention)
+    // Final in-memory guard for the current batch.
     const existingActiveLoan = state.data.loans.find(ex =>
-      ex.order_id === orderData.id &&
       ['pending','active'].includes(ex.status) &&
       ex.member_id === memberId &&
-      String(ex.asset_id||'') === String(asset.id||'')
+      String(ex.asset_id||ex.asset_name||'').trim().toLowerCase() === String(asset.id||asset.name||'').trim().toLowerCase() &&
+      Number(ex.loan_value||0) === Number(row.loan_amount||0)
     );
     if(existingActiveLoan){
       errors.push(`${row.client_name}: loan already exists — skipped duplicate`);
