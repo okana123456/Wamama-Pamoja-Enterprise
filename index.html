@@ -5382,6 +5382,15 @@ function pageLoans(){
     });
   }
 }
+async function loanHasAccountingHistory(loanIds){
+  if(!loanIds.length) return false;
+  for(const table of ['pb_repayments','pb_excess_payments','pb_prepayment_releases']){
+    const {count,error}=await sb.from(table).select('id',{count:'exact',head:true}).in('loan_id',loanIds);
+    if(error) throw error;
+    if(count) return true;
+  }
+  return false;
+}
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
   const r = state.staff?.app_role || state.staff?.role || 'officer';
@@ -5409,11 +5418,10 @@ function loanActions(ev, id){
         `This is an identical active loan for ${state.data.members.find(m=>m.id===l.member_id)?.full_name||'this client'}. It can only be deleted here if it has no repayment or prepayment history. Continue?`,
         async()=>{
           if(!(await ensureFreshToken())) return;
-          const { count: repaymentCount, error: repaymentCheckError } = await sb.from('pb_repayments').select('id',{count:'exact',head:true}).eq('loan_id',id);
-          if(repaymentCheckError) return toast('Could not verify this loan safely. Please try again.','error');
-          const { count: depositCount, error: depositCheckError } = await sb.from('pb_excess_payments').select('id',{count:'exact',head:true}).eq('loan_id',id);
-          if(depositCheckError) return toast('Could not verify this loan safely. Please try again.','error');
-          if(repaymentCount||depositCount) return toast('This duplicate has payment history. Open the client profile and use an accounting reversal before removing it.','error');
+          let hasHistory;
+          try{ hasHistory=await loanHasAccountingHistory([id]); }
+          catch{ return toast('Could not verify this loan safely. Please try again.','error'); }
+          if(hasHistory) return toast('This loan has repayment or deposit history. It cannot be deleted here; an administrator must review the accounting records.','error');
           const { error } = await sb.from('pb_loans').delete().eq('id', id);
           if(error) return toast('Delete failed: '+error.message,'error');
           state.data.loans = state.data.loans.filter(x=>x.id!==id);
@@ -5439,9 +5447,13 @@ function loanActions(ev, id){
       },
       'sep',
       { label:'🗑 Delete Loan', danger:true, onClick: ()=>confirmDialog(
-          'PERMANENTLY delete this loan? All repayment records will remain but the loan will be removed. This cannot be undone.',
+          'Permanently delete this unused loan? Loans with repayment or deposit history must be reviewed and cannot be deleted here.',
           async()=>{
             if(!(await ensureFreshToken())) return;
+            let hasHistory;
+            try{ hasHistory=await loanHasAccountingHistory([id]); }
+            catch{ return toast('Could not verify this loan safely. Please try again.','error'); }
+            if(hasHistory) return toast('This loan has repayment or deposit history. An administrator must review it before removal. No records were changed.','error');
             const { error } = await sb.from('pb_loans').delete().eq('id', id);
             if(error) return toast('Delete failed: '+error.message,'error');
             state.data.loans = state.data.loans.filter(x=>x.id!==id);
@@ -8765,20 +8777,28 @@ async function deleteSoldItemsForm(orderId){
         const delBtn = document.getElementById('del-si-confirm-btn');
         if(delBtn){ delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
 
-        let hadError = false;
-
-        // 1. Delete all repayments linked to each loan
-        for(const loan of linkedLoans){
-          const { error: repErr } = await sb.from('pb_repayments').delete().eq('loan_id', loan.id);
-          if(repErr){ toast(`Could not delete repayments for loan ${loan.id}: ${repErr.message}`, 'warn'); hadError = true; }
-          else { state.data.repayments = state.data.repayments.filter(rp => rp.loan_id !== loan.id); }
+        const loanIds=linkedLoans.map(loan=>loan.id);
+        let hasHistory;
+        try{ hasHistory=await loanHasAccountingHistory(loanIds); }
+        catch{
+          if(delBtn){ delBtn.disabled=false; delBtn.textContent='Permanently delete'; }
+          return toast('Could not verify this form safely. Nothing was deleted; please try again.','error');
+        }
+        if(hasHistory){
+          if(delBtn){ delBtn.disabled=false; delBtn.textContent='Permanently delete'; }
+          return toast('This form has loans with repayment or deposit history. Nothing was deleted. An administrator must review the accounting records.','error');
         }
 
-        // 2. Delete all linked loans
+        let hadError = false;
+
+        // Remove only unused loans; payment history is preserved.
         if(linkedLoans.length){
           const loanIds = linkedLoans.map(l=>l.id);
           const { error: loanErr } = await sb.from('pb_loans').delete().in('id', loanIds);
-          if(loanErr){ toast(`Could not delete loans: ${loanErr.message}`, 'warn'); hadError = true; }
+          if(loanErr){
+            if(delBtn){ delBtn.disabled=false; delBtn.textContent='Permanently delete'; }
+            return toast('Could not delete linked loans. The form was kept. '+loanErr.message, 'error');
+          }
           else { state.data.loans = state.data.loans.filter(l => !loanIds.includes(l.id)); }
         }
 
