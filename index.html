@@ -5391,6 +5391,65 @@ async function loanHasAccountingHistory(loanIds){
   }
   return false;
 }
+function openResolveDuplicateLoan(duplicateLoan){
+  const member=state.data.members.find(m=>String(m.id)===String(duplicateLoan.member_id));
+  const candidates=state.data.loans.filter(loan=>
+    loan.status==='active' && loan.id!==duplicateLoan.id &&
+    String(loan.member_id)===String(duplicateLoan.member_id)
+  );
+  if(!candidates.length) return toast('This client has no other active loan to keep.','warn');
+  modal({
+    title:'Resolve duplicate loan',size:'lg',
+    body:`
+      <div class="notice notice-danger"><b>Loan to cancel:</b> ${statementHtml(member?.full_name||'Client')} · ${statementHtml(duplicateLoan.asset_name||'Loan')} · ${KES(duplicateLoan.loan_value)} · weekly ${KES(duplicateLoan.weekly_installment)}</div>
+      <div class="field"><label>Correct loan to keep</label><select id="dup-keep-loan">
+        ${candidates.map(loan=>`<option value="${loan.id}">${statementHtml(loan.asset_name||'Loan')} · ${KES(loan.loan_value)} · weekly ${KES(loan.weekly_installment)} · started ${fmtDate(loan.start_date)}</option>`).join('')}
+      </select></div>
+      <div class="field"><label>What happened to payments on the duplicate?</label>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin:8px 0"><input type="radio" name="dup-payment-action" value="reverse" checked style="width:auto;margin-top:3px"><span><b>They were duplicated too — reverse them</b><br><span class="muted">Use when one client payment appeared on both loans.</span></span></label>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin:8px 0"><input type="radio" name="dup-payment-action" value="transfer" style="width:auto;margin-top:3px"><span><b>They are genuine — move them to the correct loan</b><br><span class="muted">Use when real cash was recorded only on the wrong loan.</span></span></label>
+      </div>
+      <div class="field"><label>Reason</label><textarea id="dup-resolution-reason" rows="2" placeholder="Example: Loan was created twice"></textarea></div>
+      <div class="field"><label>Type <b>RESOLVE</b> to confirm</label><input id="dup-resolution-confirm" autocomplete="off" placeholder="RESOLVE"></div>
+      <div class="notice notice-warning">This cancels only the selected duplicate. The kept loan remains active, and all changes are recorded in the audit log.</div>`,
+    actions:[
+      {label:'Cancel',cls:'btn-outline',onClick:closeModal},
+      {label:'Resolve duplicate',cls:'btn-danger',onClick:async()=>{
+        const keepId=$('dup-keep-loan')?.value;
+        const action=document.querySelector('input[name="dup-payment-action"]:checked')?.value;
+        const reason=$('dup-resolution-reason')?.value.trim();
+        if($('dup-resolution-confirm')?.value.trim().toUpperCase()!=='RESOLVE') return toast('Type RESOLVE to confirm.','error');
+        if(!reason||reason.length<5) return toast('Enter a short reason.','error');
+        if(!(await ensureFreshToken())) return;
+        const {data,error}=await sb.rpc('pb_resolve_duplicate_loan',{
+          p_duplicate_loan_id:String(duplicateLoan.id),p_keep_loan_id:String(keepId),
+          p_payment_action:action,p_reason:reason
+        });
+        if(error){
+          const setup=/could not find the function|does not exist/i.test(error.message||'')?' Run the one-time duplicate-loan resolution SQL first.':'';
+          return toast('Could not resolve duplicate: '+error.message+setup,'error');
+        }
+        const ids=[String(duplicateLoan.id),String(keepId)];
+        const [loanResult,repaymentResult,excessResult]=await Promise.all([
+          fetchBusinessRowsByIds('pb_loans','id',ids),
+          fetchBusinessRowsByIds('pb_repayments','loan_id',ids),
+          fetchBusinessRowsByIds('pb_excess_payments','loan_id',ids)
+        ]);
+        if(!loanResult.error) state.data.loans=mergeFreshRows(state.data.loans,loanResult.data);
+        if(!repaymentResult.error){
+          state.data.repayments=state.data.repayments.filter(row=>!ids.includes(String(row.loan_id)));
+          state.data.repayments.push(...(repaymentResult.data||[]));
+        }
+        if(!excessResult.error){
+          state.data.excessPayments=(state.data.excessPayments||[]).filter(row=>!ids.includes(String(row.loan_id)));
+          state.data.excessPayments.push(...(excessResult.data||[]));
+        }
+        closeModal();pageLoans();
+        toast(action==='transfer'?'Duplicate cancelled and genuine payments moved to the kept loan.':'Duplicate loan and its duplicated payments were reversed.','success');
+      }}
+    ]
+  });
+}
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
   const r = state.staff?.app_role || state.staff?.role || 'officer';
@@ -5413,6 +5472,7 @@ function loanActions(ev, id){
     { label:'View member profile', onClick: ()=>{ state._memberProfileTab='loans'; go('memberProfile', { memberId: l.member_id }); } },
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
+    ...(canApproveLoan && l.status==='active' ? [{label:'Resolve duplicate loan',danger:true,onClick:()=>openResolveDuplicateLoan(l)}] : []),
     ...(isDuplicate ? [{
       label:'⚠ Delete unused duplicate', danger:true, onClick: ()=>confirmDialog(
         `This is an identical active loan for ${state.data.members.find(m=>m.id===l.member_id)?.full_name||'this client'}. It can only be deleted here if it has no repayment or prepayment history. Continue?`,
