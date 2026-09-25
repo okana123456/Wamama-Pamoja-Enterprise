@@ -332,7 +332,6 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const BUSINESS_REGISTRATION_KEY = 'BFADMIN2026';
 let BIZ_ID = 'pb_default';
 const SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000;
-const KEEPALIVE_MS = 15 * 60 * 1000;
 const CACHEABLE_DATA_KEYS = new Set([
   'groups', 'members', 'staff', 'inventory', 'loans', 'orders',
   'meetings', 'suppliers', 'purchases', 'purchaseLines', 'settings'
@@ -542,13 +541,8 @@ window.addEventListener('beforeunload', e => {
   }
 });
 
-/* ----- Keepalive: proactively refresh token every 30 min ----- */
-setInterval(async ()=>{
-  if(navigator.onLine && state.session){
-    const { data, error } = await sb.auth.refreshSession();
-    if(!error && data.session) state.session = data.session;
-  }
-}, KEEPALIVE_MS);
+// Supabase autoRefreshToken already renews sessions near expiry. A second
+// timer would rotate valid tokens and generate unnecessary Auth/API logs.
 
 setInterval(async ()=>{
   if(state.session && state.staff?.role === 'admin'){
@@ -889,7 +883,9 @@ async function registerBusiness({ businessName, adminName, email, password, key 
 /* ----- Session token refresh guard ----- */
 async function ensureFreshToken(){
   try {
-    const { data, error } = await sb.auth.refreshSession();
+    // getSession reuses a valid token and refreshes an expiring one through
+    // Supabase's session lock. The server still enforces access on every write.
+    const { data, error } = await sb.auth.getSession();
     if(error || !data.session){
       toast('Your session has expired. Please sign in again.', 'error');
       await signOut();
@@ -1102,7 +1098,7 @@ async function smartLoadAll(){
   state._portfolioDataVerified = false;
   state._portfolioRefreshFailed = false;
   state._portfolioSyncSetupNeeded = false;
-  // Refresh the token before bulk fetching to avoid 401s on expired sessions
+  // getSession refreshes an expiring token without rotating a valid one.
   if(navigator.onLine){
     const { data: sessionData, error: sessionErr } = await sb.auth.getSession();
     if(sessionErr || !sessionData.session){
@@ -1111,11 +1107,7 @@ async function smartLoadAll(){
       state.session = null; state.staff = null; state.perms = null;
       render(); return;
     }
-    const exp = sessionData.session.expires_at;
-    if(exp && (exp - Math.floor(Date.now()/1000)) < 600){
-      const { data: refreshed, error: refreshErr } = await sb.auth.refreshSession();
-      if(!refreshErr && refreshed.session) state.session = refreshed.session;
-    }
+    state.session = sessionData.session;
   }
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
