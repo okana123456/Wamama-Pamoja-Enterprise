@@ -1262,7 +1262,9 @@ function installmentsPastDue(startDateValue, asOfDate=todayISO()){
   if(!Number.isFinite(start)||!Number.isFinite(asOf)||asOf<=start) return 0;
   const daysSinceStart=Math.floor((asOf-start)/(24*60*60*1000));
   // An installment becomes overdue the day after its weekly due date.
-  return Math.max(0,Math.ceil(daysSinceStart/7)-1);
+  // One day after the first due date means one overdue instalment; exactly
+  // seven days later the second instalment is due today and is not overdue yet.
+  return Math.max(0,Math.ceil(daysSinceStart/7));
 }
 function memberSavings(memberId){
   return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
@@ -4282,7 +4284,8 @@ function loanAmountDueAtDate(loan, cutoff){
   return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff));
 }
 function loanArrearsAtDate(loan, cutoff){
-  return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff)-5);
+  const lastCompletedDay=addDateDays(cutoff,-1);
+  return Math.max(0,loanExpectedByDate(loan,lastCompletedDay)-repaymentPaidByDate(loan.id,cutoff)-5);
 }
 function loanOverlapsWeek(loan,start,end){
   if(['pending','rejected','cancelled'].includes(String(loan.status||'').toLowerCase())) return false;
@@ -4488,7 +4491,7 @@ function buildCollectionCompliance(){
       const olb=memberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-(paidByLoan.get(l.id)||0)),0);
       const expected=memberLoans.reduce((sum,l)=>sum+loanExpectedWithinWeek(l,start,end),0);
       const collected=memberLoans.reduce((sum,l)=>sum+(collectedByLoan.get(l.id)||0),0);
-      const arrears=memberLoans.reduce((sum,l)=>sum+Math.max(0,loanExpectedByDate(l,arrearsCutoff)-(paidByLoan.get(l.id)||0)-5),0);
+      const arrears=memberLoans.reduce((sum,l)=>sum+loanArrearsAtDate(l,arrearsCutoff),0);
       const savings=savingsByMember.get(member.id)||0;
       const loanDeposits=depositsByMember.get(member.id)||0;
       const pendingFunding=pendingFundingMembers.has(member.id);
@@ -4650,7 +4653,7 @@ function collectionLoanInstallmentSummary(loan,cutoff){
     ?Math.min(totalInstallments,paid>=totalPayable-0.01?totalInstallments:Math.floor((paid+0.01)/weekly))
     :0;
   const dueInstallments=weekly>0&&loan.start_date
-    ?Math.min(totalInstallments,Math.max(0,Math.floor(daysBetweenDates(loan.start_date,cutoff)/7)))
+    ?Math.min(totalInstallments,installmentsPastDue(loan.start_date,cutoff))
     :0;
   const unpaidInstallments=Math.max(0,dueInstallments-paidInstallments);
   const repayments=state.data.repayments

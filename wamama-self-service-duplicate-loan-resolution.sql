@@ -201,7 +201,7 @@ begin
   insert into public.pb_audit_log(
     business_id,staff_id,staff_name,action,entity,entity_id,old_value,new_value
   ) values (
-    v_staff.business_id::text,v_staff.id::text,coalesce(v_staff.full_name,'System'),
+    v_staff.business_id,v_staff.id,coalesce(v_staff.full_name,'System'),
     'resolve_duplicate_loan','pb_loans',v_duplicate.id::text,
     jsonb_build_object('duplicate_loan_id',v_duplicate.id,'status','active',
       'member_id',v_duplicate.member_id,'asset_name',v_duplicate.asset_name),
