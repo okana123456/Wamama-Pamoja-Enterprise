@@ -280,6 +280,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
+<script src="financial-rules.js"></script>
 <script>
 /* =====================================================================
  * WAMAMA PAMOJA ENTERPRISE
@@ -371,27 +372,190 @@ function financialCacheKey(table){
   return `${state.staff?.business_id||'default'}:${state.staff?.id||'anonymous'}:${table}:v${FINANCIAL_CACHE_VERSION}`;
 }
 async function readFinancialCache(table){
+  const key=financialCacheKey(table);
   try{
     const db=await openFinancialCache();
     return await new Promise((resolve,reject)=>{
-      const request=db.transaction('tables','readonly').objectStore('tables').get(financialCacheKey(table));
+      const request=db.transaction('tables','readonly').objectStore('tables').get(key);
       request.onsuccess=()=>resolve(request.result||null);
       request.onerror=()=>reject(request.error);
     });
   }catch{return null;}
 }
-async function writeFinancialCache(table,rows,fullSyncAt,reconciledAt=Date.now()){
+async function writeFinancialCache(table,rows,fullSyncAt,reconciledAt=Date.now(),savedAt=Date.now()){
+  const key=financialCacheKey(table);
   try{
     const db=await openFinancialCache();
     await new Promise((resolve,reject)=>{
       const request=db.transaction('tables','readwrite').objectStore('tables').put({
-        key:financialCacheKey(table), rows:rows||[], fullSyncAt:fullSyncAt||Date.now(),
-        reconciledAt:reconciledAt||Date.now(), savedAt:Date.now()
+        key, rows:rows||[], fullSyncAt:fullSyncAt||Date.now(),
+        reconciledAt:reconciledAt||Date.now(), savedAt
       });
       request.onsuccess=()=>resolve();
       request.onerror=()=>reject(request.error);
     });
   }catch{}
+}
+async function persistPartialFinancialCache(table,rows){
+  const epoch=state._accountEpoch;
+  const cached=await readFinancialCache(table);
+  // A pending-only or realtime refresh is not a complete delta sync. Preserve
+  // the last verified cursor so approvals/voids on other rows are still fetched.
+  if(cached && epoch===state._accountEpoch) await writeFinancialCache(table,rows,cached.fullSyncAt,cached.reconciledAt,cached.savedAt);
+}
+
+function currentFinancialSnapshotRow(loanId){
+  const snapshot=state._financialSnapshot;
+  return snapshot?.asOfDate===todayISO()?snapshot.byLoan.get(String(loanId)):null;
+}
+function loanFinancialMetrics(loan,cutoff=todayISO()){
+  return (cutoff===todayISO() && currentFinancialSnapshotRow(loan.id)) ||
+    WamamaFinance.metrics(loan,state.data.repayments,cutoff);
+}
+function financialFiguresReady(){
+  if(state._financialSnapshotAvailable && state._financialSnapshot?.asOfDate!==todayISO()){
+    state._portfolioDataVerified=false;
+    refreshFinancialSnapshot().then(ok=>{
+      if(ok){state._portfolioDataVerified=true;state._portfolioRefreshFailed=false;scheduleRealtimeRender();}
+    });
+  }
+  if(state._portfolioDataVerified!==false){
+    const checked=state._financialSnapshot?.checkedAt;
+    const label=document.getElementById('financial-freshness');
+    if(label) label.textContent=checked?'Balances checked '+fmtDateTime(checked):'';
+    return true;
+  }
+  if($('page')) $('page').innerHTML=`<div class="card" style="padding:32px;text-align:center">
+    <h3>${state._portfolioRefreshFailed?'Unable to update financial figures':'Updating financial figures…'}</h3>
+    <p class="muted">${state._portfolioRefreshFailed?'Check your internet connection, then try again.':'Please wait while the latest loans and payments are checked.'}</p>
+    ${state._portfolioRefreshFailed?'<button class="btn btn-primary" onclick="smartLoadAll()">Try again</button>':''}</div>`;
+  return false;
+}
+let cashSnapshots=new Map(),cashSnapshotRequests=new Map();
+function cashSnapshotKey(range){return `${state.staff?.id}:${range.start}:${range.end}`;}
+function periodCashTotals(range,officerId=null,groupId=null){
+  const snapshot=cashSnapshots.get(cashSnapshotKey(range));
+  if(!snapshot) return null;
+  return snapshot.rows.filter(row=>(!officerId || String(row.recordedBy)===String(officerId)) && (!groupId || String(row.groupId)===String(groupId)))
+    .reduce((totals,row)=>({amount:totals.amount+Number(row.amount||0),interest:totals.interest+Number(row.interest||0),entries:totals.entries+Number(row.entries||0)}),{amount:0,interest:0,entries:0});
+}
+function ensureCashTotals(range){
+  if(!state._financialSnapshotAvailable || cashSnapshots.has(cashSnapshotKey(range))) return true;
+  const key=cashSnapshotKey(range),staffId=state.staff?.id,epoch=state._accountEpoch;
+  if(!cashSnapshotRequests.has(key)){
+    const request=(async()=>{
+      const {data,error}=await sb.rpc('pb_cash_collection_totals',{p_start:range.start,p_end:range.end});
+      if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+      if(error || data?.authorized!==true || !Array.isArray(data.rows)){
+        state._portfolioRefreshFailed=true;state._portfolioDataVerified=false;
+      }else cashSnapshots.set(key,data);
+      scheduleRealtimeRender();
+    })().finally(()=>cashSnapshotRequests.delete(key));
+    cashSnapshotRequests.set(key,request);
+  }
+  $('page').innerHTML='<div class="card" style="padding:32px;text-align:center"><h3>Updating collection totals…</h3><p class="muted">Please wait while recorded payments are checked.</p></div>';
+  return false;
+}
+let financialRefreshPromise=null,financialRefreshTimer=null,financialRefreshEpoch=-1;
+const pendingFinancialLoanIds=new Set();
+let pendingFullFinancialRefresh=false;
+async function refreshFinancialSnapshot(loanIds=null,{incremental=false}={}){
+  if(!navigator.onLine || !state.staff) return false;
+  if(financialRefreshPromise && financialRefreshEpoch===state._accountEpoch) return financialRefreshPromise;
+  const staffId=state.staff.id,epoch=state._accountEpoch;
+  financialRefreshEpoch=epoch;
+  const promise=(async()=>{
+    const previous=state._financialSnapshot;
+    const since=incremental && previous?.asOfDate===todayISO()
+      ?new Date(Date.parse(previous.checkedAt)-INCREMENTAL_SYNC_OVERLAP_MS).toISOString():null;
+    const {data,error}=await sb.rpc('pb_financial_snapshot',{p_loan_ids:loanIds,p_since:since});
+    if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+    if(error){
+      // Keep the existing verified incremental-sync path during rollout.
+      if(/could not find the function|does not exist/i.test(error.message||'')) return false;
+      state._portfolioRefreshFailed=true;
+      state._portfolioDataVerified=false;
+      return false;
+    }
+    if(data?.version!==1 || data.authorized!==true || data.asOfDate!==todayISO() || !Array.isArray(data.rows) || !Array.isArray(data.visibleLoanIds)){
+      state._portfolioDataVerified=false;
+      return false;
+    }
+    const byLoan=!data.complete && state._financialSnapshot?.asOfDate===data.asOfDate
+      ?new Map(state._financialSnapshot.byLoan):new Map();
+    const visibleIds=new Set(data.visibleLoanIds.map(String));
+    for(const id of byLoan.keys()) if(!visibleIds.has(id)) byLoan.delete(id);
+    state.data.loans=state.data.loans.filter(l=>visibleIds.has(String(l.id)));
+    const localIds=new Set(state.data.loans.map(l=>String(l.id)));
+    const missingIds=data.visibleLoanIds.filter(id=>!localIds.has(String(id)));
+    for(let start=0;start<missingIds.length;start+=100){
+      const result=await fetchPagedBusinessRows('pb_loans',query=>query.in('id',missingIds.slice(start,start+100)));
+      if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+      if(result.error){state._portfolioDataVerified=false;return false;}
+      state.data.loans.push(...result.data);
+    }
+    if(loanIds) loanIds.forEach(id=>byLoan.delete(String(id)));
+    data.rows.forEach(row=>{
+      byLoan.set(String(row.id),row);
+      const loan=state.data.loans.find(l=>String(l.id)===String(row.id));
+      if(loan) ['status','start_date','weekly_installment','loan_value','total_payable'].forEach(key=>loan[key]=row[key]);
+      const group=state.data.groups.find(g=>String(g.id)===String(row.group_id));
+      if(group) group.officer_id=row.officer_id;
+    });
+    state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.complete || since?data.checkedAt:(previous?.checkedAt||data.checkedAt),byLoan};
+    if(data.rows.length || data.complete) cashSnapshots.clear();
+    // Repair only loans whose cached ledger differs, rather than redownloading
+    // every officer's complete repayment history. This also heals old caches.
+    const mismatches=data.rows.filter(row=>{
+      const loan=state.data.loans.find(l=>String(l.id)===String(row.id));
+      if(!loan) return false;
+      const local=WamamaFinance.metrics(loan,state.data.repayments,data.asOfDate);
+      const localRows=state.data.repayments.filter(r=>String(r.loan_id)===String(row.id) && countsInBalance(r) && WamamaFinance.paymentDate(r)<=data.asOfDate);
+      const latest=localRows.reduce((value,r)=>Math.max(value,Date.parse(r.updated_at||r.created_at)||0),0);
+      return Math.abs(local.paid-Number(row.paid))>0.009 ||
+        Math.abs(local.principalPaid-Number(row.principalPaid))>0.009 ||
+        Math.abs(local.interestPaid-Number(row.interestPaid))>0.009 ||
+        localRows.length!==Number(row.repaymentCount) || latest!==(Date.parse(row.repaymentUpdatedAt)||0);
+    }).map(row=>String(row.id));
+    for(let start=0;start<mismatches.length;start+=100){
+      const ids=mismatches.slice(start,start+100);
+      const result=await fetchPagedBusinessRows('pb_repayments',query=>query.in('loan_id',ids));
+      if(result.error){ state._portfolioDataVerified=false; return false; }
+      if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+      const idSet=new Set(ids);
+      state.data.repayments=[...state.data.repayments.filter(r=>!idSet.has(String(r.loan_id))),...result.data];
+    }
+    if(mismatches.length) await persistPartialFinancialCache('pb_repayments',state.data.repayments);
+    state._financialSnapshotAvailable=true;
+    invalidateCollectionComplianceCache();
+    return true;
+  })();
+  financialRefreshPromise=promise;
+  try{return await promise;}finally{if(financialRefreshPromise===promise) financialRefreshPromise=null;}
+}
+async function refreshFinancialFiguresIfStale(){
+  if(!state.session || !navigator.onLine || document.visibilityState==='hidden') return;
+  if(state._financialSnapshotAvailable && !financialRefreshPromise &&
+    Date.now()-Date.parse(state._financialSnapshot?.checkedAt||0)>=5*60*1000){
+    await refreshFinancialSnapshot(null,{incremental:true});
+    scheduleRealtimeRender();
+  }
+}
+window.addEventListener('focus',refreshFinancialFiguresIfStale);
+document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
+setInterval(refreshFinancialFiguresIfStale,5*60*1000);
+function scheduleFinancialSnapshotRefresh(loanId=null){
+  if(loanId) pendingFinancialLoanIds.add(String(loanId));
+  else pendingFullFinancialRefresh=true;
+  if(financialRefreshTimer) return;
+  financialRefreshTimer=setTimeout(async()=>{
+    financialRefreshTimer=null;
+    if(financialRefreshPromise){ scheduleFinancialSnapshotRefresh(); return; }
+    const ids=pendingFullFinancialRefresh?null:[...pendingFinancialLoanIds];
+    pendingFinancialLoanIds.clear(); pendingFullFinancialRefresh=false;
+    await refreshFinancialSnapshot(ids?.length?ids:null);
+    scheduleRealtimeRender();
+  },1500);
 }
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -556,6 +720,7 @@ setInterval(async ()=>{
  * STATE
  * ===================================================================== */
 const state = {
+  _accountEpoch:0,
   session: null,
   staff: null,            // current pb_staff row
   perms: null,
@@ -616,6 +781,7 @@ async function signIn(email, password){
   }
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
   if(error) return { ok:false, error: error.message };
+  await resetAccountData();
   state.session = data.session;
   const ok = await loadStaff();
   if(!ok){
@@ -724,7 +890,8 @@ function visiblePortfolioGroupsForCurrentStaff(){
 }
 function loanBelongsToCurrentOfficer(loan, officerId){
   const group = currentPortfolioGroupForLoan(loan);
-  return group ? group.officer_id === officerId : loan.officer_id === officerId;
+  const verified=currentFinancialSnapshotRow(loan.id);
+  return (verified?String(verified.officer_id):String(group?group.officer_id:loan.officer_id))===String(officerId);
 }
 
 function currentStaffCanSeePortfolioRecord(record){
@@ -923,8 +1090,22 @@ async function afterLogin(offline){
 async function signOut(){
   await audit('logout', 'auth', state.staff?.id);
   await sb.auth.signOut();
+  await resetAccountData();
   state.session = null; state.staff = null; state.perms = null;
   render();
+}
+async function resetAccountData(){
+  state._accountEpoch++;
+  if(rtChan){ await sb.removeChannel(rtChan); rtChan=null; }
+  if(financialRefreshTimer){ clearTimeout(financialRefreshTimer); financialRefreshTimer=null; }
+  pendingFinancialLoanIds.clear(); pendingFullFinancialRefresh=false;
+  state._portfolioDataVerified=false;
+  state._financialSnapshot=null;
+  state._financialSnapshotAvailable=false;
+  cashSnapshots.clear();
+  Object.keys(state.data).forEach(key=>state.data[key]=[]);
+  state._savingsApprovalsFreshAt=0;
+  state._repaymentApprovalsFreshAt=0;
 }
 
 async function loadSettings(){
@@ -935,13 +1116,14 @@ async function loadSettings(){
 }
 
 async function fetchBusinessTableRows(table){
+  const businessId=state.staff?.business_id;
   const pageSize = 1000;
   const maxRows = 50000;
   const rows = [];
   for(let from = 0; from < maxRows; from += pageSize){
-    let query = sb.from(table).select('*').range(from, from + pageSize - 1);
-    if (state.staff && state.staff.business_id) {
-      query = query.eq('business_id', state.staff.business_id);
+    let query = sb.from(table).select('*').order('id').range(from, from + pageSize - 1);
+    if (businessId) {
+      query = query.eq('business_id', businessId);
     }
     const { data, error } = await query;
     if(error) return { data: rows, error };
@@ -952,12 +1134,13 @@ async function fetchBusinessTableRows(table){
 }
 
 async function fetchPagedBusinessRows(table, configureQuery){
+  const businessId=state.staff?.business_id;
   const pageSize=1000;
   const maxRows=50000;
   const rows=[];
   for(let from=0;from<maxRows;from+=pageSize){
-    let query=sb.from(table).select('*').range(from,from+pageSize-1);
-    if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+    let query=sb.from(table).select('*').order('id').range(from,from+pageSize-1);
+    if(businessId) query=query.eq('business_id',businessId);
     query=configureQuery(query);
     const {data,error}=await query;
     if(error) return {data:rows,error};
@@ -1013,21 +1196,29 @@ async function removeDeletedCachedRows(table,rows){
 }
 
 async function loadBusinessTableOptimized(table){
+  const syncStartedAt=Date.now();
+  const epoch=state._accountEpoch;
   if(!INCREMENTAL_CACHE_TABLES.has(table)) return fetchBusinessTableRows(table);
   const cached=await readFinancialCache(table);
+  const cancelled=()=>epoch!==state._accountEpoch;
+  const cancelledResult=()=>({data:[],error:{message:'Account changed during refresh.'}});
+  if(cancelled()) return cancelledResult();
   if(ALWAYS_FULL_SYNC_TABLES.has(table)){
     const result=await fetchBusinessTableRows(table);
-    if(!result.error) await writeFinancialCache(table,result.data,Date.now());
+    if(cancelled()) return cancelledResult();
+    if(!result.error) await writeFinancialCache(table,result.data,syncStartedAt,syncStartedAt,syncStartedAt);
     return result;
   }
   const fullSyncMs=CORE_PORTFOLIO_TABLES.has(table)?CORE_PORTFOLIO_FULL_SYNC_MS:INCREMENTAL_FULL_SYNC_MS;
   const needsFull=!cached || !Array.isArray(cached.rows) || Date.now()-Number(cached.fullSyncAt||0)>=fullSyncMs;
   if(needsFull){
     const result=await fetchBusinessTableRows(table);
-    if(!result.error) await writeFinancialCache(table,result.data,Date.now());
+    if(cancelled()) return cancelledResult();
+    if(!result.error) await writeFinancialCache(table,result.data,syncStartedAt,syncStartedAt,syncStartedAt);
     return result;
   }
   const result=await fetchIncrementalRows(table,cached);
+  if(cancelled()) return cancelledResult();
   if(result.error && !/jwt|unauthorized|401/i.test(result.error.message||'')){
     return {data:cached.rows,error:null,fromCache:true,stale:true,syncSetupNeeded:!!result.syncSetupNeeded};
   }
@@ -1039,7 +1230,7 @@ async function loadBusinessTableOptimized(table){
       reconciledAt=Date.now();
     }
   }
-  if(!result.error) await writeFinancialCache(table,result.data,cached.fullSyncAt,reconciledAt);
+  if(!result.error && !cancelled()) await writeFinancialCache(table,result.data,cached.fullSyncAt,reconciledAt,syncStartedAt);
   return result;
 }
 
@@ -1058,7 +1249,9 @@ async function loadOptimizedTablesWithLimit(tables, concurrency=4){
 }
 
 async function hydrateDataFromFinancialCache(tables,map){
+  const epoch=state._accountEpoch;
   const cachedResults=await Promise.all(tables.map(table=>readFinancialCache(table)));
+  if(epoch!==state._accountEpoch) return 0;
   let cacheHits=0;
   tables.forEach((table,index)=>{
     const key=map[table];
@@ -1083,7 +1276,9 @@ async function hydrateDataFromFinancialCache(tables,map){
 
 function releaseDuePrepaymentsInBackground(){
   if(!navigator.onLine || !state.staff?.business_id) return;
+  const epoch=state._accountEpoch;
   setTimeout(async()=>{
+    if(epoch!==state._accountEpoch) return;
     const {error}=await sb.rpc('pb_release_due_prepayments',{
       p_loan_ids:null,
       p_limit:10
@@ -1091,16 +1286,26 @@ function releaseDuePrepaymentsInBackground(){
     if(error && !/could not find the function|does not exist/i.test(error.message||'')){
       console.warn('Could not release due loan prepayments',error);
     }
+    if(!error) scheduleFinancialSnapshotRefresh();
   },1800);
 }
 
 async function smartLoadAll(){
+  if(state._dataLoadPromise && state._dataLoadEpoch===state._accountEpoch) return state._dataLoadPromise;
+  state._dataLoadEpoch=state._accountEpoch;
+  const promise=loadAllFinancialData();
+  state._dataLoadPromise=promise;
+  try{return await promise;}finally{if(state._dataLoadPromise===promise) state._dataLoadPromise=null;}
+}
+async function loadAllFinancialData(){
+  const epoch=state._accountEpoch;
   state._portfolioDataVerified = false;
   state._portfolioRefreshFailed = false;
   state._portfolioSyncSetupNeeded = false;
   // getSession refreshes an expiring token without rotating a valid one.
   if(navigator.onLine){
     const { data: sessionData, error: sessionErr } = await sb.auth.getSession();
+    if(epoch!==state._accountEpoch) return;
     if(sessionErr || !sessionData.session){
       toast('Session expired. Please sign in again.', 'error');
       await sb.auth.signOut();
@@ -1112,6 +1317,7 @@ async function smartLoadAll(){
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
   const cacheHits=await hydrateDataFromFinancialCache(tables,map);
+  if(epoch!==state._accountEpoch) return;
   if(!cacheHits){ state.loading=true; render(); }
   let jwtBroken = false;
   const historyTables=new Set(['pb_savings','pb_repayments','pb_excess_payments']);
@@ -1122,11 +1328,12 @@ async function smartLoadAll(){
     tables.filter(table=>historyTables.has(table))
   ];
   const failedPortfolioTables = new Set();
-  const portfolioTables = new Set(['pb_groups','pb_members','pb_staff','pb_loans','pb_repayments']);
+  const portfolioTables = new Set(['pb_groups','pb_members','pb_staff','pb_loans','pb_repayments','pb_savings']);
 
   for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
     const stageTables=stages[stageIndex];
     const results=await loadOptimizedTablesWithLimit(stageTables,stageIndex===0?4:2);
+    if(epoch!==state._accountEpoch) return;
     results.forEach((r,i)=>{
       const table=stageTables[i];
       const key=map[table];
@@ -1169,6 +1376,7 @@ async function smartLoadAll(){
     applySupervisorDataScope();
     state._portfolioDataVerified = failedPortfolioTables.size === 0;
     state._portfolioRefreshFailed = failedPortfolioTables.size > 0;
+    if(state._portfolioDataVerified) await refreshFinancialSnapshot();
     if(state._portfolioSyncSetupNeeded) console.warn('Wamama support code WPE-01: savings or repayment incremental sync needs setup.');
     state.loading = false;
     scheduleRealtimeRender();
@@ -1202,14 +1410,19 @@ function handleRealtimeChange(payload){
   const key = map[tbl]; if(!key) return;
   const arr = state.data[key];
   if(payload.eventType === 'INSERT'){ if(!arr.find(x=>x.id===payload.new.id)) arr.unshift(payload.new); }
-  else if(payload.eventType === 'UPDATE'){ const i = arr.findIndex(x=>x.id===payload.new.id); if(i>=0) arr[i] = payload.new; }
+  else if(payload.eventType === 'UPDATE'){ const i = arr.findIndex(x=>x.id===payload.new.id); if(i>=0) arr[i] = payload.new; else arr.unshift(payload.new); }
   else if(payload.eventType === 'DELETE'){ const i = arr.findIndex(x=>x.id===payload.old.id); if(i>=0) arr.splice(i,1); }
   applySupervisorDataScope();
   cacheDataKey(key, state.data[key]);
+  if(INCREMENTAL_CACHE_TABLES.has(tbl)) persistPartialFinancialCache(tbl,state.data[key]);
   if(['pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments'].includes(tbl)){
     invalidateCollectionComplianceCache();
+    if(['pb_groups','pb_members','pb_staff'].includes(tbl)) scheduleFinancialSnapshotRefresh();
+    else if(tbl!=='pb_savings' && tbl!=='pb_orders'){
+      scheduleFinancialSnapshotRefresh(payload.new?.loan_id||payload.old?.loan_id||payload.new?.id||payload.old?.id);
+    }
   }
-  if(['dashboard','members','groups','meeting','collection_compliance','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
+  if(['dashboard','arrears','members','groups','meeting','collection_compliance','loans','inventory','repayments','savings','accounting','reports'].includes(state.view)) scheduleRealtimeRender();
 }
 function setupRealtime(){
   if(rtChan) sb.removeChannel(rtChan);
@@ -1221,7 +1434,7 @@ function setupRealtime(){
   }
   [
     'pb_groups','pb_members','pb_inventory','pb_loans','pb_orders',
-    'pb_savings','pb_repayments','pb_staff'
+    'pb_savings','pb_repayments','pb_excess_payments','pb_staff'
   ].forEach(table => {
     const opts = { event:'*', schema:'public', table };
     if(businessFilter) opts.filter = businessFilter;
@@ -1246,7 +1459,7 @@ async function audit(action, entity=null, entity_id=null, oldV=null, newV=null){
  * DERIVED METRICS
  * ===================================================================== */
 function countsInBalance(row){
-  return !row?.voided_at && !['pending','rejected','cancelled'].includes(String(row?.status || 'approved').toLowerCase());
+  return WamamaFinance.approved(row);
 }
 function installmentsPastDue(startDateValue, asOfDate=todayISO()){
   const start=Date.parse(`${String(startDateValue||'').slice(0,10)}T00:00:00Z`);
@@ -1269,8 +1482,11 @@ function buildBalanceIndexes(){
     savingsByMember.set(saving.member_id,(savingsByMember.get(saving.member_id)||0)+Number(saving.amount||0));
   }
   for(const repayment of state.data.repayments||[]){
-    if(!countsInBalance(repayment) || !repayment.loan_id) continue;
+    if(!countsInBalance(repayment) || !repayment.loan_id || !WamamaFinance.paymentDate(repayment) || WamamaFinance.paymentDate(repayment)>todayISO()) continue;
     repaymentsByLoan.set(repayment.loan_id,(repaymentsByLoan.get(repayment.loan_id)||0)+Number(repayment.amount||0));
+  }
+  if(state._financialSnapshot?.asOfDate===todayISO()){
+    state._financialSnapshot.byLoan.forEach((row,id)=>repaymentsByLoan.set(id,Number(row.paid||0)));
   }
   return {savingsByMember,repaymentsByLoan};
 }
@@ -1349,7 +1565,9 @@ function isSafeEmptyDuplicateMember(member){
   return financialLinks === 0 && memberSavings(member.id) === 0;
 }
 function loanPaid(loanId){
-  return state.data.repayments.filter(r=>r.loan_id===loanId && countsInBalance(r)).reduce((a,b)=>a + Number(b.amount||0), 0);
+  const verified=currentFinancialSnapshotRow(loanId);
+  if(verified) return Number(verified.paid||0);
+  return state.data.repayments.filter(r=>r.loan_id===loanId && countsInBalance(r) && WamamaFinance.paymentDate(r)<=todayISO()).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 async function closeFullyPaidLoans(loanIds, opts={}){
   const ids = [...new Set((loanIds||[]).filter(Boolean))];
@@ -1374,7 +1592,7 @@ async function closeFullyPaidLoans(loanIds, opts={}){
     if(freshLoan.status !== 'active') continue;
 
     const { data:freshRepayments, error:repaymentError } = await sb.from('pb_repayments')
-      .select('amount,status').eq('loan_id',loanId);
+      .select('amount,status,voided_at').eq('loan_id',loanId);
     if(repaymentError){
       if(!opts.silent) toast(`Could not check repayments: ${repaymentError.message}`, 'error');
       continue;
@@ -1415,7 +1633,7 @@ function memberEligible(memberId){
   return memberSavings(memberId) >= t;
 }
 function groupSavingsTotal(groupId){
-  return state.data.savings.filter(s=>s.group_id===groupId).reduce((a,b)=>a + Number(b.amount||0), 0);
+  return state.data.savings.filter(s=>s.group_id===groupId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 
 /* =====================================================================
@@ -1779,10 +1997,11 @@ function renderShell(){
           <button class="menu-btn" onclick="toggleSidebar()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
           </button>
-          <h2 id="page-title">${pageTitle()}</h2>
+          <h2 id="page-title">${pageTitle()}<small id="financial-freshness" style="display:block;font-size:10px;font-weight:normal"></small></h2>
           <div class="user">
             <button class="btn-ghost" onclick="toggleTheme()" title="Toggle dark mode">${themeIcon()}</button>
-            <button class="btn-ghost" onclick="openSwitchUser()" title="Switch user (PIN)">${switchIcon()}</button>
+            <button class="btn-ghost" onclick="smartLoadAll()" title="Refresh financial figures">↻</button>
+            <button class="btn-ghost" onclick="openSwitchUser()" title="Switch account">${switchIcon()}</button>
             <button class="btn-ghost" onclick="openEditProfile()" title="Edit your profile" style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:var(--radius-sm)">
               <div style="text-align:right">
                 <div class="name">${state.staff.full_name}</div>
@@ -1864,6 +2083,7 @@ function renderPage(){
 
 function refreshVisiblePage(pageFn){
   invalidateCollectionComplianceCache();
+  scheduleFinancialSnapshotRefresh();
   if(state.session && !isSubscriptionLocked() && $('page')) pageFn();
   else render();
 }
@@ -2457,13 +2677,8 @@ function reportDateRange(){
 }
 
 function dateInReportRange(dateStr, createdAt, range=reportDateRange()){
-  const d = String(dateStr||'').slice(0,10);
-  if(d && d >= range.start && d <= range.end) return true;
-  if(createdAt){
-    const cd = kenyaDateISO(createdAt);
-    if(cd >= range.start && cd <= range.end) return true;
-  }
-  return false;
+  const d=dateStr?String(dateStr).slice(0,10):createdAt?kenyaDateISO(createdAt):'';
+  return !!d && d>=range.start && d<=range.end;
 }
 
 function staffLoanRoles(){
@@ -2471,25 +2686,10 @@ function staffLoanRoles(){
 }
 
 function loanBalanceInfo(loan){
-  const paid = loanPaid(loan.id);
-  const totalPayable = Number(loan.total_payable||0);
-  const principal = Number(loan.loan_value||0);
-  const outstandingPI = Math.max(0,totalPayable-paid);
-  const expectedInterest = Math.max(0,totalPayable-principal);
-  const approvedRows = (state.data.repayments||[]).filter(r=>r.loan_id===loan.id && countsInBalance(r) && isClientRepayment(r));
-  const principalPaid = approvedRows.reduce((sum,r)=>sum+Number(r.principal||0),0);
-  return {
-    paid,
-    principal,
-    totalPayable,
-    outstandingPI,
-    outstandingPrincipal: Math.max(0,principal-principalPaid),
-    expectedInterest,
-    principalPaid,
-    interestPaid: approvedRows.reduce((sum,r)=>sum+Number(r.interest||0),0)
-  };
+  const verified=currentFinancialSnapshotRow(loan.id);
+  if(verified) return verified;
+  return WamamaFinance.metrics(loan,state.data.repayments,todayISO());
 }
-
 function loanDisplayCode(loan){
   return loan.loan_no || loan.loan_number || loan.application_no || String(loan.id||'').slice(0,8);
 }
@@ -2542,13 +2742,8 @@ function arrearDateRange(){
 }
 
 function pageDashboard(){
-  if(state._portfolioDataVerified === false){
-    $('page').innerHTML = `<div class="card" style="padding:32px;text-align:center">
-      <h3>${state._portfolioRefreshFailed ? 'Financial figures are temporarily unavailable' : 'Checking current financial figures...'}</h3>
-      <p class="muted">${state._portfolioRefreshFailed ? 'We could not confirm the latest balances and arrears. Please contact support and mention code WPE-01.' : 'The dashboard will appear when loans and repayments finish syncing.'}</p>
-      ${state._portfolioRefreshFailed && !state._portfolioSyncSetupNeeded ? '<button class="btn btn-primary" onclick="smartLoadAll()">Retry refresh</button>' : ''}</div>`;
-    return;
-  }
+  if(!financialFiguresReady()) return;
+  if(!ensureCashTotals(dashDateRange())) return;
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
   const showAdminDash = r === 'ceo' || r === 'admin' || r === 'branch_manager';
@@ -2566,23 +2761,18 @@ function pageDashboard(){
     if(d >= start && d <= end) return true;
     return false;
   };
-  const inRangeFallback = (dateStr, createdAt) => {
-    if(inRange(dateStr)) return true;
-    if(!createdAt) return false;
-    const cd = kenyaDateISO(createdAt);
-    return cd >= start && cd <= end;
-  };
+  const inRangeFallback=(dateStr,createdAt)=>dateInReportRange(dateStr,createdAt,{start,end});
 
   const savings = state.data.savings.filter(s => inRangeFallback(s.meeting_date||'', s.created_at) && countsInBalance(s));
   const repayments = state.data.repayments.filter(r => inRangeFallback(r.meeting_date||'', r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
   const {savingsByMember,repaymentsByLoan}=buildBalanceIndexes();
   const totalSavings = savings.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalRepay = repayments.reduce((a,b)=>a+repaymentCashReceived(b),0);
+  const totalRepay = periodCashTotals({start,end})?.amount ?? repayments.reduce((a,b)=>a+repaymentCashReceived(b),0);
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
   const activeLoanBalances = activeLoans.map(loanBalanceInfo);
   const outstandingBal = activeLoanBalances.reduce((a,l)=>a+l.outstandingPI,0);
   const outstandingPrincipal = activeLoanBalances.reduce((a,l)=>a+l.outstandingPrincipal,0);
-  const interestEarned = repayments.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
+  const interestEarned = periodCashTotals({start,end})?.interest ?? repayments.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   const savingsThreshold=Number(state.settings?.savings_threshold||400);
   const eligibleCount = state.data.members.filter(m=>(savingsByMember.get(m.id)||0)>=savingsThreshold).length;
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
@@ -2610,6 +2800,9 @@ function pageDashboard(){
     if((order.ordered_on||'').slice(0,10)!==todayISO_) return;
     const stat=officerStats.get(order.recorded_by);
     if(stat) stat.ordersToday+=1;
+  });
+  if(state._financialSnapshotAvailable) officerStats.forEach((stat,id)=>{
+    stat.repayments=periodCashTotals({start,end},id)?.amount||0;
   });
   const officerPerf=[...officerStats.values()].sort((a,b)=>b.savings-a.savings);
 
@@ -2733,38 +2926,12 @@ function dashArrFilter(){
   const {repaymentsByLoan}=buildBalanceIndexes();
   const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
   const staffById=new Map(state.data.staff.map(staff=>[String(staff.id),staff]));
-  const activeLoans = state.data.loans.filter(l => l.status === 'active' && l.start_date >= drStart && l.start_date <= drEnd);
-  const rows = activeLoans.map(l => {
-    const paid      = repaymentsByLoan.get(l.id)||0;
-    const startDate = new Date(l.start_date);
-    const weeksElapsed = installmentsPastDue(l.start_date,today);
-    const weekly    = Number(l.weekly_installment) || 0;
-    const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    // KES 5 tolerance prevents phantom arrears from rounding — e.g. weekly=310.75
-    // means after 1 week client owes 310.75 but may have paid 310 or 311.
-    // Any shortfall under KES 5 is treated as on-track.
-    const ARREARS_TOLERANCE = 5;
-    const arrears   = Math.max(0, expectedPaid - paid - ARREARS_TOLERANCE);
-
-    let nextDueDate = null;
-    for (let w = 1; w <= 1040; w++) {
-      const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
-      const ds = d.toISOString().slice(0,10);
-      // >= today so a payment due TODAY is captured, not skipped to next week
-      if (ds >= today) { nextDueDate = ds; break; }
-    }
-
-    let category = 'ontrack';
-    if (arrears > 0) category = 'arrears';
-    else if (nextDueDate === today) category = 'duetoday';
-    else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
-
-    return { l, arrears, nextDueDate, category };
-  }).filter(r => r.category !== 'ontrack');
+  const rows=buildArrearsRows({portfolioView:true,dateRange:{start:drStart,end:drEnd}})
+    .filter(row=>row.category!=='ontrack').map(row=>({...row,l:row.loan}));
 
   const filtered = offVal ? rows.filter(r => currentPortfolioOfficerForLoan(r.l)?.id === offVal) : rows;
   const catOrder = { arrears:0, duetoday:1, duethisweek:2 };
-  const display  = filtered.slice().sort((a,b)=>(catOrder[a.category]||3)-(catOrder[b.category]||3)).slice(0,10);
+  const display  = filtered.slice().sort((a,b)=>(catOrder[a.category]??3)-(catOrder[b.category]??3)).slice(0,10);
 
   if(sub) sub.textContent = filtered.length + ' loan' + (filtered.length!==1?'s':'') + ' need attention';
 
@@ -2802,7 +2969,7 @@ function pageInventoryDashboard(){
   const soldItemOrders = orders.filter(o=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } });
   const activeLoans    = loans.filter(l=>l.status==='active' && l.order_id && soldItemOrders.find(o=>o.id===l.order_id));
   const pendingLoans   = loans.filter(l=>l.status==='pending' && l.order_id && soldItemOrders.find(o=>o.id===l.order_id));
-  const totalOutstanding = activeLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-((state.data.repayments||[]).filter(rp=>rp.loan_id===l.id&&rp.status!=='pending'&&isClientRepayment(rp)).reduce((s,rp)=>s+Number(rp.amount||0),0))),0);
+  const totalOutstanding = activeLoans.reduce((sum,loan)=>sum+loanFinancialMetrics(loan).outstandingPI,0);
 
   $('page').innerHTML = `
     <div class="page-head">
@@ -2902,6 +3069,7 @@ function openMyPendingApprovals(){
 }
 
 function pageOfficerDashboard(){
+  if(!ensureCashTotals({start:todayISO(),end:todayISO()})) return;
   const me = state.staff;
   const teamView = isSupervisorScoped();
   const myGroups = visiblePortfolioGroupsForCurrentStaff();
@@ -2909,13 +3077,7 @@ function pageOfficerDashboard(){
   const myMembers = state.data.members.filter(m=>myGroupIds.has(m.group_id));
   const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
   const { start, end } = dashDateRange();
-  const inRangeOff = (dateStr, createdAt) => {
-    if(!dateStr && !createdAt) return false;
-    const d = (dateStr||'').slice(0,10);
-    if(d >= start && d <= end) return true;
-    if(createdAt){ const cd = kenyaDateISO(createdAt); if(cd >= start && cd <= end) return true; }
-    return false;
-  };
+  const inRangeOff=(dateStr,createdAt)=>dateInReportRange(dateStr,createdAt,{start,end});
   const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
   const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
   const {repaymentsByLoan}=buildBalanceIndexes();
@@ -2929,9 +3091,9 @@ function pageOfficerDashboard(){
   }).filter(r=>teamView || loanBelongsToCurrentOfficer(r.loan,me.id));
   const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalRp = myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
+  const totalRp = periodCashTotals({start,end},teamView?null:me.id)?.amount ?? myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
   const myOutstandingBal = myLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
-  const myInterestEarned = myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
+  const myInterestEarned = periodCashTotals({start,end},teamView?null:me.id)?.interest ?? myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
   const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending' && isClientRepayment(r));
@@ -2944,18 +3106,21 @@ function pageOfficerDashboard(){
   const repaymentsTodayByGroup=new Map();
   myMembers.forEach(member=>memberCountByGroup.set(member.group_id,(memberCountByGroup.get(member.group_id)||0)+1));
   state.data.savings.forEach(saving=>{
-    if(!saving.group_id) return;
+    if(!saving.group_id || !countsInBalance(saving)) return;
     savingsTotalByGroup.set(saving.group_id,(savingsTotalByGroup.get(saving.group_id)||0)+Number(saving.amount||0));
     if(saving.status!=='pending'&&(saving.meeting_date||'').slice(0,10)===todayStr){
       savingsTodayByGroup.set(saving.group_id,(savingsTodayByGroup.get(saving.group_id)||0)+Number(saving.amount||0));
     }
   });
   state.data.repayments.forEach(repayment=>{
-    if(repayment.group_id&&repayment.status!=='pending'&&(repayment.meeting_date||'').slice(0,10)===todayStr){
-      repaymentsTodayByGroup.set(repayment.group_id,(repaymentsTodayByGroup.get(repayment.group_id)||0)+Number(repayment.amount||0));
+    if(repayment.group_id&&countsAsCashReceived(repayment)&&isClientRepayment(repayment)&&(repayment.meeting_date||'').slice(0,10)===todayStr){
+      repaymentsTodayByGroup.set(repayment.group_id,(repaymentsTodayByGroup.get(repayment.group_id)||0)+repaymentCashReceived(repayment));
     }
   });
-  const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || l.officer_id===me.id) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
+  if(state._financialSnapshotAvailable) myGroups.forEach(group=>{
+    repaymentsTodayByGroup.set(group.id,periodCashTotals({start:todayStr,end:todayStr},teamView?null:me.id,group.id)?.amount||0);
+  });
+  const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || loanBelongsToCurrentOfficer(l,me.id)) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
 
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
@@ -3963,6 +4128,7 @@ function mpRepaymentMenu(ev, id, isPending){
  * PAGE: MEMBER PROFILE
  * ===================================================================== */
 function pageMemberProfile(){
+  if(!financialFiguresReady()) return;
   const id = state.viewCtx?.memberId;
   const m = state.data.members.find(x=>x.id===id);
   if(!m){ go('members'); return; }
@@ -4262,22 +4428,17 @@ function daysBetweenDates(from, to){
 }
 function repaymentPaidByDate(loanId, cutoff){
   return state.data.repayments
-    .filter(r=>r.loan_id===loanId && countsInBalance(r) && String(r.meeting_date||r.created_at||'').slice(0,10)<=cutoff)
+    .filter(r=>r.loan_id===loanId && countsInBalance(r) && WamamaFinance.paymentDate(r)<=cutoff)
     .reduce((sum,r)=>sum+Number(r.amount||0),0);
 }
 function loanExpectedByDate(loan, cutoff){
-  if(!loan?.start_date || loan.start_date>cutoff) return 0;
-  // start_date is the first repayment due date. One instalment is therefore
-  // due on that date, followed by one more every seven days.
-  const dueInstallments = Math.max(1, Math.floor(daysBetweenDates(loan.start_date,cutoff)/7)+1);
-  return Math.min(Number(loan.total_payable||0), dueInstallments*Number(loan.weekly_installment||0));
+  return WamamaFinance.expected(loan,cutoff);
 }
 function loanAmountDueAtDate(loan, cutoff){
-  return Math.max(0,loanExpectedByDate(loan,cutoff)-repaymentPaidByDate(loan.id,cutoff));
+  return loanFinancialMetrics(loan,cutoff).amountDue;
 }
 function loanArrearsAtDate(loan, cutoff){
-  const lastCompletedDay=addDateDays(cutoff,-1);
-  return Math.max(0,loanExpectedByDate(loan,lastCompletedDay)-repaymentPaidByDate(loan.id,cutoff)-5);
+  return loanFinancialMetrics(loan,cutoff).arrears;
 }
 function loanOverlapsWeek(loan,start,end){
   if(['pending','rejected','cancelled'].includes(String(loan.status||'').toLowerCase())) return false;
@@ -4312,11 +4473,15 @@ function collectionAccessibleGroups(){
 }
 function currentPortfolioGroupForLoan(loan){
   const member=state.data.members.find(m=>m.id===loan?.member_id);
-  return state.data.groups.find(g=>g.id===(member?.group_id||loan?.group_id))||null;
+  const verified=currentFinancialSnapshotRow(loan?.id);
+  const groupId=verified?verified.group_id:(member?.group_id||loan?.group_id);
+  return state.data.groups.find(g=>String(g.id)===String(groupId))||null;
 }
 function currentPortfolioOfficerForLoan(loan){
   const group=currentPortfolioGroupForLoan(loan);
-  return state.data.staff.find(s=>s.id===(group?.officer_id||loan?.officer_id))||null;
+  const verified=currentFinancialSnapshotRow(loan?.id);
+  const officerId=verified?verified.officer_id:(group?group.officer_id:loan?.officer_id);
+  return state.data.staff.find(s=>String(s.id)===String(officerId))||null;
 }
 function buildArrearsRows(options={}){
   const portfolioView = options.portfolioView ?? canViewAllPortfolio();
@@ -4333,26 +4498,18 @@ function buildArrearsRows(options={}){
     if(startDate < drStart || startDate > drEnd) return false;
     const group = currentPortfolioGroupForLoan(l);
     const officer = currentPortfolioOfficerForLoan(l);
-    return portfolioView || (group ? groupIds.has(group.id) : loanBelongsToCurrentOfficer(l,state.staff.id));
+    return portfolioView || (teamView ? groupIds.has(group?.id) || loanBelongsToCurrentOfficer(l,state.staff.id) : loanBelongsToCurrentOfficer(l,state.staff.id));
   });
 
   let rows = activeLoans.map(l => {
     const member = state.data.members.find(x => x.id === l.member_id);
     const group = currentPortfolioGroupForLoan(l);
     const officer = currentPortfolioOfficerForLoan(l);
-    const paid = loanPaid(l.id);
-    const startDate = new Date(l.start_date);
-    const weeksElapsed = installmentsPastDue(l.start_date,today);
-    const weekly = Number(l.weekly_installment) || 0;
-    const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears = Math.max(0, expectedPaid - paid - 5);
-
-    let nextDueDate = null;
-    for (let w = 1; w <= 1040; w++) {
-      const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
-      const ds = d.toISOString().slice(0,10);
-      if (ds >= today) { nextDueDate = ds; break; }
-    }
+    const metrics=loanFinancialMetrics(l,today);
+    const paid=metrics.paid;
+    const weekly=Number(l.weekly_installment)||0;
+    const arrears=metrics.arrears;
+    const nextDueDate=metrics.nextDueDate;
 
     let category = 'ontrack';
     if (arrears > 0) category = 'arrears';
@@ -4362,7 +4519,7 @@ function buildArrearsRows(options={}){
     return { loan:l, member, group, officer, paid, arrears, nextDueDate, expectedInstallment:weekly, category };
   });
   if(tab && tab !== 'all') rows = rows.filter(r => tab === 'duetoday' ? r.nextDueDate === today : r.category === tab);
-  if(officerFilter) rows = rows.filter(r => r.officer?.id === officerFilter || r.loan.officer_id === officerFilter);
+  if(officerFilter) rows = rows.filter(r => r.officer?.id === officerFilter);
   return rows;
 }
 function collectionSelectedWeek(){
@@ -4568,6 +4725,7 @@ function openGroupCollectionCompliance(groupId,date){
   go('collection_compliance');
 }
 function pageCollectionCompliance(){
+  if(!financialFiguresReady()) return;
   state._collectionWeekStart=mondayOfWeek(state._collectionWeekStart||collectionTodayISO());
   state._collectionTab=state._collectionTab||'overview';
   state._collectionSearch=state._collectionSearch||'';
@@ -4624,6 +4782,7 @@ function pageCollectionCompliance(){
   `;
 }
 function exportCollectionCompliance(){
+  if(!financialFiguresReady()) return;
   const report=buildCollectionCompliance();
   const issues=collectionExceptions(report);
   const wb=XLSX.utils.book_new();
@@ -4692,6 +4851,7 @@ function collectionFieldSheetRows(groupRow,report){
 }
 
 function downloadCollectionFieldSheetPdf(){
+  if(!financialFiguresReady()) return;
   try{
     const report=buildCollectionCompliance();
     if(!report.groupRows.length) return toast('No collection groups match the selected filters.','warn');
@@ -4796,6 +4956,7 @@ function downloadCollectionFieldSheetPdf(){
  * PAGE: WEEKLY MEETING RECORDER
  * ===================================================================== */
 function pageMeeting(){
+  if(!financialFiguresReady()) return;
   state._meet = state._meet || { groupId:'', date: todayISO(), entries:{} };
   const m = state._meet;
   const myGroups = visiblePortfolioGroupsForCurrentStaff();
@@ -5033,6 +5194,7 @@ async function submitMeeting(){
  * PAGE: ACTIVE LOANS
  * ===================================================================== */
 function pageArrears(){
+  if(!financialFiguresReady()) return;
   const isAdmin = state.staff.role === 'admin';
   const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
@@ -5117,50 +5279,12 @@ function pageArrears(){
   `;
 }
 function exportArrearsCollectionSheet(){
-  const isAdmin = state.staff.role === 'admin';
-  const portfolioView = canViewAllPortfolio();
-  const teamView = isSupervisorScoped();
-  const myGroupIds = portfolioView ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
-  const { start: drStart, end: drEnd } = arrearDateRange();
-
-  const activeLoans = state.data.loans.filter(l =>
-    l.status === 'active'
-    && l.start_date >= drStart && l.start_date <= drEnd
-    && (portfolioView || teamView || myGroupIds.includes(currentPortfolioGroupForLoan(l)?.id) || currentPortfolioOfficerForLoan(l)?.id === state.staff.id)
-  );
-
-  const today = todayISO();
-  const nextWeekISO = new Date(new Date(today).getTime() + 7*24*3600*1000).toISOString().slice(0,10);
-
-  const report = activeLoans.map(l => {
-    const mem = state.data.members.find(x => x.id === l.member_id);
-    const g   = currentPortfolioGroupForLoan(l);
-    const off = currentPortfolioOfficerForLoan(l);
-    const paid = loanPaid(l.id);
-    const startDate = new Date(l.start_date);
-    const weeksElapsed = installmentsPastDue(l.start_date,today);
-    const weekly = Number(l.weekly_installment) || 0;
-    const expectedPaid = Math.min(weeksElapsed * weekly, Number(l.total_payable) || 0);
-    const arrears = Math.max(0, expectedPaid - paid - 5);
-    let nextDueDate = null;
-    for (let w = 1; w <= 1040; w++) {
-      const d = new Date(startDate); d.setDate(d.getDate() + 7 * w);
-      const ds = d.toISOString().slice(0,10);
-      // >= today so a payment due TODAY is captured, not skipped to next week
-      if (ds >= today) { nextDueDate = ds; break; }
-    }
-    let category = 'ontrack';
-    // Due Today takes priority so officers can collect BEFORE it becomes arrears
-    if (arrears > 0) category = 'arrears';
-    else if (nextDueDate === today) category = 'duetoday';
-    else if (nextDueDate && nextDueDate <= nextWeekISO) category = 'duethisweek';
-    return { loan: l, member: mem, group: g, officer: off, paid, arrears, nextDueDate, expectedInstallment: weekly, category };
+  if(!financialFiguresReady()) return;
+  const filtered=buildArrearsRows({
+    portfolioView:canViewAllPortfolio(),teamView:isSupervisorScoped(),
+    groupIds:visiblePortfolioGroupsForCurrentStaff().map(g=>g.id),
+    tab:state._arrearsTab||'arrears',officerFilter:state._arrearsOfficerFilter||''
   });
-
-  const tab = state._arrearsTab || 'arrears';
-  const offFilter = state._arrearsOfficerFilter || '';
-  let filtered = report.filter(r => tab === 'all' ? true : tab === 'duetoday' ? r.nextDueDate === today : r.category === tab);
-  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   if(!filtered.length){ toast('No records in current view to export.','warn'); return; }
 
@@ -5184,6 +5308,7 @@ function exportArrearsCollectionSheet(){
 }
 
 function pageLoans(){
+  if(!financialFiguresReady()) return;
   const isAdmin = state.staff.role === 'admin';
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canSeeAll = canViewAllPortfolio() || r === 'supervisor';
@@ -5196,7 +5321,7 @@ function pageLoans(){
     const member=membersById.get(String(loan.member_id));
     return {
       member,
-      group:groupsById.get(String(loan.group_id)),
+      group:currentPortfolioGroupForLoan(loan),
       name:member?.full_name||loan.member_name||loan.client_name||'',
       phone:member?.phone||loan.phone||loan.client_phone||'',
       nationalId:member?.national_id||loan.national_id||loan.id_number||'',
@@ -5222,7 +5347,7 @@ function pageLoans(){
 
   let loans = canSeeAll
     ? state.data.loans
-    : state.data.loans.filter(l => myGroupIds.includes(l.group_id) || l.officer_id === state.staff.id);
+    : state.data.loans.filter(l => loanBelongsToCurrentOfficer(l,state.staff.id));
 
   const tab = state._loanTab || 'active';
   loans = loans.filter(l => tab==='all' ? true : l.status===tab);
@@ -5234,7 +5359,7 @@ function pageLoans(){
   });
 
   if (canSeeAll && state._loanOfficerFilter) {
-    loans = loans.filter(l => l.officer_id === state._loanOfficerFilter);
+    loans = loans.filter(l => currentPortfolioOfficerForLoan(l)?.id === state._loanOfficerFilter);
   }
 
   const duplicateLoanKey=loan=>loan.member_id
@@ -5253,7 +5378,7 @@ function pageLoans(){
     loans = loans.filter(l => {
       const info = loanInfo(l);
       const grp = info.group;
-      const off = staffById.get(String(l.officer_id));
+      const off = currentPortfolioOfficerForLoan(l);
       return [
         info.name, info.nationalId, info.phone, grp?.name, off?.full_name,
         l.asset_name, l.id, l.order_id, l.status, l.start_date
@@ -5320,9 +5445,9 @@ function pageLoans(){
           ${pagedLoans.map(l => {
             const info = loanInfo(l);
             const grp = info.group;
-            const off = staffById.get(String(l.officer_id));
+            const off = currentPortfolioOfficerForLoan(l);
             const paid = repaymentsByLoan.get(l.id)||0;
-            const out = Number(l.total_payable)-paid;
+            const out = loanFinancialMetrics(l).outstandingPI;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
             // Only an identical item loan is a duplicate. Different items in one
             // sold-items form are intentional concurrent loans for the client.
@@ -6818,6 +6943,8 @@ function exportProductSalesReport(){
   toast('Monthly product sales report exported','success');
 }
 function pageReports(){
+  if(!financialFiguresReady()) return;
+  if(!ensureCashTotals(reportDateRange())) return;
   const range = reportDateRange();
   const officers = staffLoanRoles();
   const groups = (state.data.groups||[]).filter(g=>g.status!=='inactive').sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
@@ -6912,7 +7039,7 @@ function buildReportRows(kind){
   const matchesGroup = row => !groupFilter || String(row.group_id||row.group?.id||'') === String(groupFilter);
   const matchesOfficer = row => !offFilter || String(row.officer_id||row.recorded_by||row.officer?.id||'') === String(offFilter);
   const matchesLoanStatus = loan => !statusFilter || String(loan.status||'') === String(statusFilter);
-  const filteredLoans = (state.data.loans||[]).filter(l=>matchesGroup(l) && matchesOfficer(l) && matchesLoanStatus(l));
+  const filteredLoans = (state.data.loans||[]).filter(l=>(!groupFilter || currentPortfolioGroupForLoan(l)?.id===groupFilter) && (!offFilter || currentPortfolioOfficerForLoan(l)?.id===offFilter) && matchesLoanStatus(l));
   if(kind==='management_summary'){
     const officers = staffLoanRoles().filter(o=>!offFilter || o.id===offFilter);
     const arrearsRows = buildArrearsRows({ portfolioView:true, tab:'all', dateRange:{start:'2000-01-01',end:'2999-12-31'}, officerFilter:offFilter })
@@ -6928,11 +7055,11 @@ function buildReportRows(kind){
       );
       const periodGroups = officerGroups.filter(g=>dateInReportRange(g.created_at||g.created_on,g.created_at,range));
       const periodSavings = (state.data.savings||[]).filter(s=>
-        countsInBalance(s) && matchesGroup(s) && (s.recorded_by===o.id || officerGroupIds.has(s.group_id)) &&
+        countsInBalance(s) && matchesGroup(s) && s.recorded_by===o.id &&
         dateInReportRange(s.meeting_date,s.created_at,range)
       );
       const periodRepayments = (state.data.repayments||[]).filter(r=>
-        countsAsCashReceived(r) && isClientRepayment(r) && matchesGroup(r) && (r.recorded_by===o.id || officerGroupIds.has(r.group_id)) &&
+        countsAsCashReceived(r) && isClientRepayment(r) && matchesGroup(r) && r.recorded_by===o.id &&
         dateInReportRange(r.meeting_date,r.created_at,range)
       );
       const officerLoans = (state.data.loans||[]).filter(l=>
@@ -6956,7 +7083,7 @@ function buildReportRows(kind){
         LoansDisbursed: periodLoans.reduce((sum,l)=>sum+Number(l.loan_value||0),0),
         LoansClosed: closedLoans.length,
         ClientAccountsClosed: closedClientIds.size,
-        Collections: periodRepayments.reduce((sum,r)=>sum+repaymentCashReceived(r),0),
+        Collections: periodCashTotals(range,o.id,groupFilter)?.amount ?? periodRepayments.reduce((sum,r)=>sum+repaymentCashReceived(r),0),
         OutstandingPrincipal: balances.reduce((sum,b)=>sum+b.outstandingPrincipal,0),
         OutstandingPI: balances.reduce((sum,b)=>sum+b.outstandingPI,0)
       };
@@ -6965,8 +7092,8 @@ function buildReportRows(kind){
   if(kind==='loan_repayment_history'){
     return filteredLoans.flatMap(l=>{
       const m = membersById.get(String(l.member_id));
-      const g = groupsById.get(String(l.group_id));
-      const off = staffById.get(String(l.officer_id));
+      const g = currentPortfolioGroupForLoan(l);
+      const off = currentPortfolioOfficerForLoan(l);
       const history = buildLoanRepaymentHistory(l.id);
       if(!history.length) return [{
         LoanID: loanDisplayCode(l), Member:m?.full_name||'—', Phone:m?.phone||'—', Group:g?.name||'—', Officer:off?.full_name||'—',
@@ -6993,8 +7120,8 @@ function buildReportRows(kind){
   }).filter(r=>dateInReportRange(r.Date,null,range)).filter(r=>!groupFilter || r.Group===groupsById.get(String(groupFilter))?.name).filter(r=>!offFilter || r.Officer===staffById.get(String(offFilter))?.full_name);
   if(kind==='loans') return filteredLoans.map(l => {
     const m = state.data.members.find(x=>x.id===l.member_id);
-    const g = groupsById.get(String(l.group_id));
-    const off = staffById.get(String(l.officer_id));
+    const g = currentPortfolioGroupForLoan(l);
+    const off = currentPortfolioOfficerForLoan(l);
     const bal = loanBalanceInfo(l);
     return { LoanID:loanDisplayCode(l), Member:m?.full_name||'—', Phone:m?.phone||'—', Group:g?.name||'—', Officer:off?.full_name||'—', Asset:l.asset_name, LoanValue:Number(l.loan_value), Weekly:Number(l.weekly_installment), Paid:bal.paid, OutstandingPrincipal:bal.outstandingPrincipal, OutstandingPI:bal.outstandingPI, Status:l.status };
   });
@@ -7015,6 +7142,7 @@ function buildReportRows(kind){
   return [];
 }
 function previewReport(kind){
+  if(!financialFiguresReady()) return;
   const rows = buildReportRows(kind);
   if(!rows.length) return toast('No data to preview for this report.','warn');
   const cols = Object.keys(rows[0]);
@@ -7041,6 +7169,7 @@ function previewReport(kind){
   });
 }
 function exportReport(kind){
+  if(!financialFiguresReady()) return;
   const rows = buildReportRows(kind);
   if(!rows.length) return toast('No data to export.','warn');
   const wb = XLSX.utils.book_new();
@@ -7472,29 +7601,6 @@ function toggleTheme(){
 }
 function applyTheme(){ if(lsGet('theme') === 'dark') document.body.classList.add('dark'); }
 
-/* =====================================================================
- * SWITCH USER (PIN)
- * ===================================================================== */
-async function ensurePin(){
-  const pins = lsGet('pins', {});
-  if(pins[state.staff.id]) return;
-  modal({
-    title:'Set your switch-user PIN',
-    body:`<p class="muted" style="font-size:13px">Choose a 4-digit PIN to switch back to your account on this device without retyping your password.</p>
-      <div class="field"><label>4-digit PIN</label><input id="np" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required /></div>`,
-    actions:[
-      { label:'Skip for now', onClick: closeModal },
-      { label:'Save PIN', cls:'btn-primary', onClick: async () => {
-        const v = ($('np').value||'').trim();
-        if(!/^\d{4}$/.test(v)) return toast('PIN must be exactly 4 digits.','error');
-        const h = await sha256(v + ':' + state.staff.id);
-        const all = lsGet('pins', {}); all[state.staff.id] = { h, name: state.staff.full_name, role: state.staff.role };
-        lsSet('pins', all);
-        closeModal(); toast('PIN saved.','success');
-      }}
-    ]
-  });
-}
 function openEditProfile(){
   const s = state.staff;
   modal({
@@ -7553,33 +7659,20 @@ function openEditProfile(){
 }
 
 function openSwitchUser(){
-  const pins = lsGet('pins', {});
-  const ids = Object.keys(pins).filter(id => id !== state.staff.id);
-  if(!ids.length){
-    return modal({
-      title:'Switch user',
-      body:`<p>No other accounts have set a PIN on this device yet. Each officer must sign in normally once and then save a PIN from the prompt that follows their first sign-in.</p>`,
-      actions:[{ label:'OK', cls:'btn-primary', onClick: closeModal }]
-    });
-  }
   modal({
-    title:'Switch user',
-    body:`<div class="field"><label>Select account</label>
-      <select id="su-id">${ids.map(id => `<option value="${id}">${pins[id].name} · ${pins[id].role}</option>`).join('')}</select></div>
-      <div class="field"><label>Enter PIN</label><input id="su-pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" /></div>`,
+    title:'Switch account',
+    body:`<p>Sign in to the account you want to use.</p>
+      <div class="field"><label>Email address</label><input id="su-email" type="email" autocomplete="username" /></div>
+      <div class="field"><label>Password</label><input id="su-password" type="password" autocomplete="current-password" /></div>`,
     actions:[
-      { label:'Cancel', onClick: closeModal },
-      { label:'Switch', cls:'btn-primary', onClick: async () => {
-        const id = $('su-id').value, pin = ($('su-pin').value||'').trim();
-        const h = await sha256(pin + ':' + id);
-        if(h !== pins[id].h) return toast('Incorrect PIN.','error');
-        const target = state.data.staff.find(s=>s.id===id);
-        if(!target) return toast('Staff record not found locally.','error');
-        await audit('switch_user','auth', state.staff.id, null, { to: id });
-        state.staff = target;
-        const { data: perms } = await sb.from('pb_permissions').select('*').eq('staff_id', id).maybeSingle();
-        state.perms = perms || {};
-        closeModal(); render(); toast('Switched to ' + target.full_name, 'success');
+      {label:'Cancel',cls:'btn-outline',onClick:closeModal},
+      {label:'Sign in',cls:'btn-primary',onClick:async()=>{
+        const email=($('su-email')?.value||'').trim(),password=$('su-password')?.value||'';
+        if(!email || !password) return toast('Enter the email address and password.','warn');
+        if(!navigator.onLine) return toast('Connect to the internet to switch accounts.','warn');
+        const result=await signIn(email,password);
+        if(!result.ok) return toast(result.error,'error');
+        closeModal();render();toast('Signed in as '+state.staff.full_name,'success');
       }}
     ]
   });
@@ -9202,6 +9295,7 @@ function reconActions(ev, id){
  * PAGE: ACCOUNTING
  * ===================================================================== */
 function pageAccounting(){
+  if(!financialFiguresReady()) return;
   const { start, end } = dashDateRange();
   const inRange = date => date >= start && date <= end;
   const filterBtns = [['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']];
@@ -9241,7 +9335,7 @@ function pageAccounting(){
 
   // === BALANCE SHEET SNAPSHOT ===
   const activeLoans = state.data.loans.filter(l=>l.status==='active');
-  const totalOutstanding = activeLoans.reduce((a,l)=>a+(Number(l.total_payable||0)-loanPaid(l.id)),0);
+  const totalOutstanding = activeLoans.reduce((sum,loan)=>sum+loanFinancialMetrics(loan).outstandingPI,0);
   const totalSavingsBalance = state.data.members.reduce((a,m)=>a+memberSavings(m.id),0);
   const inventoryValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
   const inventoryCost = state.data.inventory.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
@@ -10098,7 +10192,7 @@ async function refreshPendingSavingsApprovals(){
     ...pendingRows.filter(row=>!existing.some(old=>old.id===row.id))
   ];
   state._savingsApprovalsFreshAt=Date.now();
-  await writeFinancialCache('pb_savings',state.data.savings,Date.now());
+  await persistPartialFinancialCache('pb_savings',state.data.savings);
   return pendingRows;
 }
 
@@ -10316,16 +10410,22 @@ function repaymentDepositRecord(repaymentId){
 }
 
 function repaymentCashReceived(repayment){
-  if(!repayment || repayment.voided_at) return 0;
+  if(!repayment || repayment.voided_at || isScheduledPrepaymentRelease(repayment)) return 0;
   const deposit=repaymentDepositRecord(repayment.id);
   return Number(deposit?.original_payment_amount ?? repayment.amount ?? 0);
 }
 
 function countsAsCashReceived(repayment){
-  if(!repayment || repayment.voided_at || String(repayment.status||'').toLowerCase()==='pending') return false;
+  if(!repayment || repayment.voided_at || isScheduledPrepaymentRelease(repayment) ||
+    ['pending','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
+  const deposit=repaymentDepositRecord(repayment.id);
+  if(deposit && ['refunded','cancelled','rejected'].includes(String(deposit.status||'').toLowerCase())) return false;
   return countsInBalance(repayment) || !!repaymentDepositRecord(repayment.id);
 }
 
+function isScheduledPrepaymentRelease(repayment){
+  return /^Scheduled prepayment release:/i.test(String(repayment?.notes||''));
+}
 function repaymentDepositAmount(repayment){
   const deposit=repaymentDepositRecord(repayment?.id);
   return Math.max(0,Number(deposit?.excess_amount||0));
@@ -10366,7 +10466,7 @@ async function refreshPendingRepaymentApprovals(){
     ...pendingRows.filter(row=>!existing.some(old=>old.id===row.id))
   ];
   state._repaymentApprovalsFreshAt=Date.now();
-  await writeFinancialCache('pb_repayments',state.data.repayments,Date.now());
+  await persistPartialFinancialCache('pb_repayments',state.data.repayments);
   return pendingRows;
 }
 
@@ -10652,6 +10752,7 @@ async function downloadWamamaRepaymentStatementPdf(loanId){
 }
 
 function pageRepayments(){
+  if(!financialFiguresReady()) return;
   const isAdmin = state.staff.role === 'admin';
   const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
@@ -11520,6 +11621,7 @@ function erCalcSplit(ir){
 }
 
 function exportAccountingReport(){
+  if(!financialFiguresReady()) return;
   const { start, end } = dashDateRange();
   const inRange = date => date >= start && date <= end;
   const wb = XLSX.utils.book_new();
