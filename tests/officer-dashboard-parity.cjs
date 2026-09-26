@@ -22,7 +22,8 @@ const makeLoan=(id,group,start,extra={})=>({id,group_id:group,member_id:id,offic
 const loans=[makeLoan('part','ga','2026-09-19'),makeLoan('transfer','gb','2026-09-12'),
  makeLoan('today','ga','2026-09-26'),makeLoan('fraction','ga','2026-10-03',{total_payable:1000.004}),
  makeLoan('closed','ga','2026-09-01',{status:'completed'}),makeLoan('duplicate','ga','2026-09-01',{status:'cancelled'}),
- makeLoan('pending','ga','2026-09-01',{status:'pending'}),makeLoan('other','gb','2026-09-26')];
+ makeLoan('pending','ga','2026-09-01',{status:'pending'}),makeLoan('other','gb','2026-09-26'),
+ makeLoan('other-arrears','gb','2026-09-19')];
 const pay=(id,loan,amount,date,extra={})=>({id,loan_id:loan,amount,principal:amount*.8,interest:amount*.2,
  status:'approved',meeting_date:date,recorded_by:'a',group_id:'ga',...extra});
 const repayments=[pay('cash','part',50,'2026-09-19'),pay('trans-cash','transfer',100,'2026-09-20'),
@@ -75,6 +76,24 @@ let exported;
 sandbox.XLSX={utils:{book_new:()=>({}),json_to_sheet:rows=>(exported=rows),book_append_sheet(){}},writeFile(){}};
 run(`toast=()=>{};exportReport('management_summary');`);
 assert.deepEqual(JSON.parse(JSON.stringify(exported[0])),JSON.parse(JSON.stringify(raw)));
+// Management's tab badges, callout, totals and export must use the chosen officer,
+// not branch totals above a correctly filtered table (the production screenshot bug).
+run(`state._arrearsOfficerFilter='a';state._arrearsTab='arrears';pageArrears();`);
+assert.match(page.innerHTML,/In Arrears \(2\)/);assert.match(page.innerHTML,/All Active \(4\)/);
+assert.match(page.innerHTML,/Due Today \(3\)/);assert.match(page.innerHTML,/Due Next 7 Days \(1\)/);
+assert.match(page.innerHTML,/🔔 3 Due Today — Collect Now/);
+assert.match(page.innerHTML,/2 loans · Arrears KES 140/);
+assert.match(page.innerHTML,/<option value="b"/,'other officer remains selectable');
+assert.doesNotMatch(page.innerHTML,/<b>other-arrears<\/b>/);
+run(`exportArrearsCollectionSheet();`);
+assert.equal(exported.length,2);assert.equal(exported.reduce((n,r)=>n+r['Total Arrears (KES)'],0),140);
+assert.ok(exported.every(r=>r['Officer Name']==='Officer A'));
+run(`state._arrearsTab='duetoday';pageArrears();`);
+assert.match(page.innerHTML,/3 loans · Arrears KES 140/);
+run(`state._arrearsTab='all';pageArrears();`);
+assert.match(page.innerHTML,/4 loans · Arrears KES 140/);
+run(`state._arrearsOfficerFilter='';state._arrearsTab='arrears';pageArrears();`);
+assert.match(page.innerHTML,/In Arrears \(3\)/,'clearing the officer shows branch totals');
 // Separately authenticated officer data is scoped and cannot see raw deposits.
 run(`state.staff=fixture.staff[1];state._dashboardOfficerFilter='';
  state.data.loans=fixture.loans.filter(l=>loanBelongsToCurrentOfficer(l,'a'));
@@ -86,6 +105,10 @@ run(`state.staff=fixture.staff[1];state._dashboardOfficerFilter='';
  }
  pageDashboard();`);
 assert.deepEqual(dashboardFigures(),managementDashboard,'admin-selected view equals actual officer view');
+run(`state._arrearsOfficerFilter='b';pageArrears();`);
+assert.match(page.innerHTML,/In Arrears \(2\)/,'officer ignores a stale management officer filter');
+run(`exportArrearsCollectionSheet();`);
+assert.equal(exported.length,2);assert.ok(exported.every(r=>r['Officer Name']==='Officer A'));
 // Date changes affect activity, never today's outstanding balances or arrears.
 run(`_dashFilter='today';_reportFilter='today';pageDashboard();`);
 assert.equal(kpi('Repayments recorded'),'KES 0');assert.equal(kpi('Outstanding balance'),'KES 3,850');
@@ -109,6 +132,24 @@ const updated=run(`buildReportRows('management_summary')[0]`);
 assert.equal(updated.OutstandingPI,3750);assert.equal(updated.PARArrears,95);
 run(`state.staff=fixture.staff[1];state._dashboardOfficerFilter='';pageDashboard();`);
 assert.equal(kpi('Outstanding balance'),'KES 3,750');assert.equal(kpi('Accounts in arrears'),'1');
+// Long lists must match in full, including records beyond a screenshot or preview.
+sandbox.longLoans=[...Array.from({length:36},(_,i)=>makeLoan(`long-a-${i}`,'ga','2026-09-19')),
+ ...Array.from({length:17},(_,i)=>makeLoan(`long-b-${i}`,'gb','2026-09-19'))];
+run(`state.staff=fixture.staff[0];state.data.loans=longLoans;state.data.repayments=[];
+ state.data.members=longLoans.map(l=>({id:l.id,group_id:l.group_id,full_name:l.id}));
+ state._financialSnapshot.byLoan.clear();state._arrearsOfficerFilter='a';state._arrearsTab='arrears';pageArrears();`);
+const fullList=()=>Array.from(page.innerHTML.matchAll(/<b>(long-a-\d+)<\/b>/g),m=>m[1]);
+const managementFullList=fullList();
+assert.equal(managementFullList.length,36);assert.match(page.innerHTML,/36 loans · Arrears KES 3,420/);
+run(`exportArrearsCollectionSheet();`);
+const managementFullExport=JSON.parse(JSON.stringify(exported));
+assert.equal(managementFullExport.length,36);
+run(`state.staff=fixture.staff[1];state.data.loans=longLoans.filter(l=>loanBelongsToCurrentOfficer(l,'a'));
+ state._arrearsOfficerFilter='b';pageArrears();`);
+assert.deepEqual(fullList(),managementFullList,'every arrears record matches across accounts');
+assert.match(page.innerHTML,/36 loans · Arrears KES 3,420/);
+run(`exportArrearsCollectionSheet();`);
+assert.deepEqual(JSON.parse(JSON.stringify(exported)),managementFullExport,'complete exports match across accounts');
 // Website upgrades wait for open entries and offline writes, then reload safely.
 assert.equal(run(`canApplyAppUpdate()`),true);
 modal.hasChildNodes=()=>true;assert.equal(run(`canApplyAppUpdate()`),false);

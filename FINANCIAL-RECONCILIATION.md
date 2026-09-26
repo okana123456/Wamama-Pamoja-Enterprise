@@ -48,6 +48,26 @@ with an older local cache. Expected counts and currency amounts are explicit.
 
 Passing these tests does not substitute for production account reconciliation.
 
+## Selected-officer arrears counts
+
+The supplied partial Loida screenshots show matching visible loan rows and
+amounts in management and officer Due & Arrears; they do not prove complete
+production list equality. Her dashboard and arrears page both show 36 arrears
+accounts, with KES 9,520.50 overdue and 243 active loans. Management's
+selected-officer table retained branch-wide tab counts (220 arrears and 1,611
+active loans), because the officer filter was applied after calculating counts.
+All tab counts, the Due Today callout and the displayed count/arrears total now
+use the selected officer's complete filtered list. The selector retains other
+available officers. Account switches clear portfolio officer filters, and officer
+exports ignore stale management filters. Regression fixtures verify counts and
+exports, including all 36 rows in a long-list fixture across both account scopes.
+
+Loida's dashboard screenshot also has the older layout and an outstanding
+balance of KES 1,004,640.04, two cents below the supplied authoritative snapshot.
+A fresh page and the top management Dashboard Officer selector are needed to
+capture the current balance comparison. The lower Dashboard Due & Arrears
+widget has a separate filter and does not select the whole officer dashboard.
+
 ## Matching management's selected officer to their dashboard
 
 The administrator Dashboard now has an Officer selector. Selecting an officer

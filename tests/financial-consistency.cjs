@@ -81,12 +81,13 @@ run(`state.data.loans=[{...fixtureLoan,member_id:'member',group_id:'group-old',o
     sb.auth.signInWithPassword=async args=>{loginCalls.push(args);return {data:{session:{user:{id:'auth-target'}}}};};
     loadStaff=async()=>{state.staff={id:'target',business_id:'biz',role:'officer'};return true;};
     afterLogin=async()=>{};sha256=async()=> 'test-hash';closeModal=()=>{};render=()=>{};
-    state.data.loans=[{id:'old-cached-loan'}];openSwitchUser();`);
+    state.data.loans=[{id:'old-cached-loan'}];state._arrearsOfficerFilter='old-officer';state._loanOfficerFilter='old-officer';openSwitchUser();`);
   await run(`switchModal.actions[1].onClick()`);
   assert.equal(sandbox.loginCalls.length,1);
   assert.equal(sandbox.loginCalls[0].email,'officer@example.test');
   assert.equal(run('state.data.loans.length'),0,'old account data cleared');
   assert.equal(run('state.staff.id'),'target');
   assert.equal(run('state.session.user.id'),'auth-target');
+  assert.equal(run('state._arrearsOfficerFilter'),'');assert.equal(run('state._loanOfficerFilter'),'');
   console.log('Financial rules and application regressions passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

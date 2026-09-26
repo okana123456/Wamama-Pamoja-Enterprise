@@ -280,7 +280,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
-<script src="financial-rules.js?v=20260926-unused-loan-cancellation"></script>
+<script src="financial-rules.js?v=20260926-filtered-arrears-counts"></script>
 <script>
 /* =====================================================================
  * WAMAMA PAMOJA ENTERPRISE
@@ -550,7 +550,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20260926-unused-loan-cancellation';
+const APP_RELEASE='20260926-filtered-arrears-counts';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 function canApplyAppUpdate(){
   return !state.session || (['dashboard','reports','arrears','loans'].includes(state.view) &&
@@ -1152,6 +1152,8 @@ async function resetAccountData(){
   state._reportOfficerFilter='';
   state._reportGroupFilter='';
   state._reportLoanStatusFilter='';
+  state._arrearsOfficerFilter='';
+  state._loanOfficerFilter='';
   Object.keys(state.data).forEach(key=>state.data[key]=[]);
   state._savingsApprovalsFreshAt=0;
   state._repaymentApprovalsFreshAt=0;
@@ -5273,15 +5275,14 @@ function pageArrears(){
   const portfolioView = canViewAllPortfolio();
   const teamView = isSupervisorScoped();
   const myGroupIds = portfolioView ? [] : visiblePortfolioGroupsForCurrentStaff().map(g => g.id);
-  const report = buildArrearsRows({ portfolioView, teamView, groupIds:myGroupIds });
-
+  const visibleReport = buildArrearsRows({ portfolioView, teamView, groupIds:myGroupIds });
   const tab = state._arrearsTab || 'arrears';
-  const offFilter = state._arrearsOfficerFilter || '';
+  const offFilter = (portfolioView || teamView) ? state._arrearsOfficerFilter || '' : '';
+  const report = offFilter ? visibleReport.filter(r=>String(r.officer?.id)===String(offFilter)) : visibleReport;
   let filtered = report.filter(r => tab === 'all' ? true : tab === 'duetoday' ? r.nextDueDate === todayISO() : r.category === tab);
-  if ((portfolioView || teamView) && offFilter) filtered = filtered.filter(r => r.officer?.id === offFilter);
 
   const officersWithLoans = (portfolioView || teamView)
-    ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && report.some(r => r.officer?.id === s.id))
+    ? state.data.staff.filter(s => ( s.role === 'officer' || s.role === 'loan_officer') && visibleReport.some(r => r.officer?.id === s.id))
     : [];
 
   const filterBtns = [
@@ -5329,6 +5330,7 @@ function pageArrears(){
       </div>
     </div>
 
+    <div class="helper" style="margin:10px 0">${filtered.length} loan${filtered.length===1?'':'s'} · Arrears ${KES(filtered.reduce((sum,r)=>sum+Number(r.arrears||0),0))}</div>
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
@@ -5357,7 +5359,7 @@ function exportArrearsCollectionSheet(){
   const filtered=buildArrearsRows({
     portfolioView:canViewAllPortfolio(),teamView:isSupervisorScoped(),
     groupIds:visiblePortfolioGroupsForCurrentStaff().map(g=>g.id),
-    tab:state._arrearsTab||'arrears',officerFilter:state._arrearsOfficerFilter||''
+    tab:state._arrearsTab||'arrears',officerFilter:(canViewAllPortfolio() || isSupervisorScoped()) ? state._arrearsOfficerFilter||'' : ''
   });
 
   if(!filtered.length){ toast('No records in current view to export.','warn'); return; }
