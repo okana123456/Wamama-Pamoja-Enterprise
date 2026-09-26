@@ -68,6 +68,19 @@ explicit cache revalidation headers. Future frontend releases must update both
 APP_RELEASE in index.html and release.json; the regression checks they agree.
 Existing pages from before this safeguard need one normal browser reload.
 
+Production verification for commit 5c25a56 confirmed the public HTML is identical
+to the tested source and both HTML and release marker serve no-store headers.
+Fresh authenticated checks at 16:16–16:19 Kenya time on 26 September matched the
+database balances in the live-check table below for Carlix, Clintone and Laureen.
+Carlix's complete arrears table contained 23 rows totalling KES 5,397.11;
+Laureen's contained 55 rows totalling KES 22,591.46. Changing Carlix from Today to
+This Month left his balance and arrears unchanged; monthly savings were KES
+44,990 and actual collections KES 79,568.17. Monthly savings and collections were
+KES 77,466 / 346,654.90 for Clintone and KES 140,704 / 542,107.52 for Laureen.
+The production administrator UI comparison awaits an administrator sign-in;
+the supplied officer credentials do not grant administrator access. Automated
+rendered-view and PostgreSQL role parity checks passed.
+
 ## Live checks on 26 September 2026
 
 The supplied database audit confirms that both reporting functions are installed.
