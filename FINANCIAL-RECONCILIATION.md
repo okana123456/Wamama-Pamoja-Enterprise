@@ -40,3 +40,32 @@ Full history downloads retain the existing incremental cache. Five-minute active
 Run `node tests/financial-consistency.cjs` for date boundaries, voids, ownership, export parity, cache-cursor preservation, targeted repairs and authenticated switching. Run `tests/financial-snapshot-sql.cjs` with `PGLITE_MODULE` pointing to an installed `@electric-sql/pglite` module for PostgreSQL installation/idempotency, JS/SQL parity, administrator/officer/supervisor parity, tenant isolation, restricted-deposit cash totals, scope removal and the live audit query.
 
 Passing these tests does not substitute for production account reconciliation.
+
+## Live checks on 26 September 2026
+
+The supplied database audit confirms that both reporting functions are installed.
+Separately authenticated browser checks matched these arrears counts and amounts
+on both the officer dashboard and Due & Arrears:
+
+| Officer | Active loans | Arrears loans | Arrears KES | Database outstanding P+I KES |
+| --- | ---: | ---: | ---: | ---: |
+| Carlix Ogolla | 103 | 23 | 5,397.11 | 239,417.81 |
+| Clintone Omondi otieno | 358 | 1 | 1,932.84 | 1,737,160.30 |
+| Laureen Achieng Odera | 267 | 55 | 22,591.46 | 1,573,972.44 |
+
+Carlix's already-open page used the older PIN-switch interface and showed only
+one arrears loan (KES 51). Opening the newly deployed page changed it to 23 loans
+and KES 5,397.11, matching the database. This confirms that an open page can
+continue running the previous calculation until the website itself is reloaded.
+
+Live checks also exposed a fractional-cent discrepancy: the officer dashboard
+summed unrounded legacy loan totals while management and the SQL audit summed
+rounded per-loan balances. Clintone's dashboard differed by KES 0.02 and
+Laureen's by KES 0.01. All balance displays now use the shared per-loan financial
+metrics, including the officer dashboard, meeting recorder and member profiles.
+A regression verifies that summing fractional legacy totals cannot diverge.
+
+The supplied audit flagged 42 completed loans with remaining balances: Clintone
+12, Laureen 10, Sammy 18, Yvonne 2. `wamama-completed-loan-review.sql` is a
+read-only diagnostic for those records. They have not been silently reopened or
+adjusted. Management UI checks and the historical closure review remain pending.

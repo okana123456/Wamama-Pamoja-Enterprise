@@ -48,6 +48,15 @@ assert.equal(run(`repaymentCashReceived({id:'cash',amount:100,status:'approved'}
 assert.equal(run(`countsAsCashReceived({id:'release',amount:100,status:'approved',notes:'Scheduled prepayment release: deposit'})`),false);
 assert.equal(run(`loanFinancialMetrics({...state.data.loans[0],id:'release-loan'},'2026-09-25').paid`),0);
 
+// Legacy loan totals can have fractional cents. The portfolio must sum the
+// same rounded loan balances shown in management reports and the SQL audit.
+run(`state.data.loans=[0,1].map(n=>({...fixtureLoan,id:'fraction-'+n,total_payable:1000.004,
+  member_id:'member',group_id:'group-new',officer_id:'owner-new',status:'active'}));
+  state.data.repayments=[];pageOfficerDashboard();`);
+assert.match(node.innerHTML,/Outstanding balance<\/div><div class="v">KES 2,000<\/div>/);
+run(`state.data.loans=[{...fixtureLoan,member_id:'member',group_id:'group-old',officer_id:'owner-old',status:'active'}];
+  state.data.repayments=fixturePayments;`);
+
 (async()=>{
   // A pending-only refresh must never advance a complete-history sync cursor.
   run(`readFinancialCache=async()=>({fullSyncAt:100,reconciledAt:150,savedAt:200});

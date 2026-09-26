@@ -2029,7 +2029,7 @@ function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder', collection_compliance:'Collection Compliance',
     savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
-    loans:'Active Loans', calculator:'Loan Calculator', inventory:'Inventory',
+    loans:'Active Loans', arrears:'Due & Arrears', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
     staff:'Staff & Permissions', settings:'Settings', audit:'Audit Log',
@@ -3092,7 +3092,7 @@ function pageOfficerDashboard(){
   const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
   const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
   const totalRp = periodCashTotals({start,end},teamView?null:me.id)?.amount ?? myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
-  const myOutstandingBal = myLoans.reduce((a,l)=>a+Math.max(0,Number(l.total_payable||0)-(repaymentsByLoan.get(l.id)||0)),0);
+  const myOutstandingBal = myLoans.reduce((a,l)=>a+loanFinancialMetrics(l).outstandingPI,0);
   const myInterestEarned = periodCashTotals({start,end},teamView?null:me.id)?.interest ?? myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
@@ -3199,7 +3199,7 @@ function pageOfficerDashboard(){
         <tbody>
           ${myLoans.slice(0,50).map(l=>{
             const mem = membersById.get(String(l.member_id));
-            const outstanding = Math.max(0, Number(l.total_payable||0) - (repaymentsByLoan.get(l.id)||0));
+            const outstanding = loanFinancialMetrics(l).outstandingPI;
             const isDup = false;
             return `<tr>
               <td><b>${mem?.full_name||'—'}</b>${isDup?` <span class="badge b-yellow">Duplicate</span>`:''}<div class="muted" style="font-size:11px">${mem?.national_id||''}</div></td>
@@ -4266,7 +4266,7 @@ function pageMemberProfile(){
       ${tab==='loans' ? `
         ${allLoans.length ? allLoans.map(l => {
           const paid = loanPaid(l.id);
-          const outstanding = Number(l.total_payable||0) - paid;
+          const outstanding = loanFinancialMetrics(l).outstandingPI;
           const pct = Math.min(100, Math.round(paid/Number(l.total_payable||1)*100));
           const schedule = computeSchedule(Number(l.loan_value), Number(l.weekly_installment), 'flat', new Date(l.start_date));
           const today = todayISO();
@@ -4637,7 +4637,7 @@ function buildCollectionCompliance(){
     reportMembers.forEach(member=>{
       const memberLoans=loansByMember.get(member.id)||[];
       const products=memberLoans.reduce((sum,l)=>sum+Math.max(1,Number(l.asset_quantity||1)),0);
-      const olb=memberLoans.reduce((sum,l)=>sum+Math.max(0,Number(l.total_payable||0)-(paidByLoan.get(l.id)||0)),0);
+      const olb=memberLoans.reduce((sum,l)=>sum+loanFinancialMetrics(l,arrearsCutoff).outstandingPI,0);
       const expected=memberLoans.reduce((sum,l)=>sum+loanExpectedWithinWeek(l,start,end),0);
       const collected=memberLoans.reduce((sum,l)=>sum+(collectedByLoan.get(l.id)||0),0);
       const arrears=memberLoans.reduce((sum,l)=>sum+loanArrearsAtDate(l,arrearsCutoff),0);
@@ -5030,7 +5030,7 @@ function renderMeetList(){
 
           ${lns.map(ln => {
             const paid       = loanPaid(ln.id);
-            const out        = Math.max(0, Number(ln.total_payable) - paid);
+            const out        = loanFinancialMetrics(ln).outstandingPI;
             const weekly     = Number(ln.weekly_installment) || 0;
             const currentAmt = ent.repayments[ln.id] !== undefined ? ent.repayments[ln.id] : weekly;
             const dueNow     = Math.min(out,loanAmountDueAtDate(ln,m.date));
@@ -5684,7 +5684,7 @@ function openLoanTransfer(l){
 }
 function openLoanRestructure(l){
   const paid       = loanPaid(l.id);
-  const outstanding = Math.max(0, Number(l.total_payable) - paid);
+  const outstanding = loanFinancialMetrics(l).outstandingPI;
   const weeksLeft  = Number(l.weekly_installment) > 0 ? Math.ceil(outstanding / Number(l.weekly_installment)) : 0;
 
   modal({
@@ -11347,7 +11347,7 @@ function openStandaloneRepayment(loanId, memberId){
   if(!ln){ toast('Loan not found.', 'error'); return; }
 
   const paid = loanPaid(ln.id);
-  const outstanding = Math.max(0, Number(ln.total_payable) - paid);
+  const outstanding = loanFinancialMetrics(ln).outstandingPI;
   const ir = Number(ln.total_payable) ? (Number(ln.total_payable) - Number(ln.loan_value)) / Number(ln.total_payable) : 0;
 
   modal({
