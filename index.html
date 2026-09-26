@@ -280,7 +280,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
-<script src="financial-rules.js?v=20260926-officer-parity"></script>
+<script src="financial-rules.js?v=20260926-unused-loan-cancellation"></script>
 <script>
 /* =====================================================================
  * WAMAMA PAMOJA ENTERPRISE
@@ -550,7 +550,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20260926-officer-parity';
+const APP_RELEASE='20260926-unused-loan-cancellation';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 function canApplyAppUpdate(){
   return !state.session || (['dashboard','reports','arrears','loans'].includes(state.view) &&
@@ -5644,6 +5644,44 @@ function openResolveDuplicateLoan(duplicateLoan){
     ]
   });
 }
+function openCancelUnusedLoan(loan){
+  if(!['admin','ceo','branch_manager'].includes(currentStaffRole())) return;
+  const member=state.data.members.find(m=>String(m.id)===String(loan.member_id));
+  let processing=false;
+  modal({title:'Cancel incorrect loan',body:`
+    <div class="notice notice-danger"><b>${statementHtml(member?.full_name||'Client')}</b><br>${statementHtml(loan.asset_name||'Loan')} · ${KES(loan.loan_value)} · weekly ${KES(loan.weekly_installment)} · started ${fmtDate(loan.start_date)}</div>
+    <p>This removes the selected loan from active balances and arrears. Reversed payment history stays available. Loans with active payments or deposits must have those records resolved first.</p>
+    <div class="field"><label>Reason</label><textarea id="cancel-loan-reason" rows="2" placeholder="Example: Loan created in error"></textarea></div>`,
+    actions:[{label:'Back',cls:'btn-outline',onClick:()=>{if(!processing) closeModal();}},
+      {label:'Cancel this loan',cls:'btn-danger',onClick:async()=>{
+        if(processing) return;
+        const reason=$('cancel-loan-reason')?.value.trim();
+        if(!reason || reason.length<5) return toast('Enter a short reason.','error');
+        processing=true;
+        const staffId=state.staff?.id,epoch=state._accountEpoch;
+        try{
+          if(!(await ensureFreshToken())) return;
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          const {data,error}=await sb.rpc('pb_cancel_unused_loan',{p_loan_id:String(loan.id),p_reason:reason});
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          if(error){
+            const missing=/could not find the function|does not exist/i.test(error.message||'');
+            return toast(missing?'This option needs a system update. Please contact your administrator.':error.message,'error');
+          }
+          if(!data?.success || String(data.loan_id)!==String(loan.id) || data.status!=='cancelled') return toast('Could not confirm the cancellation. Refresh and check this loan.','error');
+          loan.status='cancelled';
+          closeModal();
+          await refreshFinancialSnapshot([String(loan.id)]);
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          await persistPartialFinancialCache('pb_loans',state.data.loans);
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          pageLoans();
+          toast('Incorrect loan cancelled. Its reversed payment history has been kept.','success');
+        }catch{toast('Could not complete the request. Refresh and check this loan before trying again.','error');}
+        finally{processing=false;}
+      }}]
+  });
+}
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
   const r = state.staff?.app_role || state.staff?.role || 'officer';
@@ -5667,6 +5705,7 @@ function loanActions(ev, id){
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
     ...(canApproveLoan && l.status==='active' ? [{label:'Resolve duplicate loan',danger:true,onClick:()=>openResolveDuplicateLoan(l)}] : []),
+    ...(['admin','ceo','branch_manager'].includes(currentStaffRole()) && l.status==='active' ? [{label:'Cancel incorrect loan',danger:true,onClick:()=>openCancelUnusedLoan(l)}] : []),
     ...(isDuplicate ? [{
       label:'⚠ Delete unused duplicate', danger:true, onClick: ()=>confirmDialog(
         `This is an identical active loan for ${state.data.members.find(m=>m.id===l.member_id)?.full_name||'this client'}. It can only be deleted here if it has no repayment or prepayment history. Continue?`,
