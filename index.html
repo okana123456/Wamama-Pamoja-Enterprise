@@ -280,7 +280,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
-<script src="financial-rules.js"></script>
+<script src="financial-rules.js?v=20260926-officer-parity"></script>
 <script>
 /* =====================================================================
  * WAMAMA PAMOJA ENTERPRISE
@@ -413,6 +413,11 @@ function loanFinancialMetrics(loan,cutoff=todayISO()){
     WamamaFinance.metrics(loan,state.data.repayments,cutoff);
 }
 function financialFiguresReady(){
+  if(appUpdateAvailable){
+    applyAvailableAppUpdate();
+    if($('page')) $('page').innerHTML='<div class="card card-pad"><h3>Updating the dashboard…</h3><p>Please finish any open entry so the latest update can load.</p></div>';
+    return false;
+  }
   if(state._financialSnapshotAvailable && state._financialSnapshot?.asOfDate!==todayISO()){
     state._portfolioDataVerified=false;
     refreshFinancialSnapshot().then(ok=>{
@@ -544,6 +549,46 @@ async function refreshFinancialFiguresIfStale(){
 window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
+// This tiny static check uses website hosting, never a Supabase data request.
+const APP_RELEASE='20260926-officer-parity';
+let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
+function canApplyAppUpdate(){
+  return !state.session || (['dashboard','reports','arrears','loans'].includes(state.view) &&
+    !document.getElementById('modal-root')?.hasChildNodes() && !lsGet('queue',[]).length);
+}
+function applyAvailableAppUpdate(){
+  if(!appUpdateAvailable || appUpdateReloading || !canApplyAppUpdate()) return false;
+  sessionStorage.setItem('pb_restore_view',state.view||'dashboard');
+  sessionStorage.setItem('pb_restore_ctx',JSON.stringify(state.viewCtx||null));
+  appUpdateReloading=true;
+  window.location.reload();
+  return true;
+}
+async function checkAppRelease(){
+  if(!navigator.onLine || document.visibilityState==='hidden') return;
+  if(appUpdateAvailable){applyAvailableAppUpdate();return;}
+  if(appUpdateRequest || Date.now()-appUpdateCheckAt<5*60*1000) return;
+  appUpdateCheckAt=Date.now();
+  appUpdateRequest=(async()=>{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),8000);
+    try{
+      const response=await fetch('/release.json',{cache:'no-store',signal:controller.signal});
+      if(!response.ok) return;
+      const release=await response.json();
+      if(typeof release.version==='string' && release.version!==APP_RELEASE){
+        appUpdateAvailable=true;
+        applyAvailableAppUpdate();
+      }
+    }catch{} // Connectivity failures do not discard an in-progress entry.
+    finally{clearTimeout(timeout);}
+  })();
+  try{await appUpdateRequest;}finally{appUpdateRequest=null;}
+}
+window.addEventListener('focus',checkAppRelease);
+window.addEventListener('online',checkAppRelease);
+document.addEventListener('visibilitychange',checkAppRelease);
+setInterval(checkAppRelease,5*60*1000);
 function scheduleFinancialSnapshotRefresh(loanId=null){
   if(loanId) pendingFinancialLoanIds.add(String(loanId));
   else pendingFullFinancialRefresh=true;
@@ -698,7 +743,7 @@ window.addEventListener('keydown', e => {
   }
 });
 window.addEventListener('beforeunload', e => {
-  if(state.session){
+  if(state.session && !appUpdateReloading){
     sessionStorage.setItem('pb_restore_view', state.view);
     sessionStorage.setItem('pb_restore_ctx', JSON.stringify(state.viewCtx||null));
     e.preventDefault(); e.returnValue = '';
@@ -1103,6 +1148,10 @@ async function resetAccountData(){
   state._financialSnapshot=null;
   state._financialSnapshotAvailable=false;
   cashSnapshots.clear();
+  state._dashboardOfficerFilter='';
+  state._reportOfficerFilter='';
+  state._reportGroupFilter='';
+  state._reportLoanStatusFilter='';
   Object.keys(state.data).forEach(key=>state.data[key]=[]);
   state._savingsApprovalsFreshAt=0;
   state._repaymentApprovalsFreshAt=0;
@@ -2750,6 +2799,7 @@ function pageDashboard(){
   const showInventoryDash = r === 'inventory_officer' || r === 'storekeeper';
   if(showInventoryDash){ pageInventoryDashboard(); return; }
   if(!showAdminDash){ pageOfficerDashboard(); return; }
+  if(state._dashboardOfficerFilter){ pageOfficerDashboard(state._dashboardOfficerFilter); return; }
 
   const { start, end } = dashDateRange();
   // Robust inRange: compare date strings directly (YYYY-MM-DD), with a fallback
@@ -2814,6 +2864,7 @@ function pageDashboard(){
     <div class="page-head">
       <div><h1>Operational overview</h1><div class="desc">Real-time portfolio status.</div></div>
     </div>
+    ${dashboardOfficerSelector()}
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;align-items:center">
       ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_dashFilter===k?'btn-primary':'btn-outline'}" onclick="_dashFilter='${k}';pageDashboard()">${l}</button>`).join('')}
@@ -3068,32 +3119,55 @@ function openMyPendingApprovals(){
   });
 }
 
-function pageOfficerDashboard(){
+// Shared by an officer's dashboard, management's officer view and exports.
+// Activity uses the selected payment period; portfolio balances are as of today.
+function officerFinancialSummary(officerId,range,{groupId='',status=''}={}){
+  const ownsLoan=l=>!officerId || loanBelongsToCurrentOfficer(l,officerId);
+  const inGroup=row=>!groupId || String(row.group_id)===String(groupId);
+  const loans=state.data.loans.filter(l=>ownsLoan(l) &&
+    (!groupId || String(currentPortfolioGroupForLoan(l)?.id)===String(groupId)) &&
+    (!status || l.status===status));
+  const activeLoans=loans.filter(l=>l.status==='active');
+  const arrearsRows=buildArrearsRows({portfolioView:true,tab:'arrears',
+    dateRange:{start:'2000-01-01',end:'2999-12-31'}})
+    .filter(r=>ownsLoan(r.loan) && (!groupId || String(r.group?.id)===String(groupId)) &&
+      (!status || r.loan.status===status));
+  const savings=state.data.savings.filter(s=>countsInBalance(s) && inGroup(s) &&
+    (!officerId || String(s.recorded_by)===String(officerId)) && dateInReportRange(s.meeting_date,s.created_at,range));
+  const repayments=state.data.repayments.filter(r=>countsAsCashReceived(r) && isClientRepayment(r) && inGroup(r) &&
+    (!officerId || String(r.recorded_by)===String(officerId)) && dateInReportRange(r.meeting_date,r.created_at,range));
+  const cash=periodCashTotals(range,officerId,groupId);
+  const balances=activeLoans.map(l=>loanFinancialMetrics(l));
+  const money=n=>Math.round((n+Number.EPSILON)*100)/100;
+  const issuedLoans=loans.filter(l=>['active','completed','defaulted'].includes(l.status) && dateInReportRange(l.start_date,l.created_at,range));
+  return {loans,activeLoans,arrearsRows,savings,
+    savingsAmount:money(savings.reduce((s,r)=>s+Number(r.amount||0),0)),
+    collections:money(cash?.amount ?? repayments.reduce((s,r)=>s+repaymentCashReceived(r),0)),
+    interest:money(cash?.interest ?? repayments.reduce((s,r)=>s+repaymentAppliedInterest(r),0)),
+    outstandingPI:money(balances.reduce((s,r)=>s+Number(r.outstandingPI||0),0)),
+    outstandingPrincipal:money(balances.reduce((s,r)=>s+Number(r.outstandingPrincipal||0),0)),
+    arrearsAmount:money(arrearsRows.reduce((s,r)=>s+Number(r.arrears||0),0)),
+    issuedAmount:money(issuedLoans.reduce((s,r)=>s+Number(r.loan_value||0),0))};
+}
+function dashboardOfficerSelector(){
+  if(!canViewAllPortfolio()) return '';
+  return `<div class="field" style="max-width:360px;margin-bottom:16px"><label>Officer</label><select aria-label="Dashboard officer" onchange="state._dashboardOfficerFilter=this.value;pageDashboard()"><option value="">All officers</option>${staffLoanRoles().map(o=>`<option value="${o.id}" ${state._dashboardOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>`;
+}
+function pageOfficerDashboard(officerId=null){
   if(!ensureCashTotals({start:todayISO(),end:todayISO()})) return;
-  const me = state.staff;
-  const teamView = isSupervisorScoped();
-  const myGroups = visiblePortfolioGroupsForCurrentStaff();
+  const managementView=!!officerId && canViewAllPortfolio();
+  const me = managementView ? state.data.staff.find(s=>s.id===officerId) : state.staff;
+  if(!me){state._dashboardOfficerFilter='';pageDashboard();return;}
+  const teamView = !managementView && isSupervisorScoped();
+  const myGroups = managementView ? state.data.groups.filter(g=>g.officer_id===me.id) : visiblePortfolioGroupsForCurrentStaff();
   const myGroupIds = new Set(myGroups.map(g=>g.id));
   const myMembers = state.data.members.filter(m=>myGroupIds.has(m.group_id));
   const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
   const { start, end } = dashDateRange();
-  const inRangeOff=(dateStr,createdAt)=>dateInReportRange(dateStr,createdAt,{start,end});
-  const mySavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && inRangeOff(s.meeting_date, s.created_at) && countsInBalance(s));
-  const myRepay = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && inRangeOff(r.meeting_date, r.created_at) && countsAsCashReceived(r) && isClientRepayment(r));
-  const {repaymentsByLoan}=buildBalanceIndexes();
-  const myLoans = state.data.loans.filter(l=>l.status==='active' && (teamView || loanBelongsToCurrentOfficer(l,me.id)));
-  const myArrearsRows = buildArrearsRows({
-    portfolioView:false,
-    teamView,
-    groupIds:myGroupIds,
-    dateRange:{start:'2000-01-01',end:'2999-12-31'},
-    tab:'arrears'
-  }).filter(r=>teamView || loanBelongsToCurrentOfficer(r.loan,me.id));
-  const myArrearsTotal = myArrearsRows.reduce((a,r)=>a+Number(r.arrears||0),0);
-  const totalSv = mySavings.reduce((a,b)=>a+Number(b.amount||0),0);
-  const totalRp = periodCashTotals({start,end},teamView?null:me.id)?.amount ?? myRepay.reduce((a,b)=>a+repaymentCashReceived(b),0);
-  const myOutstandingBal = myLoans.reduce((a,l)=>a+loanFinancialMetrics(l).outstandingPI,0);
-  const myInterestEarned = periodCashTotals({start,end},teamView?null:me.id)?.interest ?? myRepay.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
+  const summary=officerFinancialSummary(teamView?null:me.id,{start,end});
+  const mySavings=summary.savings,myLoans=summary.activeLoans,myArrearsRows=summary.arrearsRows;
+  const myArrearsTotal=summary.arrearsAmount,totalSv=summary.savingsAmount,totalRp=summary.collections;
+  const myOutstandingBal=summary.outstandingPI,myInterestEarned=summary.interest;
   // Pending (awaiting admin approval) — all-time for this officer, not range-filtered
   const myPendingSavings = state.data.savings.filter(s=>(teamView || s.recorded_by===me.id) && s.status==='pending');
   const myPendingRepayments = state.data.repayments.filter(r=>(teamView || r.recorded_by===me.id) && r.status==='pending' && isClientRepayment(r));
@@ -3120,15 +3194,15 @@ function pageOfficerDashboard(){
   if(state._financialSnapshotAvailable) myGroups.forEach(group=>{
     repaymentsTodayByGroup.set(group.id,periodCashTotals({start:todayStr,end:todayStr},teamView?null:me.id,group.id)?.amount||0);
   });
-  const myLoansIssuedToday = state.data.loans.filter(l=>l.status==='active' && (teamView || loanBelongsToCurrentOfficer(l,me.id)) && (l.start_date||'').slice(0,10)===todayStr).reduce((a,b)=>a+Number(b.loan_value||0),0);
 
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
   ];
   $('page').innerHTML = `
     <div class="page-head">
-      <div><h1>${teamView ? `${state.staff.team_name || 'Team'} dashboard` : 'My dashboard'}</h1><div class="desc">${teamView ? `Performance and portfolio for ${state.staff.team_name || 'your assigned team'}.` : `Your personal performance summary, ${me.full_name}.`}</div></div>
+      <div><h1>${managementView ? `${me.full_name} — dashboard` : teamView ? `${state.staff.team_name || 'Team'} dashboard` : 'My dashboard'}</h1><div class="desc">${teamView ? `Performance and portfolio for ${state.staff.team_name || 'your assigned team'}.` : `Performance and portfolio for ${me.full_name}.`}</div></div>
     </div>
+    ${managementView?dashboardOfficerSelector():''}
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
       ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_dashFilter===k?'btn-primary':'btn-outline'}" onclick="_dashFilter='${k}';pageDashboard()">${l}</button>`).join('')}
       ${_dashFilter==='custom'?`<input type="date" value="${_dashCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_dashCustomStart=this.value;pageDashboard()" />
@@ -3142,13 +3216,13 @@ function pageOfficerDashboard(){
       <div class="kpi k-warn"><div class="l">${teamView ? 'Team active loans' : 'Active loans I manage'}</div><div class="v">${myLoans.length}</div></div>
       <div class="kpi k-danger"><div class="l">Outstanding balance</div><div class="v">${KES(myOutstandingBal)}</div><div class="d">across my active loans</div></div>
       <div class="kpi k-danger"><div class="l">Accounts in arrears</div><div class="v">${myArrearsRows.length}</div><div class="d">${KES(myArrearsTotal)} overdue</div></div>
-      <div class="kpi k-primary"><div class="l">Loans Issued Today</div><div class="v">${KES(myLoansIssuedToday)}</div><div class="d">active loans started today</div></div>
+      <div class="kpi k-primary"><div class="l">Loans issued</div><div class="v">${KES(summary.issuedAmount)}</div><div class="d">selected activity period</div></div>
       ${(myPendingSavings.length + myPendingRepayments.length) > 0 ? `
       <div class="kpi" style="border-top:3px solid var(--warning);background:var(--warning-50)">
         <div class="l" style="color:var(--warning)">Pending Admin Approval</div>
         <div class="v" style="font-size:18px">${myPendingSavings.length + myPendingRepayments.length} <span style="font-size:13px;font-weight:500;color:var(--text-muted)">entries</span></div>
         <div class="d">${myPendingSavings.length > 0 ? `Savings: ${KES(myPendingSavingsTotal)} (${myPendingSavings.length})` : ''}${myPendingSavings.length > 0 && myPendingRepayments.length > 0 ? ' · ' : ''}${myPendingRepayments.length > 0 ? `Repayments: ${KES(myPendingRepaymentsTotal)} (${myPendingRepayments.length})` : ''}</div>
-        <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="openMyPendingApprovals()">View pending entries</button>
+        ${managementView?'':'<button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="openMyPendingApprovals()">View pending entries</button>'}
       </div>` : ''}
     </div>
     <div class="card" style="margin-top:16px">
@@ -6956,6 +7030,8 @@ function pageReports(){
   ];
   const summaryRows = buildReportRows('management_summary');
   const totals = summaryRows.reduce((acc,row)=>{
+    acc.activeLoans += Number(row.ActiveLoans||0);
+    acc.arrearsAccounts += Number(row.AccountsInArrears||0);
     acc.savings += Number(row.SavingsMobilized||0);
     acc.collections += Number(row.Collections||0);
     acc.disbursed += Number(row.LoansDisbursed||0);
@@ -6967,7 +7043,7 @@ function pageReports(){
     acc.clients += Number(row.ClientsRecruited||0);
     acc.groups += Number(row.GroupsCreated||0);
     return acc;
-  },{savings:0,collections:0,disbursed:0,outstandingPI:0,outstandingPrincipal:0,arrears:0,closedLoans:0,closedClients:0,clients:0,groups:0});
+  },{activeLoans:0,arrearsAccounts:0,savings:0,collections:0,disbursed:0,outstandingPI:0,outstandingPrincipal:0,arrears:0,closedLoans:0,closedClients:0,clients:0,groups:0});
   $('page').innerHTML = `
     <div class="page-head"><div><h1>Reports</h1><div class="desc">One-branch management reports for Rongo Branch.</div></div></div>
     <div class="card card-pad" style="margin-bottom:16px">
@@ -6980,18 +7056,21 @@ function pageReports(){
         `:''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
-        <div class="field"><label>Officer</label><select onchange="state._reportOfficerFilter=this.value;pageReports()"><option value="">All officers</option>${officers.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
+        <div class="field"><label>Officer</label><select onchange="state._reportOfficerFilter=this.value;state._reportGroupFilter='';pageReports()"><option value="">All officers</option>${officers.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
         <div class="field"><label>Group</label><select onchange="state._reportGroupFilter=this.value;pageReports()"><option value="">All groups</option>${groups.map(g=>`<option value="${g.id}" ${groupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
         <div class="field"><label>Loan status</label><select onchange="state._reportLoanStatusFilter=this.value;pageReports()"><option value="">All statuses</option>${['active','completed','pending','rejected','cancelled'].map(s=>`<option value="${s}" ${statusFilter===s?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
     </div>
+    <p class="helper">Collections, savings and loans issued use the selected activity period. Active loans, outstanding balances and arrears are as of ${fmtDate(todayISO())}, for the selected officer and portfolio filters.</p>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:16px">
+      <div class="kpi"><div class="l">Active loans</div><div class="v">${totals.activeLoans}</div></div>
       <div class="kpi k-success"><div class="l">Collections</div><div class="v">${KES(totals.collections)}</div><div class="d">${range.label}</div></div>
       <div class="kpi k-success"><div class="l">Savings</div><div class="v">${KES(totals.savings)}</div><div class="d">${range.label}</div></div>
       <div class="kpi k-primary"><div class="l">Credit sales</div><div class="v">${KES(totals.disbursed)}</div><div class="d">loans issued</div></div>
       <div class="kpi"><div class="l">Outstanding principal</div><div class="v">${KES(totals.outstandingPrincipal)}</div></div>
       <div class="kpi"><div class="l">Outstanding P + I</div><div class="v">${KES(totals.outstandingPI)}</div></div>
       <div class="kpi k-danger"><div class="l">PAR / arrears</div><div class="v">${KES(totals.arrears)}</div></div>
+      <div class="kpi k-danger"><div class="l">Accounts in arrears</div><div class="v">${totals.arrearsAccounts}</div></div>
       <div class="kpi k-success"><div class="l">Loans closed</div><div class="v">${totals.closedLoans}</div></div>
       <div class="kpi k-success"><div class="l">Client accounts closed</div><div class="v">${totals.closedClients}</div></div>
       <div class="kpi k-primary"><div class="l">Clients recruited</div><div class="v">${totals.clients}</div></div>
@@ -7000,9 +7079,9 @@ function pageReports(){
     <div class="card" style="margin-bottom:16px">
       <div class="card-head"><div><h3>Officer performance</h3><div class="sub">${range.label} · branch-level filters applied</div></div><button class="btn btn-sm btn-primary" onclick="exportReport('management_summary')">Export Excel</button></div>
       <div style="overflow-x:auto"><table class="tbl">
-        <thead><tr><th>Officer</th><th class="num">PAR/Arrears</th><th class="num">Clients recruited</th><th class="num">Groups created</th><th class="num">Savings</th><th class="num">Credit sales</th><th class="num">Loans closed</th><th class="num">Client accounts closed</th><th class="num">Collections</th><th class="num">Principal OLB</th><th class="num">P+I OLB</th></tr></thead>
+        <thead><tr><th>Officer</th><th class="num">Active loans</th><th class="num">Accounts in arrears</th><th class="num">PAR/Arrears</th><th class="num">Clients recruited</th><th class="num">Groups created</th><th class="num">Savings</th><th class="num">Credit sales</th><th class="num">Loans closed</th><th class="num">Client accounts closed</th><th class="num">Collections</th><th class="num">Principal OLB</th><th class="num">P+I OLB</th></tr></thead>
         <tbody>
-          ${summaryRows.map(r=>`<tr><td><b>${r.Officer}</b></td><td class="num" style="color:${r.PARArrears>0?'var(--danger)':'inherit'}">${KES(r.PARArrears)}</td><td class="num">${r.ClientsRecruited}</td><td class="num">${r.GroupsCreated}</td><td class="num">${KES(r.SavingsMobilized)}</td><td class="num">${KES(r.LoansDisbursed)}</td><td class="num">${r.LoansClosed}</td><td class="num">${r.ClientAccountsClosed}</td><td class="num">${KES(r.Collections)}</td><td class="num">${KES(r.OutstandingPrincipal)}</td><td class="num">${KES(r.OutstandingPI)}</td></tr>`).join('') || `<tr><td colspan="11"><div class="empty"><h4>No officer data found</h4></div></td></tr>`}
+          ${summaryRows.map(r=>`<tr><td><b>${r.Officer}</b></td><td class="num">${r.ActiveLoans}</td><td class="num">${r.AccountsInArrears}</td><td class="num" style="color:${r.PARArrears>0?'var(--danger)':'inherit'}">${KES(r.PARArrears)}</td><td class="num">${r.ClientsRecruited}</td><td class="num">${r.GroupsCreated}</td><td class="num">${KES(r.SavingsMobilized)}</td><td class="num">${KES(r.LoansDisbursed)}</td><td class="num">${r.LoansClosed}</td><td class="num">${r.ClientAccountsClosed}</td><td class="num">${KES(r.Collections)}</td><td class="num">${KES(r.OutstandingPrincipal)}</td><td class="num">${KES(r.OutstandingPI)}</td></tr>`).join('') || `<tr><td colspan="13"><div class="empty"><h4>No officer data found</h4></div></td></tr>`}
         </tbody>
       </table></div>
     </div>
@@ -7042,10 +7121,8 @@ function buildReportRows(kind){
   const filteredLoans = (state.data.loans||[]).filter(l=>(!groupFilter || currentPortfolioGroupForLoan(l)?.id===groupFilter) && (!offFilter || currentPortfolioOfficerForLoan(l)?.id===offFilter) && matchesLoanStatus(l));
   if(kind==='management_summary'){
     const officers = staffLoanRoles().filter(o=>!offFilter || o.id===offFilter);
-    const arrearsRows = buildArrearsRows({ portfolioView:true, tab:'all', dateRange:{start:'2000-01-01',end:'2999-12-31'}, officerFilter:offFilter })
-      .filter(r=>!groupFilter || r.group?.id===groupFilter)
-      .filter(r=>!statusFilter || r.loan.status===statusFilter);
     return officers.map(o=>{
+      const summary=officerFinancialSummary(o.id,range,{groupId:groupFilter,status:statusFilter});
       const officerGroups = (state.data.groups||[]).filter(g=>g.officer_id===o.id && (!groupFilter || g.id===groupFilter));
       const officerGroupIds = new Set(officerGroups.map(g=>g.id));
       const periodMembers = (state.data.members||[]).filter(m=>
@@ -7054,38 +7131,27 @@ function buildReportRows(kind){
         dateInReportRange(m.registered_on||m.created_at,m.created_at,range)
       );
       const periodGroups = officerGroups.filter(g=>dateInReportRange(g.created_at||g.created_on,g.created_at,range));
-      const periodSavings = (state.data.savings||[]).filter(s=>
-        countsInBalance(s) && matchesGroup(s) && s.recorded_by===o.id &&
-        dateInReportRange(s.meeting_date,s.created_at,range)
-      );
-      const periodRepayments = (state.data.repayments||[]).filter(r=>
-        countsAsCashReceived(r) && isClientRepayment(r) && matchesGroup(r) && r.recorded_by===o.id &&
-        dateInReportRange(r.meeting_date,r.created_at,range)
-      );
-      const officerLoans = (state.data.loans||[]).filter(l=>
-        (!groupFilter || currentPortfolioGroupForLoan(l)?.id===groupFilter) &&
-        matchesLoanStatus(l) && loanBelongsToCurrentOfficer(l,o.id)
-      );
-      const periodLoans = officerLoans.filter(l=>dateInReportRange(l.start_date,l.created_at,range));
+      const officerLoans=summary.loans;
       const closedLoans = officerLoans.filter(l=>l.status==='completed' && dateInReportRange(l.updated_at||l.expected_end_date||l.start_date,l.updated_at,range));
       const closedClientIds = new Set(closedLoans.map(l=>l.member_id).filter(Boolean).filter(memberId=>{
         const memberLoans = state.data.loans.filter(l=>l.member_id===memberId);
         return memberLoans.length && memberLoans.every(l=>l.status==='completed');
       }));
-      const balances = officerLoans.filter(l=>l.status==='active').map(loanBalanceInfo);
-      const officerArrears = arrearsRows.filter(r=>loanBelongsToCurrentOfficer(r.loan,o.id)).reduce((sum,r)=>sum+Number(r.arrears||0),0);
       return {
         Officer:o.full_name,
-        PARArrears: officerArrears,
+        ActiveLoans:summary.activeLoans.length,
+        AccountsInArrears:summary.arrearsRows.length,
+        PARArrears:summary.arrearsAmount,
         ClientsRecruited: periodMembers.length,
         GroupsCreated: periodGroups.length,
-        SavingsMobilized: periodSavings.reduce((sum,s)=>sum+Number(s.amount||0),0),
-        LoansDisbursed: periodLoans.reduce((sum,l)=>sum+Number(l.loan_value||0),0),
+        SavingsMobilized:summary.savingsAmount,
+        LoansDisbursed:summary.issuedAmount,
         LoansClosed: closedLoans.length,
         ClientAccountsClosed: closedClientIds.size,
-        Collections: periodCashTotals(range,o.id,groupFilter)?.amount ?? periodRepayments.reduce((sum,r)=>sum+repaymentCashReceived(r),0),
-        OutstandingPrincipal: balances.reduce((sum,b)=>sum+b.outstandingPrincipal,0),
-        OutstandingPI: balances.reduce((sum,b)=>sum+b.outstandingPI,0)
+        Collections:summary.collections,
+        InterestCollected:summary.interest,
+        OutstandingPrincipal:summary.outstandingPrincipal,
+        OutstandingPI:summary.outstandingPI
       };
     }).sort((a,b)=>b.Collections-a.Collections);
   }
@@ -11653,6 +11719,8 @@ function exportAccountingReport(){
 }
 (async function boot(){
   applyTheme();
+  await checkAppRelease();
+  if(appUpdateReloading) return;
   // Restore session
   const { data } = await sb.auth.getSession();
   if(data.session){

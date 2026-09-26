@@ -27,7 +27,7 @@ These are verified code defects. The particular cause of each reported live disc
 
 1. Run `wamama-authoritative-financial-snapshot.sql` in project `hqxanetwkvmcfaaewnzl`. Both readiness flags must be true. It installs read-only reporting functions, an incremental lookup index, and corrects existing trigger sums to exclude voids. It does not rewrite historical loan/payment amounts or silently reopen completed loans.
 2. Publish the accompanying application files, then refresh the website. Account switching now requires the target account's sign-in credentials.
-3. Run `wamama-live-financial-reconciliation-check.sql`. Investigate any nonzero historical-status or schedule review counts individually.
+3. Run `wamama-live-financial-reconciliation-check.sql` to verify reporting totals. Historical status review counts are a separate data review and do not block comparing the same portfolio on both accounts.
 4. Compare the same officer, Kenya report date and group scope in management reports, Due & Arrears, the arrears export, and the separately authenticated officer dashboard. Reconcile outstanding P+I, arrears count and arrears amount to the SQL result. Confirm collections use identical date ranges.
 5. Observe a normal authorized payment/approval and confirm the officer and admin receive the change. Do not create a dummy production payment to test this.
 
@@ -39,7 +39,34 @@ Full history downloads retain the existing incremental cache. Five-minute active
 
 Run `node tests/financial-consistency.cjs` for date boundaries, voids, ownership, export parity, cache-cursor preservation, targeted repairs and authenticated switching. Run `tests/financial-snapshot-sql.cjs` with `PGLITE_MODULE` pointing to an installed `@electric-sql/pglite` module for PostgreSQL installation/idempotency, JS/SQL parity, administrator/officer/supervisor parity, tenant isolation, restricted-deposit cash totals, scope removal and the live audit query.
 
+`node tests/officer-dashboard-parity.cjs` compares the rendered administrator's
+selected-officer dashboard, separately scoped officer dashboard, management
+summary and Excel export. Fixtures cover current ownership after transfers,
+voided/pending/future payments, fractional cents, cash held as deposits,
+cancelled duplicate loans, date/group/status filters and a newly verified approval
+with an older local cache. Expected counts and currency amounts are explicit.
+
 Passing these tests does not substitute for production account reconciliation.
+
+## Matching management's selected officer to their dashboard
+
+The administrator Dashboard now has an Officer selector. Selecting an officer
+uses the same page renderer and summary calculation as that officer's own login;
+it does not change the administrator's authenticated account. Management Reports
+and their export also consume this shared summary, including active-loan and
+arrears-account counts. Compare All groups and All statuses with the officer's
+whole dashboard, and choose the same activity date range for savings, collections
+and loans issued. Balances and arrears always describe today's active portfolio.
+Cancelled, rejected and pending applications are excluded from loans issued.
+
+An already-open page can retain older JavaScript independently of database cache.
+The deployed release includes a small static version check on login, focus and
+every five minutes while visible. A new release reloads safe reporting pages;
+open entry dialogs, meeting forms and queued offline writes defer the reload.
+This uses Vercel hosting, not Supabase requests. The HTML and version marker have
+explicit cache revalidation headers. Future frontend releases must update both
+APP_RELEASE in index.html and release.json; the regression checks they agree.
+Existing pages from before this safeguard need one normal browser reload.
 
 ## Live checks on 26 September 2026
 
