@@ -69,3 +69,11 @@ The supplied audit flagged 42 completed loans with remaining balances: Clintone
 12, Laureen 10, Sammy 18, Yvonne 2. `wamama-completed-loan-review.sql` is a
 read-only diagnostic for those records. They have not been silently reopened or
 adjusted. Management UI checks and the historical closure review remain pending.
+
+The supplied loan-level review contains all 42 records, with an aggregate recorded
+shortfall of KES 128,592.02. Twenty-one have zero valid paid amounts and twenty-one
+have partial payments. All 42 have zero voided rows and zero future-dated payment
+amounts, so those explanations do not account for this set. These figures are
+recorded ledger gaps, not confirmed customer debts. The follow-up
+`wamama-completed-loan-history-check.sql` checks possible same-asset replacement
+loans, pending deposits and the latest loan audit events without changing data.
