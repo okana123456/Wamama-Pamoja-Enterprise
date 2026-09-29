@@ -35,5 +35,40 @@ run(`state.staff={id:'admin',role:'admin',app_role:'admin'};
  assert.equal(run(`state.data.loans[0].status`),'active');
  run(`globalThis.cancelModal=null;state.staff={id:'officer',role:'officer',app_role:'loan_officer'};openCancelUnusedLoan(state.data.loans[0]);`);
  assert.equal(sandbox.cancelModal,null,'ordinary officers cannot use manager cancellation');
- console.log('Unused loan cancellation UI: authoritative errors, targeted refresh and account-switch guards passed.');
+ // Every visible removal choice uses the same guarded server operation, including
+ // duplicates and loans with retained voided history. No choice erases the ledger.
+ run(`state.staff={id:'admin',role:'admin',app_role:'admin'};
+  state.data.loans.push({...state.data.loans[0],id:'keep'});
+  showActMenu=(event,items)=>{globalThis.loanMenu=items;};
+  sb.from=()=>{throw Error('Removal must not directly delete loan records');};
+  confirmDialog=()=>{throw Error('Removal must use the shared dialog');};
+  loanActions({},'wrong');`);
+ const removeLabels=['Cancel incorrect loan','⚠ Delete unused duplicate','🗑 Delete Loan'];
+ for(const label of removeLabels){
+  const action=sandbox.loanMenu.find(item=>item.label===label);
+  assert.ok(action,`Missing removal option: ${label}`);
+  run(`state.data.loans[0].status='active';
+   sb.rpc=async(name,args)=>{globalThis.rpcCall={name,args};return {data:{success:true,loan_id:'wrong',status:'cancelled'}};};`);
+  action.onClick();
+  assert.equal(sandbox.cancelModal.title,'Remove incorrect loan');
+  assert.equal(sandbox.cancelModal.actions[1].label,'Remove loan');
+  await sandbox.cancelModal.actions[1].onClick();
+  assert.equal(sandbox.rpcCall.name,'pb_cancel_unused_loan');
+  assert.equal(sandbox.rpcCall.args.p_loan_id,'wrong');
+  assert.equal(run(`state.data.loans[0].status`),'cancelled');
+  assert.equal(run(`state.data.loans[1].status`),'active','the loan to keep is untouched');
+  assert.equal(run(`state.data.repayments.length`),1,'voided history remains under every menu choice');
+ }
+ run(`state.data.loans[0].status='active';
+  sb.rpc=async()=>({error:{message:'Could not find the function public.pb_cancel_unused_loan'}});
+  openCancelUnusedLoan(state.data.loans[0]);`);
+ await sandbox.cancelModal.actions[1].onClick();
+ assert.equal(run(`state.data.loans[0].status`),'active','missing database setup cannot remove a loan locally');
+ assert.match(sandbox.lastToast.message,/system update/);
+ for(const role of ['loan_officer','officer','supervisor']){
+  sandbox.testRole=role;
+  run(`state.staff={id:'staff',role:testRole,app_role:testRole};loanActions({},'wrong');`);
+  assert.ok(sandbox.loanMenu.every(item=>!removeLabels.includes(item.label)),`no unsupported removal for ${role}`);
+ }
+ console.log('Loan removal UI: all menu choices share server safeguards, preserve history and refresh only the selected loan.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

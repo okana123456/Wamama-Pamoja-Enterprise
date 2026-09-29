@@ -13,7 +13,18 @@ dated 18 and 25 September. The deletion check counts these retained rows.
 Install `wamama-cancel-unused-loan.sql` in the Wamama database. Installation
 changes no existing loan. The readiness query should return true. Refresh the
 administrator portal, open Active Loans, choose the unwanted loan's three-dot
-menu, select Cancel incorrect loan, enter the reason and click Cancel this loan.
+menu, select Cancel incorrect loan or Delete Loan, enter the reason and click
+Remove loan. Delete unused duplicate uses the same operation. These choices
+remove the loan from the active portfolio instead of erasing accounting history.
+
+The 29 September report shows Ruth Auma Nyanywa with two active Kabati loans:
+7 September, weekly KES 688.12, paid KES 688.12; and 9 September, weekly KES
+651.20, paid KES 0. The screenshot contains no error message and does not
+establish whether the unpaid loan has retained history or pending deposits.
+Code review found that the older Delete Loan and Delete unused duplicate options
+still attempted physical deletion and rejected any accounting history. All three
+removal choices now invoke the same manager-only cancellation RPC and dialog.
+The live database installation and Ruth's cancellation remain unconfirmed.
 
 The server permits cancellation only for an active administrator, CEO or branch
 manager in the loan's own business. It rechecks all dates, active/pending payment
