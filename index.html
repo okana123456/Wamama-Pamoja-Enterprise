@@ -280,7 +280,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
-<script src="financial-rules.js?v=20260929-unified-loan-removal"></script>
+<script src="financial-rules.js?v=20261004-inventory-cost-and-search"></script>
 <script>
 /* =====================================================================
  * WAMAMA PAMOJA ENTERPRISE
@@ -550,7 +550,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20260929-unified-loan-removal';
+const APP_RELEASE='20261004-inventory-cost-and-search';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 function canApplyAppUpdate(){
   return !state.session || (['dashboard','reports','arrears','loans'].includes(state.view) &&
@@ -1442,7 +1442,7 @@ function scheduleRealtimeRender(){
   if(realtimeRenderTimer) return;
   realtimeRenderTimer = setTimeout(() => {
     realtimeRenderTimer = null;
-    if(['mem-search','loan-search'].includes(document.activeElement?.id)){
+    if(['mem-search','loan-search','inv-search'].includes(document.activeElement?.id)){
       scheduleRealtimeRender();
       return;
     }
@@ -2827,7 +2827,7 @@ function pageDashboard(){
   const interestEarned = periodCashTotals({start,end})?.interest ?? repayments.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   const savingsThreshold=Number(state.settings?.savings_threshold||400);
   const eligibleCount = state.data.members.filter(m=>(savingsByMember.get(m.id)||0)>=savingsThreshold).length;
-  const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
+  const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
   const closedLoans = state.data.loans.filter(l=>l.status==='completed' && inRangeFallback(l.updated_at||l.expected_end_date||l.start_date,l.updated_at)).length;
   const closedClients = state.data.members.filter(m=>{
     const loans = state.data.loans.filter(l=>l.member_id===m.id);
@@ -3016,7 +3016,7 @@ function pageInventoryDashboard(){
   const members    = state.data.members   || [];
   const r          = state.staff?.app_role || state.staff?.role || 'officer';
 
-  const inventoryValue = inv.reduce((a,i)=>a+Number(i.loan_price||0)*Number(i.stock||0),0);
+  const inventoryValue = inv.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
   const lowStock       = inv.filter(i=>Number(i.stock||0)<=Number(i.reorder_level||5));
   const pendingOrders  = orders.filter(o=>o.status==='pending');
   const soldItemOrders = orders.filter(o=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } });
@@ -3035,7 +3035,7 @@ function pageInventoryDashboard(){
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:20px">
       <div class="card card-pad">
-        <div class="kpi-label">INVENTORY VALUE</div>
+        <div class="kpi-label">INVENTORY VALUE AT COST</div>
         <div class="kpi-val">${KES(inventoryValue)}</div>
         <div class="kpi-sub">${inv.length} asset${inv.length!==1?'s':''}</div>
       </div>
@@ -3365,10 +3365,8 @@ function pageGroups(){
     </div>` : ''}
   `;
   $('grp-search').addEventListener('input', e => {
-    state._groupSearch = e.target.value;
     state._groupsPage = 0;
-    pageGroups();
-    setTimeout(()=>{ const el=$('grp-search'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } },0);
+    rerenderSearchWithFocus(e.target,'_groupSearch','_groupSearchTimer',pageGroups,'grp-search');
   });
 }
 function groupActions(ev, id){
@@ -3515,6 +3513,7 @@ function openGroupForm(g=null){
 /* =====================================================================
  * PAGE: MEMBERS
  * ===================================================================== */
+let _memberPageIndexes=null;
 function pageMembers(){
   const ctx = state.viewCtx || {};
   const filterGroup  = ctx.groupId || '';
@@ -3522,24 +3521,45 @@ function pageMembers(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
   const canApprove = can('approve_group');
-  const {savingsByMember}=buildBalanceIndexes();
-  const duplicateMemberIds=buildDuplicateMemberIds(state.data.members);
-  const linkedMemberIds=new Set();
-  ['savings','repayments','loans','orders','guarantors'].forEach(key=>{
-    (state.data[key]||[]).forEach(row=>{ if(row.member_id) linkedMemberIds.add(String(row.member_id)); });
-  });
-  const activeLoanCountByMember=new Map();
-  (state.data.loans||[]).forEach(loan=>{
-    if(loan.status==='active'&&loan.member_id){
-      activeLoanCountByMember.set(loan.member_id,(activeLoanCountByMember.get(loan.member_id)||0)+1);
+  // Reuse ledger-derived indexes only while typing. Normal renders rebuild them,
+  // so approved writes and realtime updates cannot leave stale balances visible.
+  const sourceKeys=['members','savings','repayments','loans','orders','guarantors'];
+  const reuseIndexes=document.activeElement?.id==='mem-search' &&
+    _memberPageIndexes?.epoch===state._accountEpoch &&
+    sourceKeys.every(key=>_memberPageIndexes.sources[key]===state.data[key] &&
+      _memberPageIndexes.lengths[key]===(state.data[key]||[]).length);
+  let savingsByMember,duplicateMemberIds,linkedMemberIds,activeLoanCountByMember;
+  if(reuseIndexes){
+    ({savingsByMember,duplicateMemberIds,linkedMemberIds,activeLoanCountByMember}=_memberPageIndexes);
+  }else{
+    savingsByMember=new Map();
+    for(const saving of state.data.savings||[]){
+      if(!saving.member_id || !countsInBalance(saving)) continue;
+      savingsByMember.set(saving.member_id,(savingsByMember.get(saving.member_id)||0)+Number(saving.amount||0));
     }
-  });
+    duplicateMemberIds=buildDuplicateMemberIds(state.data.members);
+    linkedMemberIds=new Set();
+    ['savings','repayments','loans','orders','guarantors'].forEach(key=>{
+      (state.data[key]||[]).forEach(row=>{ if(row.member_id) linkedMemberIds.add(String(row.member_id)); });
+    });
+    activeLoanCountByMember=new Map();
+    (state.data.loans||[]).forEach(loan=>{
+      if(loan.status==='active'&&loan.member_id){
+        activeLoanCountByMember.set(loan.member_id,(activeLoanCountByMember.get(loan.member_id)||0)+1);
+      }
+    });
+    _memberPageIndexes={epoch:state._accountEpoch,
+      sources:Object.fromEntries(sourceKeys.map(key=>[key,state.data[key]])),
+      lengths:Object.fromEntries(sourceKeys.map(key=>[key,(state.data[key]||[]).length])),
+      savingsByMember,duplicateMemberIds,linkedMemberIds,activeLoanCountByMember};
+  }
   const isDuplicateFast=member=>duplicateMemberIds.has(String(member.id));
   const isSafeDuplicateFast=member=>member.status==='inactive'&&isDuplicateFast(member)&&!linkedMemberIds.has(String(member.id));
 
   const canSeeAllPortfolio = canViewAllPortfolio();
+  const groupsById=new Map((state.data.groups||[]).map(group=>[group.id,group]));
   let list = (canSeeAllPortfolio || canApprove || isSupervisorScoped()) ? state.data.members : state.data.members.filter(m=>{
-    const g = state.data.groups.find(x=>x.id===m.group_id);
+    const g = groupsById.get(m.group_id);
     return g?.officer_id === state.staff.id || m.officer_id === state.staff.id;
   });
   if(filterGroup) list = list.filter(m=>m.group_id===filterGroup);
@@ -3551,7 +3571,7 @@ function pageMembers(){
   if(state._memberDuplicatesOnly) list = list.filter(isDuplicateFast);
 
   const pendingCount = state.data.members.filter(m => m.status==='pending' &&
-    ((canSeeAllPortfolio||canApprove||isSupervisorScoped()) || state.data.groups.find(g=>g.id===m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
+    ((canSeeAllPortfolio||canApprove||isSupervisorScoped()) || groupsById.get(m.group_id)?.officer_id===state.staff.id || m.officer_id===state.staff.id)
   ).length;
 
   const PAGE_SIZE = 15;
@@ -3595,7 +3615,7 @@ function pageMembers(){
         </tr></thead>
         <tbody>
           ${paged.map(m => {
-            const g  = state.data.groups.find(x=>x.id===m.group_id);
+            const g  = groupsById.get(m.group_id);
             const sv = savingsByMember.get(m.id)||0;
             const activeMemberLoanCount = activeLoanCountByMember.get(m.id)||0;
             const isDup = isDuplicateFast(m);
@@ -3635,17 +3655,8 @@ function pageMembers(){
     </div>` : ''}
   `;
   $('mem-search').addEventListener('input', e => {
-    state._memberSearch=e.target.value;
     state._membersPage=0;
-    clearTimeout(state._memberSearchTimer);
-    state._memberSearchTimer=setTimeout(()=>{
-      if(state.view!=='members') return;
-      pageMembers();
-      requestAnimationFrame(()=>{
-        const el=$('mem-search');
-        if(el){ el.focus({preventScroll:true}); el.setSelectionRange(el.value.length,el.value.length); }
-      });
-    },280);
+    rerenderSearchWithFocus(e.target,'_memberSearch','_memberSearchTimer',pageMembers,'mem-search');
   });
   $('mem-group').addEventListener('change',  e => { state.viewCtx = { ...ctx, groupId: e.target.value }; state._membersPage=0; pageMembers(); });
   $('mem-status').addEventListener('change', e => { state.viewCtx = { ...ctx, memberStatus: e.target.value }; state._membersPage=0; pageMembers(); });
@@ -4605,14 +4616,16 @@ function collectionSelectedWeek(){
 function rerenderSearchWithFocus(input,stateKey,timerKey,pageFn,inputId){
   state[stateKey]=input.value;
   const cursor=input.selectionStart??input.value.length;
+  const epoch=state._accountEpoch,view=state.view;
   if(state[timerKey]) clearTimeout(state[timerKey]);
   state[timerKey]=setTimeout(()=>{
     state[timerKey]=null;
+    if(epoch!==state._accountEpoch || view!==state.view) return;
     pageFn();
     requestAnimationFrame(()=>{
       const next=$(inputId);
       if(!next) return;
-      next.focus();
+      next.focus({preventScroll:true});
       const nextCursor=Math.min(cursor,next.value.length);
       next.setSelectionRange(nextCursor,nextCursor);
     });
@@ -5389,15 +5402,25 @@ function pageLoans(){
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canSeeAll = canViewAllPortfolio() || r === 'supervisor';
   const myGroupIds = canSeeAll ? [] : state.data.groups.filter(g => g.officer_id === state.staff.id).map(g => g.id);
-  const {repaymentsByLoan}=buildBalanceIndexes();
   const membersById=new Map(state.data.members.map(member=>[String(member.id),member]));
   const groupsById=new Map(state.data.groups.map(group=>[String(group.id),group]));
   const staffById=new Map(state.data.staff.map(staff=>[String(staff.id),staff]));
+  const groupForLoan=loan=>{
+    const member=membersById.get(String(loan.member_id));
+    const verified=currentFinancialSnapshotRow(loan.id);
+    return groupsById.get(String(verified?verified.group_id:(member?.group_id||loan.group_id)))||null;
+  };
+  const officerIdForLoan=loan=>{
+    const group=groupForLoan(loan);
+    const verified=currentFinancialSnapshotRow(loan.id);
+    return verified?verified.officer_id:(group?group.officer_id:loan.officer_id);
+  };
+  const officerForLoan=loan=>staffById.get(String(officerIdForLoan(loan)))||null;
   const loanInfo=loan=>{
     const member=membersById.get(String(loan.member_id));
     return {
       member,
-      group:currentPortfolioGroupForLoan(loan),
+      group:groupForLoan(loan),
       name:member?.full_name||loan.member_name||loan.client_name||'',
       phone:member?.phone||loan.phone||loan.client_phone||'',
       nationalId:member?.national_id||loan.national_id||loan.id_number||'',
@@ -5423,7 +5446,7 @@ function pageLoans(){
 
   let loans = canSeeAll
     ? state.data.loans
-    : state.data.loans.filter(l => loanBelongsToCurrentOfficer(l,state.staff.id));
+    : state.data.loans.filter(l => String(officerIdForLoan(l))===String(state.staff.id));
 
   const tab = state._loanTab || 'active';
   loans = loans.filter(l => tab==='all' ? true : l.status===tab);
@@ -5435,7 +5458,7 @@ function pageLoans(){
   });
 
   if (canSeeAll && state._loanOfficerFilter) {
-    loans = loans.filter(l => currentPortfolioOfficerForLoan(l)?.id === state._loanOfficerFilter);
+    loans = loans.filter(l => String(officerIdForLoan(l))===String(state._loanOfficerFilter));
   }
 
   const duplicateLoanKey=loan=>loan.member_id
@@ -5454,7 +5477,7 @@ function pageLoans(){
     loans = loans.filter(l => {
       const info = loanInfo(l);
       const grp = info.group;
-      const off = currentPortfolioOfficerForLoan(l);
+      const off = officerForLoan(l);
       return [
         info.name, info.nationalId, info.phone, grp?.name, off?.full_name,
         l.asset_name, l.id, l.order_id, l.status, l.start_date
@@ -5468,6 +5491,8 @@ function pageLoans(){
   const loanPage=Math.min(Math.max(0,Number(state._loansPage||0)),loanPageCount-1);
   state._loansPage=loanPage;
   const pagedLoans=loans.slice(loanPage*LOAN_PAGE_SIZE,(loanPage+1)*LOAN_PAGE_SIZE);
+  const repaymentsByLoan=pagedLoans.some(l=>!currentFinancialSnapshotRow(l.id))
+    ? buildBalanceIndexes().repaymentsByLoan : null;
   const loanFirst=loanTotal?loanPage*LOAN_PAGE_SIZE+1:0;
   const loanLast=Math.min((loanPage+1)*LOAN_PAGE_SIZE,loanTotal);
 
@@ -5521,8 +5546,8 @@ function pageLoans(){
           ${pagedLoans.map(l => {
             const info = loanInfo(l);
             const grp = info.group;
-            const off = currentPortfolioOfficerForLoan(l);
-            const paid = repaymentsByLoan.get(l.id)||0;
+            const off = officerForLoan(l);
+            const paid = Number(currentFinancialSnapshotRow(l.id)?.paid ?? repaymentsByLoan?.get(l.id) ?? 0);
             const out = loanFinancialMetrics(l).outstandingPI;
             const bcls = l.status==='completed'?'b-grey':l.status==='defaulted'?'b-red':'b-blue';
             // Only an identical item loan is a duplicate. Different items in one
@@ -5564,17 +5589,8 @@ function pageLoans(){
   const loanSearchEl = $('loan-search');
   if(loanSearchEl){
     loanSearchEl.addEventListener('input', e=>{
-      state._loanSearch = e.target.value;
       state._loansPage=0;
-      clearTimeout(state._loanSearchTimer);
-      state._loanSearchTimer=setTimeout(()=>{
-        if(state.view!=='loans') return;
-        pageLoans();
-        requestAnimationFrame(()=>{
-          const el=$('loan-search');
-          if(el){ el.focus({preventScroll:true}); el.setSelectionRange(el.value.length,el.value.length); }
-        });
-      },280);
+      rerenderSearchWithFocus(e.target,'_loanSearch','_loanSearchTimer',pageLoans,'loan-search');
     });
   }
 }
@@ -6105,6 +6121,32 @@ function recalculateApprovalTerms(grossPrincipal,fromWeeks=false){
 /* =====================================================================
  * PAGE: INVENTORY
  * ===================================================================== */
+const roundInventoryMoney=value=>Math.round((Number(value)+Number.EPSILON)*100)/100;
+function inventoryPurchasePrice(asset){
+  return asset?.purchase_price===null || asset?.purchase_price===undefined || asset?.purchase_price===''
+    ? null : Number(asset.purchase_price);
+}
+function inventoryCostMethod(asset){
+  return ['weighted_average','latest_purchase','manual'].includes(asset?.cost_method)
+    ? asset.cost_method : 'weighted_average';
+}
+function inventoryReceiptCost(asset,quantity,purchasePrice,adjustment=asset?.cost_adjustment||0){
+  const currentCost=Number(asset?.buying_price||0);
+  const method=inventoryCostMethod(asset);
+  if(method==='manual') return currentCost;
+  const landed=Number(purchasePrice)+Number(adjustment||0);
+  if(!Number.isFinite(landed) || landed<0) throw Error('Purchase price plus cost adjustment must be zero or greater.');
+  if(method==='latest_purchase') return roundInventoryMoney(landed);
+  const existingStock=Math.max(0,Number(asset?.stock||0));
+  return roundInventoryMoney((existingStock*currentCost+Number(quantity)*landed)/(existingStock+Number(quantity)));
+}
+function inventoryMarginPct(selling,cost){
+  return Number(selling)>0 && cost!==null && cost!==undefined
+    ? ((Number(selling)-Number(cost))/Number(selling)*100).toFixed(1)+'%' : '—';
+}
+function canSetInventoryLoanPrice(){
+  return ['admin','ceo','branch_manager'].includes(currentStaffRole());
+}
 function pageInventory(){
   const inv = state.data.inventory;
   const isAdmin = state.staff.role === 'admin';
@@ -6130,6 +6172,7 @@ function pageInventory(){
         `:''}
       </div>
     </div>
+    <p class="helper" style="margin:0 0 12px">Purchase price is the last recorded supplier price. Cost/unit values remaining stock. Loan price is set separately and never changes when stock is received. Gross margin uses purchase price; cost margin uses stock valuation cost.</p>
     <div class="toolbar">
       <div class="search-box grow">
         <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
@@ -6139,28 +6182,32 @@ function pageInventory(){
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
-          <th>Asset</th><th>Category</th><th class="num">Qty</th><th class="num">Cost/unit</th><th class="num">Loan price/unit</th>
-          <th class="num">Total cost value</th><th class="num">Total loan value</th><th class="num">Margin</th><th>Status</th><th></th>
+          <th>Asset</th><th>Category</th><th class="num">Qty</th><th class="num">Purchase price/unit</th><th class="num">Cost/unit</th><th class="num">Loan price/unit</th>
+          <th class="num">Total cost value</th><th class="num">Total loan value</th><th class="num">Gross margin</th><th class="num">Cost margin</th><th>Cost method</th><th>Status</th><th></th>
         </tr></thead>
         <tbody>
           ${paged.map(a => {
-            const margin = a.loan_price && a.buying_price ? ((a.loan_price-a.buying_price)/a.loan_price*100) : 0;
+            const purchasePrice=inventoryPurchasePrice(a);
+            const method=inventoryCostMethod(a);
             const totalCost = Number(a.buying_price||0)*Number(a.stock||0);
             const totalLoan = Number(a.loan_price||0)*Number(a.stock||0);
-            const status = a.stock===0 ? `<span class="badge b-red">Out of stock</span>` : a.stock<=a.reorder_level ? `<span class="badge b-yellow">Low stock</span>` : `<span class="badge b-green">In stock</span>`;
+            const status = Number(a.stock)===0 ? `<span class="badge b-red">Out of stock</span>` : Number(a.loan_price||0)<=0 ? `<span class="badge b-yellow">Price needed</span>` : a.stock<=a.reorder_level ? `<span class="badge b-yellow">Low stock</span>` : `<span class="badge b-green">In stock</span>`;
             return `<tr>
               <td><b>${a.name}</b></td>
               <td>${a.category||'—'}</td>
               <td class="num">${a.stock}</td>
+              <td class="num">${purchasePrice===null?'Not recorded':KES(purchasePrice)}</td>
               <td class="num">${KES(a.buying_price)}</td>
               <td class="num">${KES(a.loan_price)}</td>
               <td class="num">${KES(totalCost)}</td>
               <td class="num"><b>${KES(totalLoan)}</b></td>
-              <td class="num">${margin.toFixed(1)}%</td>
+              <td class="num">${inventoryMarginPct(a.loan_price,purchasePrice)}</td>
+              <td class="num">${inventoryMarginPct(a.loan_price,Number(a.buying_price||0))}</td>
+              <td>${{weighted_average:'Weighted average',latest_purchase:'Latest purchase',manual:'Manual'}[method]}</td>
               <td>${status}</td>
               ${canManageInventory?`<td><button class="act-btn" onclick="invActions(event,'${a.id}')">···</button></td>`:'<td></td>'}
             </tr>`;
-          }).join('') || `<tr><td colspan="10"><div class="empty"><h4>No inventory yet</h4><p>Add assets manually or import from Excel.</p></div></td></tr>`}
+          }).join('') || `<tr><td colspan="13"><div class="empty"><h4>No inventory yet</h4><p>Add assets manually or import from Excel.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
@@ -6170,19 +6217,22 @@ function pageInventory(){
       <button class="btn btn-sm btn-outline" ${(_page+1)*PAGE_SIZE>=total?'disabled':''} onclick="state._invPage=${_page+1};pageInventory()">Next →</button>
     </div>` : ''}
   `;
-  $('inv-search').addEventListener('input', e=>{ state._invSearch=e.target.value; state._invPage=0; pageInventory(); setTimeout(()=>{ const el=$('inv-search'); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } },0); });
+  $('inv-search').addEventListener('input', e=>{
+    state._invPage=0;
+    rerenderSearchWithFocus(e.target,'_invSearch','_invSearchTimer',pageInventory,'inv-search');
+  });
 }
 
 function downloadInventoryTemplate(){
   const wb = XLSX.utils.book_new();
   const template = [
-    { name:'Example Sofa Set', category:'Furniture', stock:10, buying_price:15000, loan_price:18000, reorder_level:3 },
-    { name:'Blanket', category:'Bedding', stock:50, buying_price:800, loan_price:1000, reorder_level:10 },
+    { name:'Example Sofa Set', category:'Furniture', stock:10, purchase_price:15000, buying_price:15000, cost_method:'weighted_average', cost_adjustment:0, loan_price:18000, reorder_level:3 },
+    { name:'Blanket', category:'Bedding', stock:50, purchase_price:800, buying_price:800, cost_method:'weighted_average', cost_adjustment:0, loan_price:1000, reorder_level:10 },
   ];
   const ws = XLSX.utils.json_to_sheet(template);
   // Add column header comments by widening columns
   ws['!cols'] = [
-    {wch:30},{wch:16},{wch:10},{wch:16},{wch:16},{wch:14}
+    {wch:30},{wch:16},{wch:10},{wch:20},{wch:18},{wch:20},{wch:18},{wch:18},{wch:14}
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
   XLSX.writeFile(wb, 'WamamaPamoja_Inventory_Template.xlsx');
@@ -6208,6 +6258,11 @@ async function importInventory(input){
       // Flexible column mapping — handle variations in header names
       const colMap = (row) => {
         const keys = Object.keys(row);
+        const normaliseKey=k=>k.toLowerCase().replace(/[^a-z0-9]/g,'');
+        const exact=(...candidates)=>{
+          const key=keys.find(k=>candidates.some(c=>normaliseKey(k)===normaliseKey(c)));
+          return key===undefined ? '' : row[key];
+        };
         const find = (...candidates) => {
           for(const c of candidates){
             const k = keys.find(k=>k.toLowerCase().replace(/[\s_]/g,'').includes(c.toLowerCase().replace(/[\s_]/g,'')));
@@ -6215,12 +6270,20 @@ async function importInventory(input){
           }
           return '';
         };
+        const purchaseRaw=exact('purchase_price','actual_purchase_price','supplier_price','purchaseprice','actualbuyingprice');
+        const costRaw=exact('buying_price','cost_unit','inventory_cost','costperunit','buying');
+        const adjustment=Number(exact('cost_adjustment','landed_adjustment')||0);
+        const costMethod=String(exact('cost_method')||'weighted_average').trim();
+        const purchasePrice=purchaseRaw===''?null:Number(purchaseRaw);
         return {
           name:        String(find('name','asset','item','product','description')||'').trim(),
           category:    String(find('category','cat','type','group')||'Other').trim()||'Other',
           stock:       Number(find('stock','qty','quantity','units')||0),
-          buying_price:Number(find('buying','cost','purchase','buyprice','costperunit')||0),
-          loan_price:  Number(find('loan','selling','sell','loanprice','sellingprice')||0),
+          purchase_price:purchasePrice,
+          buying_price:Number(costRaw===''?purchasePrice??0:costRaw),
+          cost_method:['weighted_average','latest_purchase','manual'].includes(costMethod)?costMethod:'weighted_average',
+          cost_adjustment:adjustment,
+          loan_price:  Number(exact('loan_price','selling_price','loanprice','sellingprice')||find('loan','selling','sell')||0),
           reorder_level:Number(find('reorder','minimum','min','minstock')||5),
         };
       };
@@ -6239,13 +6302,13 @@ async function importInventory(input){
           </div>
           <div style="max-height:320px;overflow-y:auto">
             <table class="tbl" style="font-size:12px">
-              <thead><tr><th>Name</th><th>Category</th><th class="num">Qty</th><th class="num">Cost/unit</th><th class="num">Loan price</th></tr></thead>
+              <thead><tr><th>Name</th><th>Category</th><th class="num">Qty</th><th class="num">Purchase/unit</th><th class="num">Cost/unit</th><th class="num">Loan price</th></tr></thead>
               <tbody>
                 ${mapped.map(r=>`<tr>
                   <td>${r.name}</td><td>${r.category}</td>
-                  <td class="num">${r.stock}</td>
+                  <td class="num">${r.stock}</td><td class="num">${r.purchase_price===null?'Not recorded':KES(r.purchase_price)}</td>
                   <td class="num">${KES(r.buying_price)}</td>
-                  <td class="num">${KES(r.loan_price)}</td>
+                  <td class="num">${canSetInventoryLoanPrice()?KES(r.loan_price):'Manager to set'}</td>
                 </tr>`).join('')}
               </tbody>
             </table>
@@ -6259,13 +6322,13 @@ async function importInventory(input){
             for(const row of mapped){
               const exists = state.data.inventory.find(a=>a.name.toLowerCase()===row.name.toLowerCase());
               if(exists){ skipped++; continue; }
-              const { data, error } = await sb.from('pb_inventory').insert({ ...row, business_id: state.staff.business_id || null }).select().single();
+              const { data, error } = await sb.from('pb_inventory').insert({ ...row, loan_price:canSetInventoryLoanPrice()?row.loan_price:0, business_id: state.staff.business_id || null }).select().single();
               if(error){ failed++; console.warn('Import failed for',row.name,error.message); }
               else { state.data.inventory.push(data); added++; }
             }
             input.value='';
             render();
-            toast(`Import done: ${added} added, ${skipped} skipped (already exist), ${failed} failed.`, failed>0?'warn':'success');
+            toast(`Import done: ${added} added, ${skipped} skipped (already exist), ${failed} failed.${!canSetInventoryLoanPrice()&&added?' A manager must set selling prices before issue.':''}`, failed>0?'warn':'success');
           }}
         ]
       });
@@ -6281,7 +6344,7 @@ function invActions(ev, id){
   const isAdmin = state.staff.role==='admin';
   showActMenu(ev, [
     { label:'Edit asset', onClick: ()=>openAssetForm(a) },
-    { label:'Quick restock', onClick: ()=>quickRestock(a) },
+    { label:'Receive stock from supplier', onClick: ()=>receiveStockForAsset(a) },
     'sep',
     ...(isAdmin ? [{ label:'Delete asset', danger:true, onClick: ()=>confirmDialog(`Delete "${a.name}"?`, async()=>{
       await sb.from('pb_inventory').delete().eq('id', id);
@@ -6291,19 +6354,26 @@ function invActions(ev, id){
   ]);
 }
 function openAssetForm(a=null){
+  const canSetLoanPrice=canSetInventoryLoanPrice();
   modal({
     title: a?'Edit asset':'Add asset',
-    body:`<form id="af">
+    body:`<form id="af" data-existing="${a?'1':'0'}">
       <div class="field"><label>Asset name *</label><input name="name" value="${a?.name||''}" required /></div>
       <div class="grid-2">
         <div class="field"><label>Category</label>
           <select name="category">${['Kitchen','Bedding','Electronics','Furniture','Other'].map(c=>`<option ${a?.category===c?'selected':''}>${c}</option>`).join('')}</select>
         </div>
         <div class="field"><label>Quantity in stock</label><input type="number" min="0" name="stock" id="af-stock" value="${a?.stock||0}" oninput="assetCalcTotals()" /></div>
-        <div class="field"><label>Buying price per unit (KES)</label><input type="number" min="0" step="0.01" name="buying_price" id="af-buying" value="${a?.buying_price||0}" oninput="assetCalcTotals()" /></div>
-        <div class="field"><label>Loan price per unit (KES)</label><input type="number" min="0" step="0.01" name="loan_price" id="af-loan" value="${a?.loan_price||0}" oninput="assetCalcTotals()" /></div>
+        <div class="field"><label>Actual supplier purchase price/unit (KES)</label><input type="number" min="0" step="0.01" name="purchase_price" id="af-purchase" value="${inventoryPurchasePrice(a)??''}" placeholder="Not recorded" oninput="assetCalcTotals()" /></div>
+        <div class="field"><label>Cost method</label><select name="cost_method" id="af-method" onchange="assetCalcTotals()">
+          ${[['weighted_average','Weighted average of stock'],['latest_purchase','Latest purchase + adjustment'],['manual','Manual valuation cost']].map(([method,label])=>`<option value="${method}" ${inventoryCostMethod(a)===method?'selected':''}>${label}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>Transport / discount per unit (KES, +/-)</label><input type="number" step="0.01" name="cost_adjustment" id="af-adjustment" value="${a?.cost_adjustment??0}" oninput="assetCalcTotals()" /></div>
+        <div class="field"><label>Inventory cost/unit (KES)</label><input type="number" min="0" step="0.01" name="buying_price" id="af-buying" value="${a?.buying_price||0}" oninput="assetCalcTotals()" ${inventoryCostMethod(a)==='manual'?'':'readonly'} /></div>
+        <div class="field"><label>Loan / selling price per unit (KES)</label><input type="number" min="0" step="0.01" name="loan_price" id="af-loan" value="${a?.loan_price||0}" oninput="assetCalcTotals()" ${canSetLoanPrice?'':'readonly'} /><div class="helper">${canSetLoanPrice?'Set separately from the purchase and valuation cost.':'A manager sets this price before the item can be issued.'}</div></div>
         <div class="field"><label>Reorder level</label><input type="number" min="0" name="reorder_level" value="${a?.reorder_level||5}" /></div>
       </div>
+      <div class="helper" id="af-formula" style="margin-bottom:12px"></div>
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-top:2px">
         <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">Total inventory value (qty × price)</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -6317,47 +6387,70 @@ function openAssetForm(a=null){
       { label:'Save', cls:'btn-primary', onClick: async () => {
         if(!(await ensureFreshToken())) return;
         const fd = new FormData($('af')); const row = Object.fromEntries(fd);
-        ['stock','buying_price','loan_price','reorder_level'].forEach(k=>row[k]=Number(row[k])||0);
+        ['stock','buying_price','loan_price','reorder_level','cost_adjustment'].forEach(k=>row[k]=Number(row[k])||0);
+        if(!canSetLoanPrice) row.loan_price=a?Number(a.loan_price||0):0;
+        row.purchase_price=row.purchase_price===''?null:Number(row.purchase_price);
+        if(!['weighted_average','latest_purchase','manual'].includes(row.cost_method)) return toast('Choose a valid cost method.','error');
+        if(row.purchase_price!==null && (!Number.isFinite(row.purchase_price)||row.purchase_price<0)) return toast('Enter a valid actual purchase price.','error');
+        if(!Number.isFinite(row.cost_adjustment) || (row.purchase_price!==null && row.purchase_price+row.cost_adjustment<0)) return toast('Purchase price plus transport or discount must be zero or greater.','error');
+        if(!a && row.stock>0 && !(row.purchase_price>0)) return toast('Enter the actual supplier purchase price for new stock.','error');
+        if(row.cost_method==='latest_purchase' && row.purchase_price===null) return toast('Record a purchase price before using latest-purchase costing.','error');
+        if(row.cost_method==='latest_purchase' || (!a && row.cost_method==='weighted_average')){
+          row.buying_price=roundInventoryMoney((row.purchase_price||0)+row.cost_adjustment);
+        }
+        if(row.buying_price<0 || row.loan_price<0 || row.stock<0) return toast('Stock and prices cannot be negative.','error');
         if(a){
           const { error } = await sb.from('pb_inventory').update(row).eq('id', a.id);
-          if(error) return toast(error.message,'error');
+          if(error) return toast(inventoryCostError(error),'error');
           Object.assign(a, row); audit('update','pb_inventory',a.id);
         } else {
           const { data, error } = await sb.from('pb_inventory').insert({ ...row, business_id: state.staff.business_id || null }).select().single();
-          if(error) return toast(error.message,'error');
+          if(error) return toast(inventoryCostError(error),'error');
           state.data.inventory.unshift(data); audit('create','pb_inventory',data.id);
         }
         closeModal(); render(); toast(a?'Asset updated':'Asset added','success');
       }}
     ]
   });
+  assetCalcTotals();
+}
+function inventoryCostError(error){
+  return /purchase_price|cost_method|cost_adjustment|landed_adjustment|schema cache/i.test(error?.message||'')
+    ? 'Inventory cost setup is needed in the Wamama database before saving these fields.' : error.message;
 }
 function assetCalcTotals(){
   const qty = Number(document.getElementById('af-stock')?.value||0);
-  const buy = Number(document.getElementById('af-buying')?.value||0);
+  const form=$('af'),costInput=$('af-buying'),purchaseInput=$('af-purchase');
+  const method=$('af-method')?.value||'weighted_average';
+  const purchase=purchaseInput?.value===''?null:Number(purchaseInput?.value);
+  const adjustment=Number($('af-adjustment')?.value||0);
+  if(costInput){
+    costInput.readOnly=method!=='manual';
+    if(purchase!==null && Number.isFinite(purchase) && (method==='latest_purchase' || (method==='weighted_average' && form?.dataset?.existing==='0'))){
+      costInput.value=String(roundInventoryMoney(purchase+adjustment));
+    }
+  }
+  const buy = Number(costInput?.value||0);
   const loan = Number(document.getElementById('af-loan')?.value||0);
   const tc = document.getElementById('af-totalcost'); if(tc) tc.textContent = KES(qty*buy);
   const tl = document.getElementById('af-totalloan'); if(tl) tl.textContent = KES(qty*loan);
+  const formula=$('af-formula');
+  if(formula) formula.textContent=method==='manual'
+    ? 'Manual: enter the inventory cost per unit yourself. Purchase and loan prices remain separate.'
+    : method==='latest_purchase'
+      ? 'Cost/unit = latest supplier purchase price + transport or discount per unit. Loan price stays fixed.'
+      : 'Weighted average on each receipt: (old stock × old cost + received units × (supplier price + adjustment)) ÷ new stock. Editing the supplier price alone does not rewrite earlier stock cost or the loan price.';
 }
-function quickRestock(a){
-  modal({
-    title:`Restock — ${a.name}`,
-    body:`<div class="field"><label>Add units</label><input id="qr" type="number" min="1" value="1" /></div>`,
-    actions:[
-      { label:'Cancel', onClick: closeModal },
-      { label:'Restock', cls:'btn-primary', onClick: async () => {
-        const n = Number($('qr').value)||0; if(n<=0) return;
-        const newStock = a.stock + n;
-        await sb.from('pb_inventory').update({ stock: newStock }).eq('id', a.id);
-        a.stock = newStock; audit('restock','pb_inventory',a.id,null,{ added:n });
-        closeModal(); render(); toast('Stock updated','success');
-      }}
-    ]
-  });
+function receiveStockForAsset(a){
+  openPurchaseForm();
+  purSelectAsset(0,a.id,a.name,inventoryPurchasePrice(a)??0,false);
 }
 function exportInventory(){
   const ws = XLSX.utils.json_to_sheet(state.data.inventory.map(a=>({
-    Name:a.name, Category:a.category, Buying:a.buying_price, LoanPrice:a.loan_price, Stock:a.stock, Reorder:a.reorder_level
+    Name:a.name, Category:a.category, PurchasePrice:inventoryPurchasePrice(a), CostUnit:a.buying_price,
+    CostMethod:inventoryCostMethod(a), CostAdjustment:a.cost_adjustment||0, LoanPrice:a.loan_price,
+    GrossMargin:inventoryMarginPct(a.loan_price,inventoryPurchasePrice(a)), CostMargin:inventoryMarginPct(a.loan_price,Number(a.buying_price||0)),
+    Stock:a.stock, Reorder:a.reorder_level
   })));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
   XLSX.writeFile(wb, `inventory_${todayISO()}.xlsx`);
@@ -6456,7 +6549,7 @@ function _filterOrderAssets(lineIdx){
   const list = document.getElementById(`ord-ast-list-${lineIdx}`);
   if(!input || !list) return;
   const q = (input.value||'').toLowerCase();
-  const matches = state.data.inventory.filter(a=>a.name.toLowerCase().includes(q)).slice(0,10);
+  const matches = state.data.inventory.filter(a=>Number(a.loan_price||0)>0 && a.name.toLowerCase().includes(q)).slice(0,10);
   list.style.display = matches.length ? 'block' : 'none';
   list.innerHTML = matches.map(a=>`<div style="padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px" onmousedown="_selectOrderLineAsset(${lineIdx},'${a.id}','${a.name.replace(/'/g,"\\'")}',${a.loan_price},${a.stock})">${a.name}<span class="muted" style="font-size:11px;margin-left:8px">${KES(a.loan_price)} · stock ${a.stock}</span></div>`).join('');
 }
@@ -6656,7 +6749,7 @@ function selectOrderMember(id, name, groupName){
 function filterOrderAssets(){
   const q = ($('ord-ast-search').value||'').toLowerCase();
   const list = $('ord-ast-list'); if(!list) return;
-  const matches = state.data.inventory.filter(a=>a.name.toLowerCase().includes(q)).slice(0,10);
+  const matches = state.data.inventory.filter(a=>Number(a.loan_price||0)>0 && a.name.toLowerCase().includes(q)).slice(0,10);
   list.style.display = matches.length ? 'block' : 'none';
   list.innerHTML = matches.map(a=>`<div style="padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px" onmousedown="selectOrderAsset('${a.id}','${a.name.replace(/'/g,"\\'")}',${a.loan_price},${a.stock})">${a.name}<span class="muted" style="font-size:11px;margin-left:8px">${KES(a.loan_price)} · stock ${a.stock}</span></div>`).join('');
 }
@@ -6712,6 +6805,9 @@ function approveOrder(o){
     if(asset.stock < o.quantity) return toast('Insufficient stock to fulfill this order.','error');
     resolvedLines.push({ asset, quantity: Number(o.quantity), loan_price: Number(asset.loan_price) });
   }
+
+  if(resolvedLines.some(line=>!Number.isFinite(line.loan_price)||line.loan_price<=0))
+    return toast('Set a selling/loan price in Inventory before approving this order.','error');
 
   const principal = resolvedLines.reduce((a,l)=>a+(l.loan_price*l.quantity),0);
 
@@ -7206,7 +7302,11 @@ function buildReportRows(kind){
     return { Name:m.full_name, ID:m.national_id, Phone:m.phone, Group:g?.name||'—', Officer:off?.full_name||'—', RegisteredOn:m.registered_on||'', Savings:memberSavings(m.id), Eligible:memberEligible(m.id)?'Yes':'No', Status:m.status };
   }).filter(r=>!groupFilter || r.Group===groupsById.get(String(groupFilter))?.name).filter(r=>!offFilter || r.Officer===staffById.get(String(offFilter))?.full_name);
   if(kind==='inventory') return state.data.inventory.map(a => ({
-    Name:a.name, Category:a.category, Qty:a.stock, CostPerUnit:Number(a.buying_price), LoanPricePerUnit:Number(a.loan_price),
+    Name:a.name, Category:a.category, Qty:a.stock,
+    ActualPurchasePrice:inventoryPurchasePrice(a), CostPerUnit:Number(a.buying_price),
+    CostMethod:inventoryCostMethod(a), CostAdjustment:Number(a.cost_adjustment||0), LoanPricePerUnit:Number(a.loan_price),
+    GrossMargin:inventoryMarginPct(a.loan_price,inventoryPurchasePrice(a)),
+    CostMargin:inventoryMarginPct(a.loan_price,Number(a.buying_price||0)),
     TotalCostValue:Number(a.buying_price)*a.stock, TotalLoanValue:Number(a.loan_price)*a.stock
   }));
   if(kind==='orders') return state.data.orders.map(o => {
@@ -7932,7 +8032,7 @@ function openPurchaseForm(){
   purAddLine();
 }
 function purAddLine(){
-  _purLines.push({ asset_id:'', asset_name:'', isNew:false, quantity:1, cost_per_unit:0, subtotal:0, batch_no:'' });
+  _purLines.push({ asset_id:'', asset_name:'', isNew:false, quantity:1, cost_per_unit:0, landed_adjustment:0, subtotal:0, batch_no:'' });
   renderPurLines();
 }
 function renderPurLines(){
@@ -7947,7 +8047,8 @@ function renderPurLines(){
         <div id="pur-ast-dd-${i}" style="position:absolute;z-index:50;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius-sm) var(--radius-sm);max-height:160px;overflow-y:auto;display:none;box-shadow:var(--shadow-md)"></div>
       </div>
       <div class="field"><label>Quantity received</label><input type="number" min="0.01" step="0.01" value="${l.quantity}" oninput="purLineUpd(${i},'quantity',this.value)" /></div>
-      <div class="field"><label>Cost per unit (KES)</label><input type="number" min="0" step="0.01" value="${l.cost_per_unit}" oninput="purLineUpd(${i},'cost_per_unit',this.value)" /></div>
+      <div class="field"><label>Actual supplier purchase price/unit (KES)</label><input type="number" min="0" step="0.01" value="${l.cost_per_unit}" oninput="purLineUpd(${i},'cost_per_unit',this.value)" /></div>
+      <div class="field"><label>Transport / discount per unit (+/- KES)</label><input type="number" step="0.01" value="${l.landed_adjustment||0}" oninput="purLineUpd(${i},'landed_adjustment',this.value)" /><div class="helper">Valuation cost adds this amount to the supplier price. The loan price stays fixed.</div></div>
       <div class="field"><label>Line total = <b>${KES(Number(l.quantity||0)*Number(l.cost_per_unit||0))}</b></label><input type="number" min="0" step="0.01" value="${l.subtotal||0}" placeholder="Override line total" oninput="purLineUpd(${i},'subtotal',this.value,true)" /></div>
       <div class="field"><label>Batch / lot</label><input value="${l.batch_no||''}" oninput="purLineUpd(${i},'batch_no',this.value)" /></div>
       <div class="field" style="display:flex;align-items:flex-end"><button type="button" class="btn btn-outline btn-sm" onclick="purRemoveLine(${i})">Remove</button></div>
@@ -7970,14 +8071,15 @@ function purAssetSearch(i, q){
   const showAdd = q && q.trim().length > 1 && !state.data.inventory.find(a=>a.name.toLowerCase()===q.toLowerCase());
   if(!matches.length && !showAdd){ dd.style.display='none'; return; }
   dd.style.display='block';
-  dd.innerHTML = matches.map(a=>`<div style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px" onmousedown="purSelectAsset(${i},'${a.id}','${a.name.replace(/'/g,"\\'")}',${ a.buying_price},false)">${a.name}<span class="muted" style="font-size:11px;margin-left:8px">cost ${KES(a.buying_price)} · stock ${a.stock}</span></div>`).join('')
+  dd.innerHTML = matches.map(a=>`<div style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px" onmousedown="purSelectAsset(${i},'${a.id}','${a.name.replace(/'/g,"\\'")}',${inventoryPurchasePrice(a)??0},false)">${a.name}<span class="muted" style="font-size:11px;margin-left:8px">last purchase ${inventoryPurchasePrice(a)===null?'not recorded':KES(inventoryPurchasePrice(a))} · stock ${a.stock}</span></div>`).join('')
     + (showAdd ? `<div style="padding:8px 12px;cursor:pointer;font-size:13px;color:var(--accent);font-weight:600" onmousedown="purSelectAsset(${i},'','${q.replace(/'/g,"\\'")}',0,true)">+ Add as new item: "${q}"</div>` : '');
 }
 function purSelectAsset(i, id, name, defaultCost, isNew){
   _purLines[i].asset_id = id;
   _purLines[i].asset_name = name;
   _purLines[i].isNew = isNew;
-  if(!_purLines[i].cost_per_unit) _purLines[i].cost_per_unit = Number(defaultCost)||0;
+  _purLines[i].landed_adjustment=isNew?0:Number(state.data.inventory.find(a=>a.id===id)?.cost_adjustment||0);
+  _purLines[i].cost_per_unit = Number(defaultCost)||0;
   _purLines[i].subtotal = Number(_purLines[i].quantity||0)*Number(_purLines[i].cost_per_unit||0);
   renderPurLines();
   const inp = $(`pur-ast-q-${i}`); if(inp) inp.value = name;
@@ -8001,6 +8103,13 @@ async function submitPurchase(){
   if(!row.supplier_id) return toast('Choose a supplier.','error');
   const validLines = _purLines.filter(l => l.asset_name && Number(l.quantity)>0);
   if(!validLines.length) return toast('Add at least one line item.','error');
+  if(validLines.some(l=>!Number.isFinite(Number(l.cost_per_unit)) || Number(l.cost_per_unit)<=0 || !Number.isFinite(Number(l.landed_adjustment)) || Number(l.cost_per_unit)+Number(l.landed_adjustment)<0))
+    return toast('Enter a positive actual supplier price for each item; price plus transport or discount cannot be negative.','error');
+  // Check the one-time schema before writing a purchase header: an old database
+  // must not leave a paid purchase with no lines or stock update.
+  const {error:inventorySchemaError}=await sb.from('pb_inventory').select('id,purchase_price,cost_method,cost_adjustment').limit(1);
+  const {error:lineSchemaError}=inventorySchemaError?{error:null}:await sb.from('pb_purchase_lines').select('id,landed_adjustment').limit(1);
+  if(inventorySchemaError || lineSchemaError) return toast(inventoryCostError(inventorySchemaError||lineSchemaError),'error');
   const auto = validLines.reduce((a,b)=>a+Number(b.subtotal||0),0);
   const override = Number($('pur-total-override').value)||0;
   const total = override > 0 ? override : auto;
@@ -8020,11 +8129,12 @@ async function submitPurchase(){
       business_id: state.staff.business_id || null,
       purchase_id: created.id, asset_id: l.asset_id||null, asset_name: l.asset_name,
       quantity: Number(l.quantity), cost_per_unit: Number(l.cost_per_unit)||0,
+      landed_adjustment:Number(l.landed_adjustment)||0,
       subtotal: Number(l.subtotal)||Number(l.quantity)*Number(l.cost_per_unit||0),
       batch_no: l.batch_no||null
     }));
     const { error: le } = await sb.from('pb_purchase_lines').insert(lineRows);
-    if(le) toast('Line items warning: '+le.message,'warn');
+    if(le) return toast('Stock was not received because the purchase lines could not be saved: '+inventoryCostError(le),'error');
   }
   // Attach items for local display
   created.items = validLines;
@@ -8032,7 +8142,8 @@ async function submitPurchase(){
   // Process each line item sequentially to ensure all hit inventory
   let invUpdated = 0;
   for(const l of validLines){
-    const costPerUnit = Number(l.cost_per_unit)||0;
+    const costPerUnit = roundInventoryMoney(l.cost_per_unit)||0;
+    const adjustment = roundInventoryMoney(l.landed_adjustment)||0;
     const qty = Number(l.quantity)||0;
     if(!qty) continue;
 
@@ -8041,8 +8152,9 @@ async function submitPurchase(){
       const newRow = {
         business_id: state.staff.business_id || null,
         name: l.asset_name, category:'Other', stock: qty,
-        buying_price: costPerUnit,
-        loan_price: Math.round(costPerUnit*1.15*100)/100,
+        purchase_price:costPerUnit, buying_price:roundInventoryMoney(costPerUnit+adjustment),
+        cost_method:'weighted_average', cost_adjustment:adjustment,
+        loan_price:0,
         reorder_level: 5
       };
       const { data: newAsset, error: ae } = await sb.from('pb_inventory').insert(newRow).select().single();
@@ -8053,27 +8165,20 @@ async function submitPurchase(){
       // Existing asset — find by id in local state (re-lookup each iteration so previous loops are reflected)
       const a = state.data.inventory.find(x=>x.id===l.asset_id);
       if(!a){ toast(`Asset "${l.asset_name}" not found in local inventory, skipping.`,'warn'); continue; }
-      const prevStock = Number(a.stock||0);
-      const newStock = prevStock + qty;
-      const prevCost = Number(a.buying_price||0);
-      const weightedCost = prevStock>0
-        ? Math.round(((prevCost*prevStock)+(costPerUnit*qty))/newStock*100)/100
-        : costPerUnit;
-      const prevLoanPrice = Number(a.loan_price||0);
-      const margin = prevCost>0 ? prevLoanPrice/prevCost : 1.15;
-      const newLoanPrice = Math.round(weightedCost*margin*100)/100;
+      const newStock = Number(a.stock||0) + qty;
+      const valuationCost=inventoryReceiptCost(a,qty,costPerUnit,adjustment);
       const { error: ue } = await sb.from('pb_inventory').update({
-        stock:newStock, buying_price:weightedCost, loan_price:newLoanPrice
+        stock:newStock, purchase_price:costPerUnit, buying_price:valuationCost, cost_adjustment:adjustment
       }).eq('id',a.id);
       if(ue){ toast(`Failed to update stock for "${l.asset_name}": ${ue.message}`,'warn'); continue; }
       // Update local state immediately so next iteration sees correct stock
-      a.stock = newStock; a.buying_price = weightedCost; a.loan_price = newLoanPrice;
+      a.stock = newStock; a.purchase_price=costPerUnit; a.buying_price=valuationCost; a.cost_adjustment=adjustment;
       invUpdated++;
     }
   }
   state.data.purchases.unshift(created);
   audit('purchase_create','pb_purchases',created.id, null, { total, lines: validLines.length });
-  closeModal(); render(); toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated in inventory.`,'success');
+  closeModal(); render(); toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated. New assets need a separately approved loan price before issue.`,'success');
 }
 
 
@@ -8388,7 +8493,7 @@ function renderSoldItemsRows(){
       <td><input style="min-width:165px;font-size:12px" data-si="${i}" data-f="product"
         value="${statementHtml(row.product)}" placeholder="Search inventory" autocomplete="off" list="si-assets-${i}"
         oninput="siSaveField(${i},'product',this.value)" onchange="siResolveAsset(${i},this.value)" />
-        <datalist id="si-assets-${i}">${state.data.inventory.filter(a=>Number(a.stock||0)>0).map(a=>`<option value="${statementHtml(a.name)}">${KES(a.loan_price||0)} · stock ${Number(a.stock||0)}</option>`).join('')}</datalist>
+        <datalist id="si-assets-${i}">${state.data.inventory.filter(a=>Number(a.stock||0)>0 && Number(a.loan_price||0)>0).map(a=>`<option value="${statementHtml(a.name)}">${KES(a.loan_price||0)} · stock ${Number(a.stock||0)}</option>`).join('')}</datalist>
         <div style="font-size:10px;margin-top:2px;color:${row.asset_id?'var(--success)':'var(--text-muted)'}">${row.asset_id?`Inventory linked · stock ${Number(row.stock||0)}`:'Select a listed inventory item'}</div>
       </td>
       <td><input type="number" min="1" step="1" style="width:58px;font-size:12px;text-align:right" value="${Number(row.quantity||1)}" oninput="siSaveQuantity(${i},this.value)" /></td>
@@ -8469,7 +8574,7 @@ function siResolveAsset(i,value){
   const row=_soldItems[i];
   row.product=value;
   const asset=state.data.inventory.find(a=>String(a.name||'').trim().toLowerCase()===String(value||'').trim().toLowerCase());
-  if(asset){
+  if(asset && Number(asset.loan_price||0)>0){
     row.asset_id=asset.id; row.product=asset.name; row.stock=Number(asset.stock||0);
     row.loan_amount=Math.round(Number(asset.loan_price||0)*Math.max(1,Number(row.quantity||1))*100)/100;
   }else{
@@ -8554,6 +8659,7 @@ async function saveSoldItemsForm(){
   for(const [assetId,quantity] of requiredStock){
     const asset=state.data.inventory.find(a=>String(a.id)===String(assetId));
     if(!asset) return toast('One selected inventory item can no longer be found. Please select it again.','error');
+    if(Number(asset.loan_price||0)<=0) return toast(`Set the loan price for ${asset.name} in Inventory before issuing it.`,'error');
     if(Number(asset.stock||0)<quantity) return toast(`Insufficient stock for ${asset.name}. Required ${quantity}, available ${Number(asset.stock||0)}.`,'error');
   }
 
@@ -9448,7 +9554,7 @@ function pageAccounting(){
       <div class="kpi k-primary"><div class="l">Expected return</div><div class="v">${KES(totalExpectedReturn)}</div><div class="d">Interest: ${KES(totalExpectedReturn-totalLoansOut)}</div></div>
       <div class="kpi k-danger"><div class="l">Purchases (cash out)</div><div class="v">${KES(totalPurchasesOut)}</div><div class="d">${purchasesInPeriod.length} purchases</div></div>
       <div class="kpi k-danger"><div class="l">Operational Expenses</div><div class="v">${KES(totalExpensesOut)}</div><div class="d">${expensesInPeriod.length} entr${expensesInPeriod.length!==1?'ies':'y'}</div></div>
-      <div class="kpi k-warn"><div class="l">Cost of Assets Issued</div><div class="v">${KES(totalCOGS)}</div><div class="d">${loansIssued.length} loan${loansIssued.length!==1?'s':''} issued</div></div>
+      <div class="kpi k-warn"><div class="l">Estimated Cost of Assets Issued</div><div class="v">${KES(totalCOGS)}</div><div class="d">Current inventory cost estimate for ${loansIssued.length} loan${loansIssued.length!==1?'s':''}; historical issue costs were not stored</div></div>
     </div>
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:16px">
@@ -9474,7 +9580,7 @@ function pageAccounting(){
           <tr><td style="padding:6px 0;color:var(--text-muted)">Loans outstanding (asset)</td><td style="text-align:right;font-weight:600">${KES(totalOutstanding)}</td></tr>
           <tr><td style="padding:6px 0;color:var(--text-muted)">Inventory at loan price</td><td style="text-align:right;font-weight:600">${KES(inventoryValue)}</td></tr>
           <tr><td style="padding:6px 0;color:var(--text-muted)">Inventory at cost</td><td style="text-align:right;font-weight:600">${KES(inventoryCost)}</td></tr>
-          <tr><td style="padding:6px 0;border-top:2px solid var(--border);font-weight:700">Inventory margin</td><td style="text-align:right;font-weight:700;color:var(--success);border-top:2px solid var(--border)">${KES(inventoryValue-inventoryCost)}</td></tr>
+          <tr><td style="padding:6px 0;border-top:2px solid var(--border);font-weight:700">Potential inventory markup at current loan prices</td><td style="text-align:right;font-weight:700;color:var(--success);border-top:2px solid var(--border)">${KES(inventoryValue-inventoryCost)}</td></tr>
           <tr><td style="padding:6px 0;color:var(--text-muted)">Paybill confirmed (period)</td><td style="text-align:right;font-weight:600;color:var(--success)">${KES(reconConfirmed)}</td></tr>
           <tr><td style="padding:6px 0;color:var(--text-muted)">Paybill pending confirmation</td><td style="text-align:right;font-weight:600;color:var(--warning)">${KES(reconPending)}</td></tr>
         </table>
