@@ -7,7 +7,9 @@ const search={value:'',selectionStart:0,addEventListener(type,callback){this.onI
 const loanSearch={...search},memberSearch={...search};
 const select={addEventListener(){}};
 const timers=new Map();let timerId=0;
+let nextLineId=0;
 const sandbox={WamamaFinance:require('../financial-rules.js'),console,Intl,Date,URL,Map,Set,Promise,
+ crypto:{randomUUID:()=>`line-${++nextLineId}`},
  window:{addEventListener(){}},document:{addEventListener(){},getElementById(id){
   if(id==='page') return page;if(id==='inv-search') return search;
   if(id==='loan-search') return loanSearch;
@@ -48,16 +50,22 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
  ensureFreshToken=async()=>true;closeModal=()=>{};render=()=>{};audit=()=>{};
   toast=(message,kind)=>{globalThis.lastToast={message,kind};};
   modal=config=>{globalThis.assetModal=config;};
- globalThis.savedInventory=null;globalThis.savedLine=null;
+ globalThis.savedInventory=null;globalThis.savedLine=null;globalThis.savedLink=null;
+ globalThis.purchaseInsertCount=0;
  sb.from=table=>({
   select(){return {limit:async()=>({error:null})};},
   insert(row){
-   if(table==='pb_purchases') return {select(){return {single:async()=>({data:{id:'purchase',...row},error:null})};}};
+   if(table==='pb_purchases'){globalThis.purchaseInsertCount++;
+    return {select(){return {single:async()=>({data:{id:'purchase',...row},error:null})};}};}
    if(table==='pb_purchase_lines'){globalThis.savedLine=row;return Promise.resolve({error:null});}
+   if(table==='pb_inventory') return {select(){return {single:async()=>({data:{id:'new-asset',...row},error:null})};}};
    throw Error('Unexpected inventory insertion');
   },
-  update(row){if(table!=='pb_inventory') throw Error('Unexpected update');
-   return {eq:async()=>{globalThis.savedInventory=row;return {error:null};}};}
+  update(row){
+   if(table==='pb_purchase_lines') return {eq:async(key,id)=>{globalThis.savedLink={row,key,id};return {error:null};}};
+   if(table!=='pb_inventory') throw Error('Unexpected update');
+   return {eq:async()=>{globalThis.savedInventory=row;return {error:null};}};
+  }
  });`);
 (async()=>{
  await run('submitPurchase()');
@@ -139,5 +147,27 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
  sandbox.document.activeElement={id:'mem-search'};
  run(`state._memberSearch='Jane';pageMembers();`);
  assert.equal(repaymentScans,1,'one name query does not reprocess every repayment');
+ // A typed name must never silently become a new item or retain the old asset ID.
+ const purchasesBefore=sandbox.purchaseInsertCount;
+ run(`_purLines=[{asset_id:'asset',asset_name:'Sofa',isNew:false,quantity:12,
+  cost_per_unit:1500,landed_adjustment:0,subtotal:18000,batch_no:''}];
+  purAssetInput(0,'Laptop bag medium');`);
+ assert.equal(run(`_purLines[0].asset_id`),'');
+ assert.equal(run(`_purLines[0].isNew`),false);
+ await run(`submitPurchase()`);
+ assert.equal(sandbox.purchaseInsertCount,purchasesBefore,'unselected typed name creates no purchase');
+ assert.match(sandbox.lastToast.message,/Select each listed asset/);
+ // Choosing Add New makes the intent explicit and links the resulting asset to its line.
+ run(`purSelectAsset(0,'','Laptop bag medium',0,true);
+  _purLines[0].cost_per_unit=1500;_purLines[0].landed_adjustment=40;
+  _purLines[0].subtotal=18000;`);
+ await run(`submitPurchase()`);
+ assert.equal(sandbox.purchaseInsertCount,purchasesBefore+1);
+ assert.equal(sandbox.savedLine[0].asset_id,null);
+ assert.equal(sandbox.savedLink.id,sandbox.savedLine[0].id);
+ assert.equal(sandbox.savedLink.row.asset_id,'new-asset');
+ assert.equal(run(`state.data.inventory[0].loan_price`),0,'new stock receives no automatic selling price');
+ assert.equal(run(`state.data.inventory[0].purchase_price`),1500);
+ assert.equal(run(`state.data.inventory[0].buying_price`),1540);
  console.log('Inventory cost separation, stable loan pricing and debounced name search passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

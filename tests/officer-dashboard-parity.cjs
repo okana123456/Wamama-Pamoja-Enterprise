@@ -152,9 +152,11 @@ run(`exportArrearsCollectionSheet();`);
 assert.deepEqual(JSON.parse(JSON.stringify(exported)),managementFullExport,'complete exports match across accounts');
 // Website upgrades wait for open entries and offline writes, then reload safely.
 assert.equal(run(`canApplyAppUpdate()`),true);
+run(`state.view='inventory';`);assert.equal(run(`canApplyAppUpdate()`),true);
+run(`state.view='purchases';`);assert.equal(run(`canApplyAppUpdate()`),true);
 modal.hasChildNodes=()=>true;assert.equal(run(`canApplyAppUpdate()`),false);
 modal.hasChildNodes=()=>false;run(`state.view='meeting';`);assert.equal(run(`canApplyAppUpdate()`),false);
-run(`state.view='dashboard';lsGet=()=>[{table:'pb_repayments',row:{}}];`);
+run(`state.view='purchases';lsGet=()=>[{table:'pb_repayments',row:{}}];`);
 assert.equal(run(`canApplyAppUpdate()`),false,'queued cash entries must finish before an update');
 run(`lsGet=(key,fallback)=>fallback;`);
 run(`state.view='dashboard';appUpdateAvailable=true;applyAvailableAppUpdate();`);

@@ -550,10 +550,10 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261004-inventory-cost-and-search';
+const APP_RELEASE='20261006-purchase-selection-and-update';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 function canApplyAppUpdate(){
-  return !state.session || (['dashboard','reports','arrears','loans'].includes(state.view) &&
+  return !state.session || (['dashboard','reports','arrears','loans','inventory','purchases'].includes(state.view) &&
     !document.getElementById('modal-root')?.hasChildNodes() && !lsGet('queue',[]).length);
 }
 function applyAvailableAppUpdate(){
@@ -8042,15 +8042,15 @@ function renderPurLines(){
     <div class="grid-2">
       <div class="field" style="position:relative">
         <label>Asset ${l.isNew?'<span class="badge b-green" style="margin-left:4px;font-size:10px">New item</span>':''}</label>
-        <input id="pur-ast-q-${i}" placeholder="Search or type new asset name…" value="${l.asset_name||''}" autocomplete="off"
-          oninput="purAssetSearch(${i},this.value)" onfocus="purAssetSearch(${i},this.value)" />
+        <input id="pur-ast-q-${i}" placeholder="Search, then select an asset or Add New" value="${statementHtml(l.asset_name||'')}" autocomplete="off"
+          oninput="purAssetInput(${i},this.value)" onfocus="purAssetSearch(${i},this.value)" />
         <div id="pur-ast-dd-${i}" style="position:absolute;z-index:50;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius-sm) var(--radius-sm);max-height:160px;overflow-y:auto;display:none;box-shadow:var(--shadow-md)"></div>
       </div>
       <div class="field"><label>Quantity received</label><input type="number" min="0.01" step="0.01" value="${l.quantity}" oninput="purLineUpd(${i},'quantity',this.value)" /></div>
       <div class="field"><label>Actual supplier purchase price/unit (KES)</label><input type="number" min="0" step="0.01" value="${l.cost_per_unit}" oninput="purLineUpd(${i},'cost_per_unit',this.value)" /></div>
       <div class="field"><label>Transport / discount per unit (+/- KES)</label><input type="number" step="0.01" value="${l.landed_adjustment||0}" oninput="purLineUpd(${i},'landed_adjustment',this.value)" /><div class="helper">Valuation cost adds this amount to the supplier price. The loan price stays fixed.</div></div>
       <div class="field"><label>Line total = <b>${KES(Number(l.quantity||0)*Number(l.cost_per_unit||0))}</b></label><input type="number" min="0" step="0.01" value="${l.subtotal||0}" placeholder="Override line total" oninput="purLineUpd(${i},'subtotal',this.value,true)" /></div>
-      <div class="field"><label>Batch / lot</label><input value="${l.batch_no||''}" oninput="purLineUpd(${i},'batch_no',this.value)" /></div>
+      <div class="field"><label>Batch / lot</label><input value="${statementHtml(l.batch_no||'')}" oninput="purLineUpd(${i},'batch_no',this.value)" /></div>
       <div class="field" style="display:flex;align-items:flex-end"><button type="button" class="btn btn-outline btn-sm" onclick="purRemoveLine(${i})">Remove</button></div>
     </div>
   </div>`).join('');
@@ -8064,15 +8064,29 @@ function renderPurLines(){
     },0);
   });
 }
+function purAssetInput(i, q){
+  const line=_purLines[i];
+  line.asset_id='';
+  line.asset_name=q;
+  line.isNew=false;
+  purAssetSearch(i,q);
+}
 function purAssetSearch(i, q){
   const dd = $(`pur-ast-dd-${i}`); if(!dd) return;
-  _purLines[i].asset_name = q;
-  const matches = state.data.inventory.filter(a=>a.name.toLowerCase().includes((q||'').toLowerCase())).slice(0,8);
-  const showAdd = q && q.trim().length > 1 && !state.data.inventory.find(a=>a.name.toLowerCase()===q.toLowerCase());
+  const name=String(q||'').trim();
+  const matchingAssets=state.data.inventory.filter(a=>a.name.toLowerCase().includes(name.toLowerCase()));
+  const exact=matchingAssets.find(a=>a.name.toLowerCase()===name.toLowerCase());
+  const matches=(exact?[exact,...matchingAssets.filter(a=>a!==exact)]:matchingAssets).slice(0,8);
+  const showAdd = name.length > 1 && !exact;
   if(!matches.length && !showAdd){ dd.style.display='none'; return; }
   dd.style.display='block';
-  dd.innerHTML = matches.map(a=>`<div style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px" onmousedown="purSelectAsset(${i},'${a.id}','${a.name.replace(/'/g,"\\'")}',${inventoryPurchasePrice(a)??0},false)">${a.name}<span class="muted" style="font-size:11px;margin-left:8px">last purchase ${inventoryPurchasePrice(a)===null?'not recorded':KES(inventoryPurchasePrice(a))} · stock ${a.stock}</span></div>`).join('')
-    + (showAdd ? `<div style="padding:8px 12px;cursor:pointer;font-size:13px;color:var(--accent);font-weight:600" onmousedown="purSelectAsset(${i},'','${q.replace(/'/g,"\\'")}',0,true)">+ Add as new item: "${q}"</div>` : '');
+  dd.innerHTML = matches.map((a,index)=>`<div data-asset-index="${index}" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px">${statementHtml(a.name)}<span class="muted" style="font-size:11px;margin-left:8px">last purchase ${inventoryPurchasePrice(a)===null?'not recorded':KES(inventoryPurchasePrice(a))} · stock ${a.stock}</span></div>`).join('')
+    + (showAdd ? `<div data-add-new style="padding:8px 12px;cursor:pointer;font-size:13px;color:var(--accent);font-weight:600">+ Add as new item: "${statementHtml(name)}"</div>` : '');
+  dd.querySelectorAll('[data-asset-index]').forEach(el=>el.addEventListener('mousedown',()=>{
+    const asset=matches[Number(el.dataset.assetIndex)];
+    if(asset) purSelectAsset(i,asset.id,asset.name,inventoryPurchasePrice(asset)??0,false);
+  }));
+  dd.querySelector('[data-add-new]')?.addEventListener('mousedown',()=>purSelectAsset(i,'',name,0,true));
 }
 function purSelectAsset(i, id, name, defaultCost, isNew){
   _purLines[i].asset_id = id;
@@ -8101,8 +8115,14 @@ async function submitPurchase(){
   const fd = new FormData($('pur-f'));
   const row = Object.fromEntries(fd);
   if(!row.supplier_id) return toast('Choose a supplier.','error');
+  if(_purLines.some(l=>String(l.asset_name||'').trim() && !l.isNew && !l.asset_id))
+    return toast('Select each listed asset, or choose Add as new item before receiving stock.','error');
   const validLines = _purLines.filter(l => l.asset_name && Number(l.quantity)>0);
   if(!validLines.length) return toast('Add at least one line item.','error');
+  if(validLines.some(l=>!l.isNew && !state.data.inventory.some(a=>a.id===l.asset_id)))
+    return toast('An inventory selection is no longer available. Select the asset again.','error');
+  if(validLines.some(l=>l.isNew && state.data.inventory.some(a=>a.name.trim().toLowerCase()===String(l.asset_name).trim().toLowerCase())))
+    return toast('An item with this name already exists. Select it from the inventory list instead of adding it again.','error');
   if(validLines.some(l=>!Number.isFinite(Number(l.cost_per_unit)) || Number(l.cost_per_unit)<=0 || !Number.isFinite(Number(l.landed_adjustment)) || Number(l.cost_per_unit)+Number(l.landed_adjustment)<0))
     return toast('Enter a positive actual supplier price for each item; price plus transport or discount cannot be negative.','error');
   // Check the one-time schema before writing a purchase header: an old database
@@ -8122,32 +8142,33 @@ async function submitPurchase(){
     received_by: state.staff.id, received_by_name: state.staff.full_name
     // items column removed — stored in pb_purchase_lines instead
   };
+  const lineIds=validLines.map(()=>crypto.randomUUID());
   const { data: created, error } = await sb.from('pb_purchases').insert(purchase).select().single();
   if(error) return toast('Save failed: '+error.message+' — check pb_purchases table columns.','error');
-  if(validLines.length){
-    const lineRows = validLines.map(l => ({
-      business_id: state.staff.business_id || null,
-      purchase_id: created.id, asset_id: l.asset_id||null, asset_name: l.asset_name,
-      quantity: Number(l.quantity), cost_per_unit: Number(l.cost_per_unit)||0,
-      landed_adjustment:Number(l.landed_adjustment)||0,
-      subtotal: Number(l.subtotal)||Number(l.quantity)*Number(l.cost_per_unit||0),
-      batch_no: l.batch_no||null
-    }));
-    const { error: le } = await sb.from('pb_purchase_lines').insert(lineRows);
-    if(le) return toast('Stock was not received because the purchase lines could not be saved: '+inventoryCostError(le),'error');
-  }
+  const lineRows = validLines.map((l,i) => ({
+    id:lineIds[i],
+    business_id: state.staff.business_id || null,
+    purchase_id: created.id, asset_id: l.asset_id||null, asset_name: l.asset_name,
+    quantity: Number(l.quantity), cost_per_unit: Number(l.cost_per_unit)||0,
+    landed_adjustment:Number(l.landed_adjustment)||0,
+    subtotal: Number(l.subtotal)||Number(l.quantity)*Number(l.cost_per_unit||0),
+    batch_no: l.batch_no||null
+  }));
+  const { error: le } = await sb.from('pb_purchase_lines').insert(lineRows);
+  if(le) return toast('Stock was not received because the purchase lines could not be saved: '+inventoryCostError(le),'error');
   // Attach items for local display
   created.items = validLines;
 
   // Process each line item sequentially to ensure all hit inventory
   let invUpdated = 0;
-  for(const l of validLines){
+  const unlinkedAssets=[];
+  for(const [lineIndex,l] of validLines.entries()){
     const costPerUnit = roundInventoryMoney(l.cost_per_unit)||0;
     const adjustment = roundInventoryMoney(l.landed_adjustment)||0;
     const qty = Number(l.quantity)||0;
     if(!qty) continue;
 
-    if(l.isNew || !l.asset_id){
+    if(l.isNew){
       // Brand new asset — create inventory record
       const newRow = {
         business_id: state.staff.business_id || null,
@@ -8160,6 +8181,9 @@ async function submitPurchase(){
       const { data: newAsset, error: ae } = await sb.from('pb_inventory').insert(newRow).select().single();
       if(ae){ toast(`Failed to add "${l.asset_name}" to inventory: ${ae.message}`,'warn'); continue; }
       state.data.inventory.unshift(newAsset);
+      l.asset_id=newAsset.id;
+      const {error:linkError}=await sb.from('pb_purchase_lines').update({asset_id:newAsset.id}).eq('id',lineRows[lineIndex].id);
+      if(linkError) unlinkedAssets.push(l.asset_name);
       invUpdated++;
     } else {
       // Existing asset — find by id in local state (re-lookup each iteration so previous loops are reflected)
@@ -8178,7 +8202,8 @@ async function submitPurchase(){
   }
   state.data.purchases.unshift(created);
   audit('purchase_create','pb_purchases',created.id, null, { total, lines: validLines.length });
-  closeModal(); render(); toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated. New assets need a separately approved loan price before issue.`,'success');
+  closeModal(); render();
+  toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated. New assets need a separately approved loan price before issue.${unlinkedAssets.length?` Purchase history could not link: ${unlinkedAssets.join(', ')}.`:''}`,unlinkedAssets.length || invUpdated!==validLines.length?'warn':'success');
 }
 
 
