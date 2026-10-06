@@ -1,0 +1,21 @@
+const {PGlite}=require(process.env.PGLITE_MODULE||'@electric-sql/pglite');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+(async()=>{
+ const db=new PGlite();
+ await db.exec(`create table pb_inventory(id uuid primary key,name text,stock numeric,purchase_price numeric,buying_price numeric,cost_method text,loan_price numeric);
+  create table pb_purchases(id uuid primary key,received_on date,supplier_name text);
+  create table pb_purchase_lines(id uuid primary key,purchase_id uuid,asset_id uuid,quantity numeric,cost_per_unit numeric,landed_adjustment numeric);
+  insert into pb_inventory values('b87d8c14-e6cc-43fe-bd96-629b0321a477','LAPTOP BAG MEDUIM',20,1500,1540,'weighted_average',1588.13);
+  insert into pb_purchases values('00000000-0000-0000-0000-000000000011','2026-10-05','Violet Traders');
+  insert into pb_purchase_lines values('a2e85206-2787-439c-b00d-1f91844f3df9','00000000-0000-0000-0000-000000000011','b87d8c14-e6cc-43fe-bd96-629b0321a477',12,1500,0);`);
+ const sql=fs.readFileSync(path.join(__dirname,'../wamama-restore-medium-laptop-bag-price.sql'),'utf8');
+ await db.exec(sql);
+ const row=(await db.query('select * from pb_inventory')).rows[0];
+ assert.equal(Number(row.loan_price),1650);
+ assert.equal(Number(row.purchase_price),1500);
+ assert.equal(Number(row.buying_price),1540);
+ assert.equal(Number(row.stock),20);
+ await assert.rejects(db.exec(sql),/Inventory values changed/);
+ await db.close();
+ console.log('Guarded laptop bag correction changes only the approved selling price and rejects stale state.');
+})().catch(error=>{console.error(error);process.exitCode=1;});
