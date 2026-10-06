@@ -334,7 +334,7 @@ const BUSINESS_REGISTRATION_KEY = 'BFADMIN2026';
 let BIZ_ID = 'pb_default';
 const SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const CACHEABLE_DATA_KEYS = new Set([
-  'groups', 'members', 'staff', 'inventory', 'loans', 'orders',
+  'groups', 'members', 'staff', 'loans', 'orders',
   'meetings', 'suppliers', 'purchases', 'purchaseLines', 'settings'
 ]);
 const INCREMENTAL_CACHE_TABLES = new Set([
@@ -344,7 +344,8 @@ const INCREMENTAL_CACHE_TABLES = new Set([
   'pb_reconciliations','pb_expenses'
 ]);
 const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
-const FINANCIAL_CACHE_VERSION = 4;
+const FINANCIAL_CACHE_VERSION = 5;
+const SAFE_INVENTORY_COLUMNS = 'id,business_id,name,category,stock,loan_price,reorder_level,cost_method,cost_adjustment';
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
 const CORE_PORTFOLIO_FULL_SYNC_MS = 2 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
@@ -362,7 +363,9 @@ function openFinancialCache(){
     const request=indexedDB.open('wamama-financial-cache',FINANCIAL_CACHE_VERSION);
     request.onupgradeneeded=()=>{
       const db=request.result;
-      if(!db.objectStoreNames.contains('tables')) db.createObjectStore('tables',{keyPath:'key'});
+      // Older cache versions held confidential inventory reference prices.
+      if(db.objectStoreNames.contains('tables')) db.deleteObjectStore('tables');
+      db.createObjectStore('tables',{keyPath:'key'});
     };
     request.onsuccess=()=>resolve(request.result);
     request.onerror=()=>reject(request.error);
@@ -382,13 +385,19 @@ async function readFinancialCache(table){
     });
   }catch{return null;}
 }
+function safeInventoryRows(rows){
+  return (rows||[]).map(row=>{
+    const {purchase_price,buying_price,...safe}=row;
+    return safe;
+  });
+}
 async function writeFinancialCache(table,rows,fullSyncAt,reconciledAt=Date.now(),savedAt=Date.now()){
   const key=financialCacheKey(table);
   try{
     const db=await openFinancialCache();
     await new Promise((resolve,reject)=>{
       const request=db.transaction('tables','readwrite').objectStore('tables').put({
-        key, rows:rows||[], fullSyncAt:fullSyncAt||Date.now(),
+        key, rows:table==='pb_inventory'?safeInventoryRows(rows):rows||[], fullSyncAt:fullSyncAt||Date.now(),
         reconciledAt:reconciledAt||Date.now(), savedAt
       });
       request.onsuccess=()=>resolve();
@@ -905,6 +914,53 @@ function canManageExcessPayments(){
 function currentStaffRole(){
   return state.staff?.app_role || state.staff?.role || 'officer';
 }
+function canViewInventoryReferencePrices(){
+  return ['admin','ceo','branch_manager'].includes(currentStaffRole());
+}
+function inventoryReferenceRpcMissing(error){
+  return error?.code==='PGRST202' || /could not find the function|function .* does not exist/i.test(error?.message||'');
+}
+async function loadInventoryReferencePrices(){
+  state._inventoryReferencePricesReady=false;
+  if(!canViewInventoryReferencePrices()) return;
+  let {data,error}=await sb.rpc('pb_inventory_reference_prices');
+  // During the short deployment window before the database migration, existing
+  // management accounts retain their old read path. Once installed, the RPC is
+  // used and direct column access is revoked for all browser accounts.
+  if(error && inventoryReferenceRpcMissing(error)){
+    const legacy=await sb.from('pb_inventory').select('id,purchase_price,buying_price')
+      .eq('business_id',state.staff.business_id);
+    data=legacy.data; error=legacy.error;
+  }
+  if(error){
+    console.warn('Inventory reference prices could not be loaded:',error.message);
+    return;
+  }
+  const prices=new Map((data||[]).map(row=>[String(row.id),row]));
+  state.data.inventory.forEach(asset=>{
+    const row=prices.get(String(asset.id));
+    if(row){ asset.purchase_price=row.purchase_price; asset.buying_price=row.buying_price; }
+  });
+  state._inventoryReferencePricesReady=true;
+}
+async function saveInventoryReferencePrices(id,purchasePrice,valuationCost){
+  const args={p_inventory_id:id,p_purchase_price:purchasePrice,p_buying_price:valuationCost};
+  const result=await sb.rpc('pb_set_inventory_reference_prices',args);
+  if(!result.error || !inventoryReferenceRpcMissing(result.error)) return result;
+  const legacy=await sb.from('pb_inventory').update({purchase_price:purchasePrice,buying_price:valuationCost})
+    .eq('id',id).eq('business_id',state.staff.business_id)
+    .select('id,purchase_price,buying_price').single();
+  return {data:legacy.data?[legacy.data]:null,error:legacy.error};
+}
+async function insertInventoryWithoutPrices(row){
+  let result=await sb.from('pb_inventory').insert(row).select(SAFE_INVENTORY_COLUMNS).single();
+  if(result.error?.code==='23502' && /buying_price/i.test(result.error.message||'')){
+    // The prior schema requires this field on insert; the access migration
+    // replaces that requirement with a zero default for unpriced new stock.
+    result=await sb.from('pb_inventory').insert({...row,buying_price:0}).select(SAFE_INVENTORY_COLUMNS).single();
+  }
+  return result;
+}
 
 function isSupervisorScoped(){
   return currentStaffRole() === 'supervisor' && state.staff?.role !== 'admin';
@@ -1024,6 +1080,7 @@ async function loadStaff(){
   data.role = ROLE_TO_LEGACY[data.role] || 'officer';
   state.staff = data;
   if(data.business_id){ BIZ_ID = 'biz_' + data.business_id; }
+  lsDel('inventory'); // remove prices stored by older browser versions
   const { data: perms } = await sb.from('pb_permissions').select('*').eq('staff_id', data.id).maybeSingle();
   state.perms = perms || {};
   return true;
@@ -1141,6 +1198,7 @@ async function signOut(){
 }
 async function resetAccountData(){
   state._accountEpoch++;
+  state._inventoryReferencePricesReady=false;
   if(rtChan){ await sb.removeChannel(rtChan); rtChan=null; }
   if(financialRefreshTimer){ clearTimeout(financialRefreshTimer); financialRefreshTimer=null; }
   pendingFinancialLoanIds.clear(); pendingFullFinancialRefresh=false;
@@ -1172,7 +1230,7 @@ async function fetchBusinessTableRows(table){
   const maxRows = 50000;
   const rows = [];
   for(let from = 0; from < maxRows; from += pageSize){
-    let query = sb.from(table).select('*').order('id').range(from, from + pageSize - 1);
+    let query = sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').range(from, from + pageSize - 1);
     if (businessId) {
       query = query.eq('business_id', businessId);
     }
@@ -1190,7 +1248,7 @@ async function fetchPagedBusinessRows(table, configureQuery){
   const maxRows=50000;
   const rows=[];
   for(let from=0;from<maxRows;from+=pageSize){
-    let query=sb.from(table).select('*').order('id').range(from,from+pageSize-1);
+    let query=sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').range(from,from+pageSize-1);
     if(businessId) query=query.eq('business_id',businessId);
     query=configureQuery(query);
     const {data,error}=await query;
@@ -1408,6 +1466,8 @@ async function loadAllFinancialData(){
     // On a new device, make the operational screens usable before the much
     // larger savings and repayment histories finish their first local sync.
     if(stageIndex===0 && !jwtBroken){
+      await loadInventoryReferencePrices();
+      if(epoch!==state._accountEpoch) return;
       state.data.purchases.forEach(p=>{
         p.items=state.data.purchaseLines.filter(line=>line.purchase_id===p.id);
       });
@@ -1484,7 +1544,7 @@ function setupRealtime(){
     rtChan.on('postgres_changes', { event:'*', schema:'public', table:'pb_settings', filter:`id=eq.biz_${businessId}` }, handleRealtimeChange);
   }
   [
-    'pb_groups','pb_members','pb_inventory','pb_loans','pb_orders',
+    'pb_groups','pb_members','pb_loans','pb_orders',
     'pb_savings','pb_repayments','pb_excess_payments','pb_staff'
   ].forEach(table => {
     const opts = { event:'*', schema:'public', table };
@@ -3011,12 +3071,14 @@ function dashArrFilter(){
 
 function pageInventoryDashboard(){
   const inv        = state.data.inventory || [];
+  const canSeeCost = canViewInventoryReferencePrices();
+  const inventoryValue = canSeeCost && state._inventoryReferencePricesReady
+    ? inv.reduce((sum,item)=>sum+Number(item.buying_price||0)*Number(item.stock||0),0) : null;
   const orders     = state.data.orders    || [];
   const loans      = state.data.loans     || [];
   const members    = state.data.members   || [];
   const r          = state.staff?.app_role || state.staff?.role || 'officer';
 
-  const inventoryValue = inv.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
   const lowStock       = inv.filter(i=>Number(i.stock||0)<=Number(i.reorder_level||5));
   const pendingOrders  = orders.filter(o=>o.status==='pending');
   const soldItemOrders = orders.filter(o=>{ try{ return JSON.parse(o.notes||'{}').source==='sold_items'; }catch{ return false; } });
@@ -3035,9 +3097,9 @@ function pageInventoryDashboard(){
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:20px">
       <div class="card card-pad">
-        <div class="kpi-label">INVENTORY VALUE AT COST</div>
-        <div class="kpi-val">${KES(inventoryValue)}</div>
-        <div class="kpi-sub">${inv.length} asset${inv.length!==1?'s':''}</div>
+        <div class="kpi-label">${canSeeCost?'INVENTORY VALUE AT COST':'INVENTORY ITEMS'}</div>
+        <div class="kpi-val">${canSeeCost?(inventoryValue===null?'Unavailable':KES(inventoryValue)):inv.length}</div>
+        <div class="kpi-sub">${canSeeCost?'Stock valuation':'Assets in inventory'}</div>
       </div>
       <div class="card card-pad" style="${lowStock.length>0?'border-color:var(--warning)':''}">
         <div class="kpi-label">LOW STOCK ALERTS</div>
@@ -6149,6 +6211,7 @@ function canSetInventoryLoanPrice(){
 }
 function pageInventory(){
   const inv = state.data.inventory;
+  const canSeeCost=canViewInventoryReferencePrices();
   const isAdmin = state.staff.role === 'admin';
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const canManageInventory = isAdmin || r === 'ceo' || r === 'branch_manager' || r === 'inventory_officer' || r === 'storekeeper';
@@ -6172,7 +6235,7 @@ function pageInventory(){
         `:''}
       </div>
     </div>
-    <p class="helper" style="margin:0 0 12px">Purchase price is the last recorded supplier price. Cost/unit values remaining stock. Loan price is set separately and never changes when stock is received. Gross margin uses purchase price; cost margin uses stock valuation cost.</p>
+    <p class="helper" style="margin:0 0 12px">${canSeeCost?'Actual buying/wholesale price and stock valuation cost are management reference prices. Purchase entries do not change either one. Loan price is set separately.':'Stock and loan prices are shown here. Management maintains the confidential buying and valuation prices.'}</p>
     <div class="toolbar">
       <div class="search-box grow">
         <span class="ic">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}</span>
@@ -6182,8 +6245,8 @@ function pageInventory(){
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
-          <th>Asset</th><th>Category</th><th class="num">Qty</th><th class="num">Purchase price/unit</th><th class="num">Cost/unit</th><th class="num">Loan price/unit</th>
-          <th class="num">Total cost value</th><th class="num">Total loan value</th><th class="num">Gross margin</th><th class="num">Cost margin</th><th>Cost method</th><th>Status</th><th></th>
+          <th>Asset</th><th>Category</th><th class="num">Qty</th>${canSeeCost?'<th class="num">Actual buying/wholesale price</th><th class="num">Stock valuation cost/unit</th>':''}<th class="num">Loan price/unit</th>
+          ${canSeeCost?'<th class="num">Total cost value</th>':''}<th class="num">Total loan value</th>${canSeeCost?'<th class="num">Gross margin</th><th class="num">Cost margin</th><th>Cost method</th>':''}<th>Status</th><th></th>
         </tr></thead>
         <tbody>
           ${paged.map(a => {
@@ -6196,18 +6259,18 @@ function pageInventory(){
               <td><b>${a.name}</b></td>
               <td>${a.category||'—'}</td>
               <td class="num">${a.stock}</td>
-              <td class="num">${purchasePrice===null?'Not recorded':KES(purchasePrice)}</td>
-              <td class="num">${KES(a.buying_price)}</td>
+              ${canSeeCost?`<td class="num">${state._inventoryReferencePricesReady?(purchasePrice===null?'Not recorded':KES(purchasePrice)):'Unavailable'}</td>
+              <td class="num">${state._inventoryReferencePricesReady?KES(a.buying_price):'Unavailable'}</td>`:''}
               <td class="num">${KES(a.loan_price)}</td>
-              <td class="num">${KES(totalCost)}</td>
+              ${canSeeCost?`<td class="num">${state._inventoryReferencePricesReady?KES(totalCost):'Unavailable'}</td>`:''}
               <td class="num"><b>${KES(totalLoan)}</b></td>
-              <td class="num">${inventoryMarginPct(a.loan_price,purchasePrice)}</td>
-              <td class="num">${inventoryMarginPct(a.loan_price,Number(a.buying_price||0))}</td>
-              <td>${{weighted_average:'Weighted average',latest_purchase:'Latest purchase',manual:'Manual'}[method]}</td>
+              ${canSeeCost?`<td class="num">${state._inventoryReferencePricesReady?inventoryMarginPct(a.loan_price,purchasePrice):'Unavailable'}</td>
+              <td class="num">${state._inventoryReferencePricesReady?inventoryMarginPct(a.loan_price,Number(a.buying_price||0)):'Unavailable'}</td>
+              <td>${{weighted_average:'Weighted average',latest_purchase:'Latest purchase',manual:'Manual'}[method]}</td>`:''}
               <td>${status}</td>
               ${canManageInventory?`<td><button class="act-btn" onclick="invActions(event,'${a.id}')">···</button></td>`:'<td></td>'}
             </tr>`;
-          }).join('') || `<tr><td colspan="13"><div class="empty"><h4>No inventory yet</h4><p>Add assets manually or import from Excel.</p></div></td></tr>`}
+          }).join('') || `<tr><td colspan="${canSeeCost?13:7}"><div class="empty"><h4>No inventory yet</h4><p>Add assets manually or import from Excel.</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
@@ -6225,10 +6288,11 @@ function pageInventory(){
 
 function downloadInventoryTemplate(){
   const wb = XLSX.utils.book_new();
-  const template = [
+  const managementTemplate = [
     { name:'Example Sofa Set', category:'Furniture', stock:10, purchase_price:15000, buying_price:15000, cost_method:'weighted_average', cost_adjustment:0, loan_price:18000, reorder_level:3 },
     { name:'Blanket', category:'Bedding', stock:50, purchase_price:800, buying_price:800, cost_method:'weighted_average', cost_adjustment:0, loan_price:1000, reorder_level:10 },
   ];
+  const template=canViewInventoryReferencePrices()?managementTemplate:managementTemplate.map(({name,category,stock,reorder_level})=>({name,category,stock,reorder_level}));
   const ws = XLSX.utils.json_to_sheet(template);
   // Add column header comments by widening columns
   ws['!cols'] = [
@@ -6288,7 +6352,7 @@ async function importInventory(input){
         };
       };
 
-      const mapped = rows.map(colMap).filter(r=>r.name);
+      const mapped = rows.map(colMap).filter(r=>r.name).map(r=>canViewInventoryReferencePrices()?r:{...r,purchase_price:null,buying_price:0,cost_method:'weighted_average',cost_adjustment:0,loan_price:0});
       if(!mapped.length){ toast('Could not find any rows with an asset name. Check the file has a "name" or "asset" column.','error'); input.value=''; return; }
 
       // Preview before importing
@@ -6302,13 +6366,13 @@ async function importInventory(input){
           </div>
           <div style="max-height:320px;overflow-y:auto">
             <table class="tbl" style="font-size:12px">
-              <thead><tr><th>Name</th><th>Category</th><th class="num">Qty</th><th class="num">Purchase/unit</th><th class="num">Cost/unit</th><th class="num">Loan price</th></tr></thead>
+              <thead><tr><th>Name</th><th>Category</th><th class="num">Qty</th>${canViewInventoryReferencePrices()?'<th class="num">Actual buying price</th><th class="num">Valuation cost</th><th class="num">Loan price</th>':''}</tr></thead>
               <tbody>
                 ${mapped.map(r=>`<tr>
                   <td>${r.name}</td><td>${r.category}</td>
-                  <td class="num">${r.stock}</td><td class="num">${r.purchase_price===null?'Not recorded':KES(r.purchase_price)}</td>
+                  <td class="num">${r.stock}</td>${canViewInventoryReferencePrices()?`<td class="num">${r.purchase_price===null?'Not recorded':KES(r.purchase_price)}</td>
                   <td class="num">${KES(r.buying_price)}</td>
-                  <td class="num">${canSetInventoryLoanPrice()?KES(r.loan_price):'Manager to set'}</td>
+                  <td class="num">${KES(r.loan_price)}</td>`:''}
                 </tr>`).join('')}
               </tbody>
             </table>
@@ -6318,17 +6382,25 @@ async function importInventory(input){
           { label:'Cancel', onClick: ()=>{ closeModal(); input.value=''; } },
           { label:`Import all ${mapped.length}`, cls:'btn-primary', onClick: async ()=>{
             closeModal();
-            let added=0, skipped=0, failed=0;
+            let added=0, skipped=0, failed=0, pricingPending=0;
             for(const row of mapped){
               const exists = state.data.inventory.find(a=>a.name.toLowerCase()===row.name.toLowerCase());
               if(exists){ skipped++; continue; }
-              const { data, error } = await sb.from('pb_inventory').insert({ ...row, loan_price:canSetInventoryLoanPrice()?row.loan_price:0, business_id: state.staff.business_id || null }).select().single();
+              const {purchase_price,buying_price,...safeRow}=row;
+              const { data, error } = await insertInventoryWithoutPrices({ ...safeRow, loan_price:canSetInventoryLoanPrice()?row.loan_price:0, business_id: state.staff.business_id || null });
               if(error){ failed++; console.warn('Import failed for',row.name,error.message); }
-              else { state.data.inventory.push(data); added++; }
+              else {
+                if(canViewInventoryReferencePrices()){
+                  const {data:reference,error:priceError}=await saveInventoryReferencePrices(data.id,purchase_price,buying_price);
+                  if(priceError){ pricingPending++; console.warn('Price setup failed for',row.name,priceError.message); }
+                  else Object.assign(data,Array.isArray(reference)?reference[0]:reference);
+                }
+                state.data.inventory.push(data); added++;
+              }
             }
             input.value='';
             render();
-            toast(`Import done: ${added} added, ${skipped} skipped (already exist), ${failed} failed.${!canSetInventoryLoanPrice()&&added?' A manager must set selling prices before issue.':''}`, failed>0?'warn':'success');
+            toast(`Import done: ${added} added, ${skipped} skipped (already exist), ${failed} failed.${pricingPending?` ${pricingPending} added asset(s) still need management prices.`:''}${!canSetInventoryLoanPrice()&&added?' A manager must set selling prices before issue.':''}`, failed>0||pricingPending>0?'warn':'success');
           }}
         ]
       });
@@ -6355,6 +6427,8 @@ function invActions(ev, id){
 }
 function openAssetForm(a=null){
   const canSetLoanPrice=canSetInventoryLoanPrice();
+  const canSetReferencePrices=canViewInventoryReferencePrices();
+  if(a && canSetReferencePrices && !state._inventoryReferencePricesReady) return toast('Management prices are unavailable. Reload inventory before editing this asset.','error');
   modal({
     title: a?'Edit asset':'Add asset',
     body:`<form id="af" data-existing="${a?'1':'0'}">
@@ -6364,20 +6438,20 @@ function openAssetForm(a=null){
           <select name="category">${['Kitchen','Bedding','Electronics','Furniture','Other'].map(c=>`<option ${a?.category===c?'selected':''}>${c}</option>`).join('')}</select>
         </div>
         <div class="field"><label>Quantity in stock</label><input type="number" min="0" name="stock" id="af-stock" value="${a?.stock||0}" oninput="assetCalcTotals()" /></div>
-        <div class="field"><label>Actual supplier purchase price/unit (KES)</label><input type="number" min="0" step="0.01" name="purchase_price" id="af-purchase" value="${inventoryPurchasePrice(a)??''}" placeholder="Not recorded" oninput="assetCalcTotals()" /></div>
+        ${canSetReferencePrices?`<div class="field"><label>Actual buying / wholesale price per unit (KES)</label><input type="number" min="0" step="0.01" name="purchase_price" id="af-purchase" value="${inventoryPurchasePrice(a)??''}" placeholder="Not recorded" oninput="assetCalcTotals()" /></div>
         <div class="field"><label>Cost method</label><select name="cost_method" id="af-method" onchange="assetCalcTotals()">
           ${[['weighted_average','Weighted average of stock'],['latest_purchase','Latest purchase + adjustment'],['manual','Manual valuation cost']].map(([method,label])=>`<option value="${method}" ${inventoryCostMethod(a)===method?'selected':''}>${label}</option>`).join('')}
         </select></div>
         <div class="field"><label>Transport / discount per unit (KES, +/-)</label><input type="number" step="0.01" name="cost_adjustment" id="af-adjustment" value="${a?.cost_adjustment??0}" oninput="assetCalcTotals()" /></div>
-        <div class="field"><label>Inventory cost/unit (KES)</label><input type="number" min="0" step="0.01" name="buying_price" id="af-buying" value="${a?.buying_price||0}" oninput="assetCalcTotals()" ${inventoryCostMethod(a)==='manual'?'':'readonly'} /></div>
+        <div class="field"><label>Stock valuation cost/unit (KES)</label><input type="number" min="0" step="0.01" name="buying_price" id="af-buying" value="${a?.buying_price||0}" oninput="assetCalcTotals()" ${inventoryCostMethod(a)==='latest_purchase'||(!a&&inventoryCostMethod(a)==='weighted_average')?'readonly':''} /><div class="helper">After reviewing a receipt, management can enter the weighted average for remaining stock here.</div></div>`:''}
         <div class="field"><label>Loan / selling price per unit (KES)</label><input type="number" min="0" step="0.01" name="loan_price" id="af-loan" value="${a?.loan_price||0}" oninput="assetCalcTotals()" ${canSetLoanPrice?'':'readonly'} /><div class="helper">${canSetLoanPrice?'Set separately from the purchase and valuation cost.':'A manager sets this price before the item can be issued.'}</div></div>
         <div class="field"><label>Reorder level</label><input type="number" min="0" name="reorder_level" value="${a?.reorder_level||5}" /></div>
       </div>
-      <div class="helper" id="af-formula" style="margin-bottom:12px"></div>
+      ${canSetReferencePrices?`<div class="helper" id="af-formula" style="margin-bottom:12px"></div>`:''}
       <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-top:2px">
         <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">Total inventory value (qty × price)</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><div style="font-size:11px;color:var(--text-muted)">At cost</div><div style="font-weight:700;font-size:15px" id="af-totalcost">${KES((a?.stock||0)*(a?.buying_price||0))}</div></div>
+          ${canSetReferencePrices?`<div><div style="font-size:11px;color:var(--text-muted)">At cost</div><div style="font-weight:700;font-size:15px" id="af-totalcost">${KES((a?.stock||0)*(a?.buying_price||0))}</div></div>`:''}
           <div><div style="font-size:11px;color:var(--text-muted)">At loan price</div><div style="font-weight:700;font-size:15px;color:var(--accent)" id="af-totalloan">${KES((a?.stock||0)*(a?.loan_price||0))}</div></div>
         </div>
       </div>
@@ -6386,27 +6460,47 @@ function openAssetForm(a=null){
       { label:'Cancel', onClick: closeModal },
       { label:'Save', cls:'btn-primary', onClick: async () => {
         if(!(await ensureFreshToken())) return;
-        const fd = new FormData($('af')); const row = Object.fromEntries(fd);
-        ['stock','buying_price','loan_price','reorder_level','cost_adjustment'].forEach(k=>row[k]=Number(row[k])||0);
-        if(!canSetLoanPrice) row.loan_price=a?Number(a.loan_price||0):0;
-        row.purchase_price=row.purchase_price===''?null:Number(row.purchase_price);
-        if(!['weighted_average','latest_purchase','manual'].includes(row.cost_method)) return toast('Choose a valid cost method.','error');
-        if(row.purchase_price!==null && (!Number.isFinite(row.purchase_price)||row.purchase_price<0)) return toast('Enter a valid actual purchase price.','error');
-        if(!Number.isFinite(row.cost_adjustment) || (row.purchase_price!==null && row.purchase_price+row.cost_adjustment<0)) return toast('Purchase price plus transport or discount must be zero or greater.','error');
-        if(!a && row.stock>0 && !(row.purchase_price>0)) return toast('Enter the actual supplier purchase price for new stock.','error');
-        if(row.cost_method==='latest_purchase' && row.purchase_price===null) return toast('Record a purchase price before using latest-purchase costing.','error');
-        if(row.cost_method==='latest_purchase' || (!a && row.cost_method==='weighted_average')){
-          row.buying_price=roundInventoryMoney((row.purchase_price||0)+row.cost_adjustment);
+        const fd = new FormData($('af')); const submitted = Object.fromEntries(fd);
+        const row = canSetReferencePrices?submitted:{name:submitted.name,category:submitted.category,stock:submitted.stock,reorder_level:submitted.reorder_level};
+        ['stock','reorder_level'].forEach(k=>row[k]=Number(row[k])||0);
+        if(canSetLoanPrice) row.loan_price=Number(row.loan_price)||0;
+        else if(!a) row.loan_price=0;
+        else delete row.loan_price;
+        if(canSetReferencePrices){
+          row.buying_price=Number(row.buying_price)||0;
+          row.cost_adjustment=Number(row.cost_adjustment)||0;
+          row.purchase_price=row.purchase_price===''?null:Number(row.purchase_price);
+          if(!['weighted_average','latest_purchase','manual'].includes(row.cost_method)) return toast('Choose a valid cost method.','error');
+          if(row.purchase_price!==null && (!Number.isFinite(row.purchase_price)||row.purchase_price<0)) return toast('Enter a valid actual buying price.','error');
+          if(!Number.isFinite(row.cost_adjustment) || (row.purchase_price!==null && row.purchase_price+row.cost_adjustment<0)) return toast('Buying price plus transport or discount must be zero or greater.','error');
+          if(row.cost_method==='latest_purchase' && row.purchase_price===null) return toast('Record a buying price before using latest-purchase costing.','error');
+          if(row.cost_method==='latest_purchase' || (!a && row.cost_method==='weighted_average')){
+            row.buying_price=roundInventoryMoney((row.purchase_price||0)+row.cost_adjustment);
+          }
+          if(row.buying_price<0) return toast('Valuation cost cannot be negative.','error');
         }
-        if(row.buying_price<0 || row.loan_price<0 || row.stock<0) return toast('Stock and prices cannot be negative.','error');
+        if((row.loan_price||0)<0 || row.stock<0) return toast('Stock and prices cannot be negative.','error');
+        const {purchase_price,buying_price,...safeRow}=row;
         if(a){
-          const { error } = await sb.from('pb_inventory').update(row).eq('id', a.id);
+          const { error } = await sb.from('pb_inventory').update(safeRow).eq('id', a.id);
           if(error) return toast(inventoryCostError(error),'error');
-          Object.assign(a, row); audit('update','pb_inventory',a.id);
+          Object.assign(a,safeRow);
+          if(canSetReferencePrices){
+            const {data:reference,error:priceError}=await saveInventoryReferencePrices(a.id,purchase_price,buying_price);
+            if(priceError) return toast('Asset details saved, but management prices were not updated: '+priceError.message,'error');
+            Object.assign(a,Array.isArray(reference)?reference[0]:reference);
+          }
+          audit('update','pb_inventory',a.id);
         } else {
-          const { data, error } = await sb.from('pb_inventory').insert({ ...row, business_id: state.staff.business_id || null }).select().single();
+          const { data, error } = await insertInventoryWithoutPrices({ ...safeRow, business_id: state.staff.business_id || null });
           if(error) return toast(inventoryCostError(error),'error');
-          state.data.inventory.unshift(data); audit('create','pb_inventory',data.id);
+          state.data.inventory.unshift(data);
+          if(canSetReferencePrices){
+            const {data:reference,error:priceError}=await saveInventoryReferencePrices(data.id,purchase_price,buying_price);
+            if(priceError) return toast('Asset added, but management prices were not saved: '+priceError.message,'error');
+            Object.assign(data,Array.isArray(reference)?reference[0]:reference);
+          }
+          audit('create','pb_inventory',data.id);
         }
         closeModal(); render(); toast(a?'Asset updated':'Asset added','success');
       }}
@@ -6425,7 +6519,7 @@ function assetCalcTotals(){
   const purchase=purchaseInput?.value===''?null:Number(purchaseInput?.value);
   const adjustment=Number($('af-adjustment')?.value||0);
   if(costInput){
-    costInput.readOnly=method!=='manual';
+    costInput.readOnly=method==='latest_purchase' || (method==='weighted_average' && form?.dataset?.existing==='0');
     if(purchase!==null && Number.isFinite(purchase) && (method==='latest_purchase' || (method==='weighted_average' && form?.dataset?.existing==='0'))){
       costInput.value=String(roundInventoryMoney(purchase+adjustment));
     }
@@ -6436,22 +6530,23 @@ function assetCalcTotals(){
   const tl = document.getElementById('af-totalloan'); if(tl) tl.textContent = KES(qty*loan);
   const formula=$('af-formula');
   if(formula) formula.textContent=method==='manual'
-    ? 'Manual: enter the inventory cost per unit yourself. Purchase and loan prices remain separate.'
+    ? 'Manual: management enters the stock valuation cost per unit.'
     : method==='latest_purchase'
-      ? 'Cost/unit = latest supplier purchase price + transport or discount per unit. Loan price stays fixed.'
-      : 'Weighted average on each receipt: (old stock × old cost + received units × (supplier price + adjustment)) ÷ new stock. Editing the supplier price alone does not rewrite earlier stock cost or the loan price.';
+      ? 'Management may set valuation cost from the reviewed buying price and adjustment. Receipts do not update it automatically.'
+      : 'Weighted average to enter after review = (previous stock × previous valuation cost + received units × (invoice cost + adjustment)) ÷ new stock. Receipts never update this reference automatically.';
 }
 function receiveStockForAsset(a){
   openPurchaseForm();
-  purSelectAsset(0,a.id,a.name,inventoryPurchasePrice(a)??0,false);
+  purSelectAsset(0,a.id,a.name,false);
 }
 function exportInventory(){
-  const ws = XLSX.utils.json_to_sheet(state.data.inventory.map(a=>({
-    Name:a.name, Category:a.category, PurchasePrice:inventoryPurchasePrice(a), CostUnit:a.buying_price,
+  if(canViewInventoryReferencePrices()&&!state._inventoryReferencePricesReady) return toast('Management prices are unavailable. Reload inventory before exporting valuation data.','error');
+  const ws = XLSX.utils.json_to_sheet(state.data.inventory.map(a=>canViewInventoryReferencePrices()?{
+    Name:a.name, Category:a.category, ActualBuyingWholesalePrice:inventoryPurchasePrice(a), StockValuationCostUnit:a.buying_price,
     CostMethod:inventoryCostMethod(a), CostAdjustment:a.cost_adjustment||0, LoanPrice:a.loan_price,
     GrossMargin:inventoryMarginPct(a.loan_price,inventoryPurchasePrice(a)), CostMargin:inventoryMarginPct(a.loan_price,Number(a.buying_price||0)),
     Stock:a.stock, Reorder:a.reorder_level
-  })));
+  }:{Name:a.name,Category:a.category,Stock:a.stock,LoanPrice:a.loan_price,Reorder:a.reorder_level}));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
   XLSX.writeFile(wb, `inventory_${todayISO()}.xlsx`);
 }
@@ -7198,7 +7293,7 @@ function pageReports(){
         ['Repayments register','All loan repayments recorded','repayments'],
         ['Active loans','Outstanding balances and weeks remaining','loans'],
         ['Members directory','Full member list with contacts','members'],
-        ['Inventory valuation','Stock quantities, cost and loan values','inventory'],
+        [canViewInventoryReferencePrices()?'Inventory valuation':'Inventory status',canViewInventoryReferencePrices()?'Stock quantities, cost and loan values':'Stock quantities and loan prices','inventory'],
         ['Orders log','Every order placed and its status','orders']
       ].map(([t,d,k]) => `<div class="card card-pad">
         <h3 style="margin:0 0 4px">${t}</h3>
@@ -7301,14 +7396,14 @@ function buildReportRows(kind){
     const off = staffById.get(String(m.officer_id || g?.officer_id));
     return { Name:m.full_name, ID:m.national_id, Phone:m.phone, Group:g?.name||'—', Officer:off?.full_name||'—', RegisteredOn:m.registered_on||'', Savings:memberSavings(m.id), Eligible:memberEligible(m.id)?'Yes':'No', Status:m.status };
   }).filter(r=>!groupFilter || r.Group===groupsById.get(String(groupFilter))?.name).filter(r=>!offFilter || r.Officer===staffById.get(String(offFilter))?.full_name);
-  if(kind==='inventory') return state.data.inventory.map(a => ({
+  if(kind==='inventory') return state.data.inventory.map(a => canViewInventoryReferencePrices() && state._inventoryReferencePricesReady ? ({
     Name:a.name, Category:a.category, Qty:a.stock,
-    ActualPurchasePrice:inventoryPurchasePrice(a), CostPerUnit:Number(a.buying_price),
+    ActualBuyingWholesalePrice:inventoryPurchasePrice(a), StockValuationCostUnit:Number(a.buying_price),
     CostMethod:inventoryCostMethod(a), CostAdjustment:Number(a.cost_adjustment||0), LoanPricePerUnit:Number(a.loan_price),
     GrossMargin:inventoryMarginPct(a.loan_price,inventoryPurchasePrice(a)),
     CostMargin:inventoryMarginPct(a.loan_price,Number(a.buying_price||0)),
     TotalCostValue:Number(a.buying_price)*a.stock, TotalLoanValue:Number(a.loan_price)*a.stock
-  }));
+  }):({Name:a.name,Category:a.category,Qty:a.stock,LoanPricePerUnit:Number(a.loan_price),TotalLoanValue:Number(a.loan_price)*a.stock}));
   if(kind==='orders') return state.data.orders.map(o => {
     const m = state.data.members.find(x=>x.id===o.member_id);
     const g = groupsById.get(String(o.group_id));
@@ -7321,7 +7416,7 @@ function previewReport(kind){
   const rows = buildReportRows(kind);
   if(!rows.length) return toast('No data to preview for this report.','warn');
   const cols = Object.keys(rows[0]);
-  const titles = { management_summary:'Management Summary', loan_repayment_history:'Loan Repayment History', savings:'Savings Ledger', repayments:'Repayments Register', loans:'Active Loans', members:'Members Directory', inventory:'Inventory Valuation', orders:'Orders Log' };
+  const titles = { management_summary:'Management Summary', loan_repayment_history:'Loan Repayment History', savings:'Savings Ledger', repayments:'Repayments Register', loans:'Active Loans', members:'Members Directory', inventory:canViewInventoryReferencePrices()?'Inventory Valuation':'Inventory Status', orders:'Orders Log' };
   modal({
     title: `Preview: ${titles[kind]||kind}`,
     size:'lg',
@@ -8015,6 +8110,7 @@ function openPurchaseForm(){
         <div class="field"><label>Date received</label><input type="date" name="received_on" value="${todayISO()}" /></div>
       </div>
       <h5 style="margin:14px 0 6px;font-size:12px;color:var(--text-subtle);text-transform:uppercase">Line items</h5>
+      <p class="helper">Enter the cost shown on this purchase invoice. Selecting an asset does not fill a price or change management's inventory reference prices.</p>
       <div id="pur-lines"></div>
       <button type="button" class="btn btn-outline btn-sm" onclick="purAddLine()">+ Add line</button>
       <div class="divider"></div>
@@ -8047,8 +8143,8 @@ function renderPurLines(){
         <div id="pur-ast-dd-${i}" style="position:absolute;z-index:50;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius-sm) var(--radius-sm);max-height:160px;overflow-y:auto;display:none;box-shadow:var(--shadow-md)"></div>
       </div>
       <div class="field"><label>Quantity received</label><input type="number" min="0.01" step="0.01" value="${l.quantity}" oninput="purLineUpd(${i},'quantity',this.value)" /></div>
-      <div class="field"><label>Actual supplier purchase price/unit (KES)</label><input type="number" min="0" step="0.01" value="${l.cost_per_unit}" oninput="purLineUpd(${i},'cost_per_unit',this.value)" /></div>
-      <div class="field"><label>Transport / discount per unit (+/- KES)</label><input type="number" step="0.01" value="${l.landed_adjustment||0}" oninput="purLineUpd(${i},'landed_adjustment',this.value)" /><div class="helper">Valuation cost adds this amount to the supplier price. The loan price stays fixed.</div></div>
+      <div class="field"><label>Cost per unit on this invoice (KES)</label><input type="number" min="0" step="0.01" value="${l.cost_per_unit}" oninput="purLineUpd(${i},'cost_per_unit',this.value)" /></div>
+      <div class="field"><label>Transport / discount for this receipt (+/- KES)</label><input type="number" step="0.01" value="${l.landed_adjustment||0}" oninput="purLineUpd(${i},'landed_adjustment',this.value)" /><div class="helper">Recorded with this purchase for management review.</div></div>
       <div class="field"><label>Line total = <b>${KES(Number(l.quantity||0)*Number(l.cost_per_unit||0))}</b></label><input type="number" min="0" step="0.01" value="${l.subtotal||0}" placeholder="Override line total" oninput="purLineUpd(${i},'subtotal',this.value,true)" /></div>
       <div class="field"><label>Batch / lot</label><input value="${statementHtml(l.batch_no||'')}" oninput="purLineUpd(${i},'batch_no',this.value)" /></div>
       <div class="field" style="display:flex;align-items:flex-end"><button type="button" class="btn btn-outline btn-sm" onclick="purRemoveLine(${i})">Remove</button></div>
@@ -8080,20 +8176,20 @@ function purAssetSearch(i, q){
   const showAdd = name.length > 1 && !exact;
   if(!matches.length && !showAdd){ dd.style.display='none'; return; }
   dd.style.display='block';
-  dd.innerHTML = matches.map((a,index)=>`<div data-asset-index="${index}" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px">${statementHtml(a.name)}<span class="muted" style="font-size:11px;margin-left:8px">last purchase ${inventoryPurchasePrice(a)===null?'not recorded':KES(inventoryPurchasePrice(a))} · stock ${a.stock}</span></div>`).join('')
+  dd.innerHTML = matches.map((a,index)=>`<div data-asset-index="${index}" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px">${statementHtml(a.name)}<span class="muted" style="font-size:11px;margin-left:8px">stock ${a.stock}</span></div>`).join('')
     + (showAdd ? `<div data-add-new style="padding:8px 12px;cursor:pointer;font-size:13px;color:var(--accent);font-weight:600">+ Add as new item: "${statementHtml(name)}"</div>` : '');
   dd.querySelectorAll('[data-asset-index]').forEach(el=>el.addEventListener('mousedown',()=>{
     const asset=matches[Number(el.dataset.assetIndex)];
-    if(asset) purSelectAsset(i,asset.id,asset.name,inventoryPurchasePrice(asset)??0,false);
+    if(asset) purSelectAsset(i,asset.id,asset.name,false);
   }));
-  dd.querySelector('[data-add-new]')?.addEventListener('mousedown',()=>purSelectAsset(i,'',name,0,true));
+  dd.querySelector('[data-add-new]')?.addEventListener('mousedown',()=>purSelectAsset(i,'',name,true));
 }
-function purSelectAsset(i, id, name, defaultCost, isNew){
+function purSelectAsset(i, id, name, isNew){
   _purLines[i].asset_id = id;
   _purLines[i].asset_name = name;
   _purLines[i].isNew = isNew;
-  _purLines[i].landed_adjustment=isNew?0:Number(state.data.inventory.find(a=>a.id===id)?.cost_adjustment||0);
-  _purLines[i].cost_per_unit = Number(defaultCost)||0;
+  _purLines[i].landed_adjustment=0;
+  _purLines[i].cost_per_unit = 0;
   _purLines[i].subtotal = Number(_purLines[i].quantity||0)*Number(_purLines[i].cost_per_unit||0);
   renderPurLines();
   const inp = $(`pur-ast-q-${i}`); if(inp) inp.value = name;
@@ -8127,7 +8223,7 @@ async function submitPurchase(){
     return toast('Enter a positive actual supplier price for each item; price plus transport or discount cannot be negative.','error');
   // Check the one-time schema before writing a purchase header: an old database
   // must not leave a paid purchase with no lines or stock update.
-  const {error:inventorySchemaError}=await sb.from('pb_inventory').select('id,purchase_price,cost_method,cost_adjustment').limit(1);
+  const {error:inventorySchemaError}=await sb.from('pb_inventory').select('id').limit(1);
   const {error:lineSchemaError}=inventorySchemaError?{error:null}:await sb.from('pb_purchase_lines').select('id,landed_adjustment').limit(1);
   if(inventorySchemaError || lineSchemaError) return toast(inventoryCostError(inventorySchemaError||lineSchemaError),'error');
   const auto = validLines.reduce((a,b)=>a+Number(b.subtotal||0),0);
@@ -8163,8 +8259,6 @@ async function submitPurchase(){
   let invUpdated = 0;
   const unlinkedAssets=[];
   for(const [lineIndex,l] of validLines.entries()){
-    const costPerUnit = roundInventoryMoney(l.cost_per_unit)||0;
-    const adjustment = roundInventoryMoney(l.landed_adjustment)||0;
     const qty = Number(l.quantity)||0;
     if(!qty) continue;
 
@@ -8173,12 +8267,11 @@ async function submitPurchase(){
       const newRow = {
         business_id: state.staff.business_id || null,
         name: l.asset_name, category:'Other', stock: qty,
-        purchase_price:costPerUnit, buying_price:roundInventoryMoney(costPerUnit+adjustment),
-        cost_method:'weighted_average', cost_adjustment:adjustment,
+        cost_method:'weighted_average', cost_adjustment:0,
         loan_price:0,
         reorder_level: 5
       };
-      const { data: newAsset, error: ae } = await sb.from('pb_inventory').insert(newRow).select().single();
+      const { data: newAsset, error: ae } = await insertInventoryWithoutPrices(newRow);
       if(ae){ toast(`Failed to add "${l.asset_name}" to inventory: ${ae.message}`,'warn'); continue; }
       state.data.inventory.unshift(newAsset);
       l.asset_id=newAsset.id;
@@ -8190,20 +8283,17 @@ async function submitPurchase(){
       const a = state.data.inventory.find(x=>x.id===l.asset_id);
       if(!a){ toast(`Asset "${l.asset_name}" not found in local inventory, skipping.`,'warn'); continue; }
       const newStock = Number(a.stock||0) + qty;
-      const valuationCost=inventoryReceiptCost(a,qty,costPerUnit,adjustment);
-      const { error: ue } = await sb.from('pb_inventory').update({
-        stock:newStock, purchase_price:costPerUnit, buying_price:valuationCost, cost_adjustment:adjustment
-      }).eq('id',a.id);
+      const { error: ue } = await sb.from('pb_inventory').update({stock:newStock}).eq('id',a.id);
       if(ue){ toast(`Failed to update stock for "${l.asset_name}": ${ue.message}`,'warn'); continue; }
       // Update local state immediately so next iteration sees correct stock
-      a.stock = newStock; a.purchase_price=costPerUnit; a.buying_price=valuationCost; a.cost_adjustment=adjustment;
+      a.stock = newStock;
       invUpdated++;
     }
   }
   state.data.purchases.unshift(created);
   audit('purchase_create','pb_purchases',created.id, null, { total, lines: validLines.length });
   closeModal(); render();
-  toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated. New assets need a separately approved loan price before issue.${unlinkedAssets.length?` Purchase history could not link: ${unlinkedAssets.join(', ')}.`:''}`,unlinkedAssets.length || invUpdated!==validLines.length?'warn':'success');
+  toast(`Stock received — ${invUpdated} of ${validLines.length} asset(s) updated. Management can review the invoice cost and set inventory reference prices separately. New assets need a separately approved loan price before issue.${unlinkedAssets.length?` Purchase history could not link: ${unlinkedAssets.join(', ')}.`:''}`,unlinkedAssets.length || invUpdated!==validLines.length?'warn':'success');
 }
 
 

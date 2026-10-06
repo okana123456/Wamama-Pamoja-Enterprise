@@ -51,7 +51,13 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
   toast=(message,kind)=>{globalThis.lastToast={message,kind};};
   modal=config=>{globalThis.assetModal=config;};
  globalThis.savedInventory=null;globalThis.savedLine=null;globalThis.savedLink=null;
- globalThis.purchaseInsertCount=0;
+ globalThis.savedReference=null;globalThis.referenceCallCount=0;globalThis.purchaseInsertCount=0;
+ state._inventoryReferencePricesReady=true;
+ sb.rpc=async(name,args)=>{
+  if(name!=='pb_set_inventory_reference_prices') throw Error('Unexpected RPC '+name);
+  globalThis.savedReference=args;globalThis.referenceCallCount++;
+  return {data:[{id:args.p_inventory_id,purchase_price:args.p_purchase_price,buying_price:args.p_buying_price}],error:null};
+ };
  sb.from=table=>({
   select(){return {limit:async()=>({error:null})};},
   insert(row){
@@ -70,43 +76,58 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
 (async()=>{
  await run('submitPurchase()');
  assert.deepEqual(JSON.parse(JSON.stringify(sandbox.savedInventory)),{
-  stock:20,purchase_price:10500,buying_price:10250,cost_adjustment:0
- },'stock receipt retains the approved loan price and values the stock separately');
+  stock:20
+ },'receiving stock updates only the stock quantity');
  assert.equal(run(`state.data.inventory[0].loan_price`),14000);
- assert.equal(run(`state.data.inventory[0].purchase_price`),10500);
- assert.equal(run(`state.data.inventory[0].buying_price`),10250);
+ assert.equal(run(`state.data.inventory[0].purchase_price`),10000);
+ assert.equal(run(`state.data.inventory[0].buying_price`),10000);
  assert.equal(sandbox.savedLine[0].cost_per_unit,10500);
  assert.equal(sandbox.savedLine[0].landed_adjustment,0);
- const fieldValues={name:'Sofa',stock:'20',purchase_price:'11000',buying_price:'10250',
+ const fieldValues={name:'Sofa',category:'Furniture',stock:'20',purchase_price:'11000',buying_price:'10250',
   cost_method:'weighted_average',cost_adjustment:'0',loan_price:'14000',reorder_level:'2'};
  sandbox.assetFields=Object.entries(fieldValues);
  run(`openAssetForm(state.data.inventory[0]);`);
  await sandbox.assetModal.actions[1].onClick();
- assert.equal(sandbox.savedInventory.purchase_price,11000);
- assert.equal(sandbox.savedInventory.buying_price,10250,'changing supplier price alone does not rewrite old stock cost');
+ assert.equal(sandbox.savedInventory.purchase_price,undefined,'protected price never goes through table update');
+ assert.equal(sandbox.savedInventory.buying_price,undefined);
+ assert.equal(sandbox.savedReference.p_purchase_price,11000);
+ assert.equal(sandbox.savedReference.p_buying_price,10250,'changing wholesale price alone does not rewrite old stock cost');
  assert.equal(sandbox.savedInventory.loan_price,14000,'changing supplier price does not alter approved loan price');
  sandbox.assetFields=Object.entries({...fieldValues,purchase_price:'10500',cost_method:'latest_purchase',cost_adjustment:'500'});
  run(`openAssetForm(state.data.inventory[0]);`);
  await sandbox.assetModal.actions[1].onClick();
- assert.equal(sandbox.savedInventory.buying_price,11000,'latest purchase method explicitly adds transport');
+ assert.equal(sandbox.savedReference.p_buying_price,11000,'manager can explicitly set valuation from buying price and transport');
  assert.equal(sandbox.savedInventory.loan_price,14000);
  sandbox.assetFields=Object.entries({...fieldValues,cost_method:'manual',buying_price:'10000'});
  run(`openAssetForm(state.data.inventory[0]);`);
  await sandbox.assetModal.actions[1].onClick();
- assert.equal(sandbox.savedInventory.buying_price,10000,'manual valuation remains independent');
- assert.equal(sandbox.savedInventory.purchase_price,11000);
+ assert.equal(sandbox.savedReference.p_buying_price,10000,'manual valuation remains independent');
+ assert.equal(sandbox.savedReference.p_purchase_price,11000);
  assert.equal(sandbox.savedInventory.loan_price,14000);
  run(`state.staff.app_role='inventory_officer';`);
+ const referenceCallsBefore=sandbox.referenceCallCount;
  sandbox.assetFields=Object.entries({...fieldValues,cost_method:'manual',buying_price:'10000',loan_price:'1',purchase_price:'11500'});
  run(`openAssetForm(state.data.inventory[0]);`);
+ assert.doesNotMatch(sandbox.assetModal.body,/Actual buying \/ wholesale|Stock valuation cost\/unit/);
  await sandbox.assetModal.actions[1].onClick();
- assert.equal(sandbox.savedInventory.loan_price,14000,'inventory staff cannot reprice a managed asset through the cost form');
+ assert.equal(sandbox.savedInventory.loan_price,undefined,'inventory staff cannot reprice a managed asset through the cost form');
+ assert.equal(sandbox.savedInventory.purchase_price,undefined);
+ assert.equal(sandbox.savedInventory.buying_price,undefined);
+ assert.equal(sandbox.referenceCallCount,referenceCallsBefore,'inventory staff cannot call the management price updater');
+ run(`state.view='inventory';pageInventory();`);
+ assert.doesNotMatch(page.innerHTML,/Actual buying\/wholesale price|Stock valuation cost\/unit|KES 11,000|KES 10,000/);
+ const procurementReport=JSON.parse(JSON.stringify(run(`buildReportRows('inventory')`)));
+ assert.deepEqual(Object.keys(procurementReport[0]),['Name','Category','Qty','LoanPricePerUnit','TotalLoanValue']);
+ run(`_purLines=[{asset_id:'',asset_name:'',isNew:false,quantity:2,cost_per_unit:1500,landed_adjustment:12,subtotal:3000,batch_no:''}];
+  purSelectAsset(0,'asset','Sofa',false);`);
+ assert.equal(run(`_purLines[0].cost_per_unit`),0,'asset selection never fetches confidential reference price');
+ assert.equal(run(`_purLines[0].landed_adjustment`),0,'asset selection does not fetch a costing adjustment');
  run(`state.staff.app_role='admin';`);
  run(`state.view='inventory';pageInventory();`);
- assert.match(page.innerHTML,/Purchase price\/unit/);
- assert.match(page.innerHTML,/Cost\/unit/);
+ assert.match(page.innerHTML,/Actual buying\/wholesale price/);
+ assert.match(page.innerHTML,/Stock valuation cost\/unit/);
  assert.match(page.innerHTML,/Loan price\/unit/);
- assert.match(page.innerHTML,/KES 11,500/);
+ assert.match(page.innerHTML,/KES 11,000/);
  assert.match(page.innerHTML,/KES 10,000/);
  assert.match(page.innerHTML,/KES 14,000/);
  const before=page.innerHTML;
@@ -116,7 +137,7 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
  assert.equal(page.innerHTML,before,'typing does not synchronously rebuild the entire page');
  [...timers.values()][0]();timers.clear();
  assert.match(page.innerHTML,/Sofa/);assert.doesNotMatch(page.innerHTML,/<b>Chair<\/b>/);
- assert.match(page.innerHTML,/KES 11,500/);
+ assert.match(page.innerHTML,/KES 11,000/);
  // The previous loan search rebuilt the entire repayment index after each pause.
  run(`state.view='loans';state._invSearch='';state._loanTab='active';state._loanSearch='';
   state.data.members=[{id:'member',full_name:'Jane Client',group_id:'group',status:'active'}];
@@ -158,7 +179,7 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
  assert.equal(sandbox.purchaseInsertCount,purchasesBefore,'unselected typed name creates no purchase');
  assert.match(sandbox.lastToast.message,/Select each listed asset/);
  // Choosing Add New makes the intent explicit and links the resulting asset to its line.
- run(`purSelectAsset(0,'','Laptop bag medium',0,true);
+ run(`purSelectAsset(0,'','Laptop bag medium',true);
   _purLines[0].cost_per_unit=1500;_purLines[0].landed_adjustment=40;
   _purLines[0].subtotal=18000;`);
  await run(`submitPurchase()`);
@@ -167,7 +188,7 @@ assert.throws(()=>run(`inventoryReceiptCost({buying_price:10000,stock:10},1,100,
  assert.equal(sandbox.savedLink.id,sandbox.savedLine[0].id);
  assert.equal(sandbox.savedLink.row.asset_id,'new-asset');
  assert.equal(run(`state.data.inventory[0].loan_price`),0,'new stock receives no automatic selling price');
- assert.equal(run(`state.data.inventory[0].purchase_price`),1500);
- assert.equal(run(`state.data.inventory[0].buying_price`),1540);
- console.log('Inventory cost separation, stable loan pricing and debounced name search passed.');
+ assert.equal(run(`state.data.inventory[0].purchase_price`),undefined,'purchase price remains management-only');
+ assert.equal(run(`state.data.inventory[0].buying_price`),undefined,'valuation cost remains management-only');
+ console.log('Inventory reference price separation, stock receipts and debounced name search passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
