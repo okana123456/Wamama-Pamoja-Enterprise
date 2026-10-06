@@ -15,6 +15,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  assert.equal(results[0].rows.length,2,'asset and supplier purchase are both visible');
  assert.equal(Number(results[1].rows[0].inferred_cost_before_receipt),1600);
  assert.equal(Number(results[1].rows[0].inferred_loan_price_before_receipt),1650.01);
+ const one=fs.readFileSync(path.join(__dirname,'../wamama-laptop-bag-one-result.sql'),'utf8')
+  .replace('b87d8c14-e6cc-43fe-bd96-629b0321a477','00000000-0000-0000-0000-000000000001');
+ const single=(await db.exec(one))[0].rows;
+ assert.equal(single.length,1,'one-result audit is easy to copy');
+ assert.equal(Number(single[0].supplier_price_unit),1500);
+ assert.equal(Number(single[0].safeguard_installed),0);
  await db.close();
  console.log('Laptop bag incident audit returns linked purchase and non-mutating price inference.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
