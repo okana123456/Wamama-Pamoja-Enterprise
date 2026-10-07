@@ -561,12 +561,16 @@ setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
 const APP_RELEASE='20261006-purchase-selection-and-update';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
+let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
   return !state.session || (['dashboard','reports','arrears','loans','inventory','purchases'].includes(state.view) &&
     !document.getElementById('modal-root')?.hasChildNodes() && !lsGet('queue',[]).length);
 }
 function applyAvailableAppUpdate(){
   if(!appUpdateAvailable || appUpdateReloading || !canApplyAppUpdate()) return false;
+  // A stale release marker must never trap the browser in a reload loop.
+  if(appUpdateTargetVersion && sessionStorage.getItem('pb_reload_attempted_for')===appUpdateTargetVersion) return false;
+  if(appUpdateTargetVersion) sessionStorage.setItem('pb_reload_attempted_for',appUpdateTargetVersion);
   sessionStorage.setItem('pb_restore_view',state.view||'dashboard');
   sessionStorage.setItem('pb_restore_ctx',JSON.stringify(state.viewCtx||null));
   appUpdateReloading=true;
@@ -575,7 +579,7 @@ function applyAvailableAppUpdate(){
 }
 async function checkAppRelease(){
   if(!navigator.onLine || document.visibilityState==='hidden') return;
-  if(appUpdateAvailable){applyAvailableAppUpdate();return;}
+  if(appUpdateAvailable && applyAvailableAppUpdate()) return;
   if(appUpdateRequest || Date.now()-appUpdateCheckAt<5*60*1000) return;
   appUpdateCheckAt=Date.now();
   appUpdateRequest=(async()=>{
@@ -585,8 +589,14 @@ async function checkAppRelease(){
       const response=await fetch('/release.json',{cache:'no-store',signal:controller.signal});
       if(!response.ok) return;
       const release=await response.json();
+      if(release.version===APP_RELEASE){
+        appUpdateAvailable=false;
+        appUpdateTargetVersion=null;
+        sessionStorage.removeItem('pb_reload_attempted_for');
+      }
       if(typeof release.version==='string' && release.version!==APP_RELEASE){
         appUpdateAvailable=true;
+        appUpdateTargetVersion=release.version;
         applyAvailableAppUpdate();
       }
     }catch{} // Connectivity failures do not discard an in-progress entry.
