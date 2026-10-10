@@ -559,7 +559,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261006-purchase-selection-and-update';
+const APP_RELEASE='20261010-repayment-rejection-clarity';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -2321,20 +2321,6 @@ async function rejectDuplicatePendingLoans(){
     render();
     toast(`${ids.length} duplicate loan${ids.length!==1?'s':''} rejected.`, 'success');
   },{ title:'Reject duplicate loans', danger:true });
-}
-async function rejectDuplicatePendingRepayments(){
-  const ids = findDuplicatePendingRepaymentIds(state.data.repayments||[]);
-  if(!ids.length) return toast('No duplicate pending repayments found.','warn');
-  confirmDialog(`Reject ${ids.length} duplicate pending repayment${ids.length!==1?'s':''}? The first matching repayment will be kept.`, async()=>{
-    if(!(await ensureFreshToken())) return;
-    const { error } = await sb.from('pb_repayments').update({ status:'rejected' }).in('id', ids);
-    if(error) return toast(error.message,'error');
-    state.data.repayments.filter(r=>ids.includes(r.id)).forEach(r=>r.status='rejected');
-    audit('bulk_reject_duplicate_repayments','pb_repayments',null,null,{ count:ids.length, ids });
-    state._repaymentApprovalsFreshAt=0;
-    render();
-    toast(`${ids.length} duplicate repayment${ids.length!==1?'s':''} rejected.`, 'success');
-  },{ title:'Reject duplicate repayments', danger:true });
 }
 function pageApprovals(){
   const d = state.data || {};
@@ -10352,6 +10338,15 @@ let _repCustomStart = '', _repCustomEnd = '';
 let _repGroupFilter = '';
 let _repOfficerFilter = '';
 let _repLedgerPage = 0;
+let _repLedgerStatusFilter = 'current';
+
+function isRepaymentHistoryRow(row){
+  return !!row?.voided_at || ['rejected','cancelled','voided'].includes(String(row?.status||'').toLowerCase());
+}
+function repaymentRejectionReason(row){
+  const reasons=[...String(row?.notes||'').matchAll(/(?:^|\n)Rejection reason:\s*([^\n]+)/gi)];
+  return reasons.length ? reasons[reasons.length-1][1].trim() : '';
+}
 
 function repDateRange(){
   const now = new Date();
@@ -10623,7 +10618,7 @@ function pageRepaymentApprovals(){
     <div class="page-head">
       <div>
         <h1>Repayment Approvals</h1>
-        ${duplicateIds.length > 0 ? `<div style="margin:8px 0 4px"><button class="btn btn-sm btn-outline" style="color:var(--danger);border-color:var(--danger)" onclick="rejectDuplicatePendingRepayments()">Reject duplicate repayments (${duplicateIds.length})</button></div>` : ''}
+        ${duplicateIds.length > 0 ? `<div class="muted" style="margin:8px 0 4px;font-size:12px">${duplicateIds.length} possible duplicate repayment${duplicateIds.length!==1?'s':''} flagged. Compare the payment records before rejecting any entry.</div>` : ''}
         <div class="desc">${pending.length} repayment${pending.length!==1?'s':''} pending approval · Grouped by group for easy review</div>
       </div>
       <div class="actions">
@@ -10666,7 +10661,7 @@ function pageRepaymentApprovals(){
               const rec  = state.data.staff.find(s=>s.id===r.recorded_by);
               const isDup = duplicateIds.includes(r.id);
               return `<tr>
-                <td><b>${mem?.full_name||'—'}</b></td>
+                <td><b>${mem?.full_name||'—'}</b>${isDup?'<div style="font-size:10px;color:var(--warning)">Possible duplicate · review individually</div>':''}</td>
                 <td style="font-size:12px;color:var(--text-muted)">${loan?.asset_name||'—'}</td>
                 <td>${fmtDate(r.meeting_date)}</td>
                 ${(()=>{
@@ -10723,7 +10718,7 @@ function repaymentCashReceived(repayment){
 
 function countsAsCashReceived(repayment){
   if(!repayment || repayment.voided_at || isScheduledPrepaymentRelease(repayment) ||
-    ['pending','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
+    ['pending','rejected','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
   const deposit=repaymentDepositRecord(repayment.id);
   if(deposit && ['refunded','cancelled','rejected'].includes(String(deposit.status||'').toLowerCase())) return false;
   return countsInBalance(repayment) || !!repaymentDepositRecord(repayment.id);
@@ -10827,17 +10822,33 @@ async function approveOneRepayment(id, btn){
 
 async function rejectOneRepayment(id, btn){
   const r = state.data.repayments.find(x=>x.id===id);
-  if(!r) return;
-  confirmDialog('Reject this repayment? It will be marked as rejected and will not count toward the loan balance.', async()=>{
-    if(!(await ensureFreshToken())) return;
-    const { error } = await sb.from('pb_repayments').update({ status:'rejected' }).eq('id', id);
-    if(error) return toast(error.message,'error');
-    r.status = 'rejected';
-    await audit('reject_repayment','pb_repayments',id,{status:'pending'},{status:'rejected',loan_id:r.loan_id,amount:r.amount});
-    state._repaymentApprovalsFreshAt=0;
-    refreshVisiblePage(pageRepaymentApprovals);
-    toast('Repayment rejected.','warn');
-  },{ title:'Reject Repayment', danger:true });
+  if(!r || r.status!=='pending') return toast('This repayment is no longer pending approval. Refresh the list.','warn');
+  const member=state.data.members.find(m=>m.id===r.member_id);
+  modal({
+    title:'Reject repayment',
+    body:`<div class="notice notice-warn" style="margin-bottom:12px">A rejected entry is kept for review but does not count toward collections or the loan balance.</div>
+      <div style="margin-bottom:12px"><b>${statementHtml(member?.full_name||'Member')}</b> · ${KES(r.amount)} · ${fmtDate(r.meeting_date)}</div>
+      <div class="field"><label>Why is this payment being rejected? *</label><textarea id="reject-repayment-reason" rows="3" placeholder="Example: The same cash payment was entered twice" required></textarea></div>`,
+    actions:[
+      {label:'Cancel',cls:'btn-outline',onClick:closeModal},
+      {label:'Reject repayment',cls:'btn-danger',onClick:async()=>{
+        const reason=String(document.getElementById('reject-repayment-reason')?.value||'').trim().replace(/\s+/g,' ');
+        if(reason.length<5) return toast('Enter a clear reason for rejecting this repayment.','error');
+        if(!(await ensureFreshToken())) return;
+        const notes=[String(r.notes||'').trim(),`Rejection reason: ${reason}`].filter(Boolean).join('\n');
+        const {data,error}=await sb.from('pb_repayments')
+          .update({status:'rejected',notes}).eq('id',id).eq('status','pending').select().maybeSingle();
+        if(error) return toast(error.message,'error');
+        if(!data) return toast('This repayment changed while you were reviewing it. Refresh the list.','warn');
+        Object.assign(r,data);
+        await audit('reject_repayment','pb_repayments',id,{status:'pending'},{status:'rejected',loan_id:r.loan_id,amount:r.amount,reason});
+        state._repaymentApprovalsFreshAt=0;
+        closeModal();
+        refreshVisiblePage(pageRepaymentApprovals);
+        toast('Repayment rejected. The reason is saved in its history.','warn');
+      }}
+    ]
+  });
 }
 
 async function approveGroupRepayments(groupName){
@@ -11080,6 +11091,10 @@ function pageRepayments(){
     return true;
   });
 
+  const historyCount=filtered.filter(r=>isClientRepayment(r) && isRepaymentHistoryRow(r)).length;
+  if(_repLedgerStatusFilter==='current') filtered=filtered.filter(r=>!isRepaymentHistoryRow(r));
+  if(_repLedgerStatusFilter==='history') filtered=filtered.filter(isRepaymentHistoryRow);
+
   // Separate client repayments from auto-deducted setup fees
   const clientReps = filtered.filter(r => isClientRepayment(r));
   const feeReps    = filtered.filter(r => !isClientRepayment(r));
@@ -11107,7 +11122,7 @@ function pageRepayments(){
     <div class="page-head">
       <div>
         <h1>Repayments Register</h1>
-        <div class="desc">${clientReps.length} entries · Total ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}</div>
+        <div class="desc">${clientReps.length} ${_repLedgerStatusFilter==='history'?'history':'repayment'} entries · ${_repLedgerStatusFilter==='history'?'Excluded from collection totals and loan balances':`Approved collections ${KES(totalAmt)} · Principal ${KES(totalPrincipal)} · Interest ${KES(totalInterest)}`}</div>
       </div>
       <div class="actions" style="gap:8px">
         <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Pre-loan Product Deposit</button>
@@ -11136,6 +11151,11 @@ function pageRepayments(){
       ${(_repGroupFilter||_repOfficerFilter)?`<button class="btn btn-sm btn-ghost" onclick="_repGroupFilter='';_repOfficerFilter='';pageRepayments()">✕ Clear filters</button>`:''}
     </div>
 
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
+      ${[['current','Current payments'],['history',`Rejected / voided history (${historyCount})`],['all','All records']].map(([key,label])=>`<button class="btn btn-sm ${_repLedgerStatusFilter===key?'btn-primary':'btn-outline'}" onclick="_repLedgerStatusFilter='${key}';_repLedgerPage=0;pageRepayments()">${label}</button>`).join('')}
+    </div>
+    <p class="muted" style="font-size:12px;margin:0 0 14px">Rejected, cancelled and voided entries are kept for review but do not count toward the loan balance or approved collections. “Edited” means the amount was changed; it does not explain why an entry was rejected.</p>
+
     <div class="table-wrap">
       <table class="tbl">
         <thead><tr>
@@ -11151,19 +11171,22 @@ function pageRepayments(){
             const rec = state.data.staff.find(x=>x.id===r.recorded_by);
             const isPending = r.status === 'pending';
             const isVoided = !!r.voided_at;
+            const isHistorical = isRepaymentHistoryRow(r);
+            const isRejected = String(r.status||'').toLowerCase()==='rejected';
+            const rejectionReason = repaymentRejectionReason(r);
             const isFee = !isClientRepayment(r);
             const heldDeposit=isHeldPrepaymentSource(r);
             const deposit=heldDeposit?repaymentDepositRecord(r.id):null;
-            return `<tr${isVoided ? ' style="opacity:.65;background:var(--surface-2)"' : isPending ? ' style="background:var(--warning-50)"' : heldDeposit ? ' style="background:#fff8e1"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
+            return `<tr${isHistorical ? ' style="background:var(--surface-2)"' : isPending ? ' style="background:var(--warning-50)"' : heldDeposit ? ' style="background:#fff8e1"' : isFee ? ' style="background:var(--surface-2)"' : ''}>
               <td>${fmtDate(r.meeting_date)}</td>
               <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${isFee?`<span style="color:var(--warning);font-size:10px">${r.notes}</span>`:mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td style="font-size:12px">${ln?.asset_name||'—'}</td>
-              <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${repaymentDepositAmount(r)>0?`<div style="font-size:10px;color:var(--text-muted)">${KES(r.amount)} applied · ${KES(repaymentDepositAmount(r))} to loan deposit</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px" title="${r.edit_notes}">✏ edited</div>`:''}
+              <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${isHistorical?'<div class="muted" style="font-size:10px">Historical amount · not counted</div>':''}${repaymentDepositAmount(r)>0?`<div style="font-size:10px;color:var(--text-muted)">${KES(r.amount)} applied · ${KES(repaymentDepositAmount(r))} to loan deposit</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px;max-width:240px;overflow-wrap:anywhere">Edit note: ${statementHtml(r.edit_notes)}</div>`:''}
               </td>
               <td class="num">${KES(repaymentAppliedPrincipal(r))}</td>
               <td class="num" style="color:var(--warning)">${KES(repaymentAppliedInterest(r))}</td>
-              <td>${isVoided ? `<span class="badge b-grey" title="${statementHtml(r.void_reason||'')}">Voided</span>` : isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${String(r.status||'Excluded')}</span>`}</td>
+              <td>${isVoided ? `<span class="badge b-grey">Voided</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${statementHtml(r.void_reason||'Reason not recorded')}</div>` : isRejected ? `<span class="badge b-grey">Rejected</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${rejectionReason?`Reason: ${statementHtml(rejectionReason)}`:'Rejection reason not recorded'}</div>` : isHistorical ? `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>` : isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
               <td>${ln?`<button class="btn btn-outline btn-sm" onclick="openWamamaRepaymentStatement('${ln.id}')">Statement</button>`:'&mdash;'}</td>
@@ -11388,6 +11411,32 @@ function openExcessToLoan(id){
   });
 }
 
+function openRepaymentEntryDetails(id){
+  const rep=state.data.repayments.find(row=>row.id===id);
+  if(!rep) return toast('Repayment entry not found.','error');
+  const member=state.data.members.find(row=>row.id===rep.member_id);
+  const loan=state.data.loans.find(row=>row.id===rep.loan_id);
+  const recorder=state.data.staff.find(row=>row.id===rep.recorded_by);
+  const excluded=isRepaymentHistoryRow(rep);
+  const reason=repaymentRejectionReason(rep);
+  modal({
+    title:'Repayment entry details',
+    body:`<div class="summary-table"><table style="width:100%"><tbody>
+      <tr><td>Member</td><td>${statementHtml(member?.full_name||'—')}</td></tr>
+      <tr><td>Loan</td><td>${statementHtml(loan?.asset_name||'—')}</td></tr>
+      <tr><td>Date</td><td>${fmtDate(rep.meeting_date)}</td></tr>
+      <tr><td>Recorded amount</td><td>${KES(repaymentCashReceived(rep))}</td></tr>
+      <tr><td>Status</td><td>${statementHtml(rep.voided_at?'voided':rep.status||'—')}</td></tr>
+      <tr><td>Recorded by</td><td>${statementHtml(recorder?.full_name||'—')}</td></tr>
+    </tbody></table></div>
+    ${excluded?'<div class="notice notice-warn" style="margin-top:12px">This historical entry is not included in approved collections or the loan balance.</div>':''}
+    ${rep.status==='rejected'?`<p><b>Rejection reason:</b> ${statementHtml(reason||'Not recorded for this entry')}</p>`:''}
+    ${rep.voided_at?`<p><b>Void reason:</b> ${statementHtml(rep.void_reason||'Not recorded')}</p>`:''}
+    ${rep.edit_notes?`<p><b>Why it was edited:</b> ${statementHtml(rep.edit_notes)}</p>`:''}`,
+    actions:[{label:'Close',cls:'btn-outline',onClick:closeModal}]
+  });
+}
+
 function repRowActions(ev, id){
   const rep = state.data.repayments.find(x=>x.id===id);
   const canApproveRep = can('approve_repayment');
@@ -11395,9 +11444,9 @@ function repRowActions(ev, id){
   const appRole=state.staff?.app_role||state.staff?.role||'';
   const canVoid=['admin','ceo'].includes(appRole) || state.staff?.role==='admin';
   const protectedDeposit=repaymentDepositRecord(id);
-  const items = rep?.voided_at ? [] : [
-    { label: '✏ Edit entry', onClick: () => openEditRepayment(id) }
-  ];
+  const historical=isRepaymentHistoryRow(rep);
+  const items = [{label:'View entry details',onClick:()=>openRepaymentEntryDetails(id)}];
+  if(canEdit && rep && !historical) items.push({label:'✏ Edit entry',onClick:()=>openEditRepayment(id)});
   if(canApproveRep && rep && rep.status === 'pending'){
     items.push('sep');
     items.push({ label: '✓ Approve', onClick: async () => {
@@ -11414,10 +11463,10 @@ function repRowActions(ev, id){
       toast(deposit?`Payment approved. ${KES(deposit.excess_amount)} was placed in the loan deposit account for future due dates.`:closed ? 'Repayment approved and loan closed.' : 'Repayment entry approved.', 'success');
     }});
   }
-  if(canVoid && rep && !rep.voided_at){
+  if(canVoid && rep && !historical){
     items.push('sep');
     items.push({ label: 'Void incorrect repayment', danger:true, onClick:()=>openVoidRepayment(id) });
-  } else if(canEdit && !protectedDeposit && rep && !rep.voided_at){
+  } else if(canEdit && !protectedDeposit && rep && !historical){
     items.push('sep');
     items.push({ label: '🗑 Delete entry', danger: true, onClick: () => confirmDialog(
       'Delete this repayment entry? This cannot be undone.',
@@ -11484,6 +11533,9 @@ function exportRepaymentsFiltered(){
     if(!inRange(r)) return false;
     if(_repGroupFilter && r.group_id !== _repGroupFilter) return false;
     if(_repOfficerFilter && r.recorded_by !== _repOfficerFilter) return false;
+    if(_repLedgerStatusFilter==='current' && isRepaymentHistoryRow(r)) return false;
+    if(_repLedgerStatusFilter==='history' && !isRepaymentHistoryRow(r)) return false;
+    if(state._repShowFees ? isClientRepayment(r) : !isClientRepayment(r)) return false;
     return true;
   });
   if(!filtered.length){ toast('No repayments to export for the current filters.','warn'); return; }
@@ -11497,11 +11549,15 @@ function exportRepaymentsFiltered(){
       Member: mem?.full_name||'—',
       Group: grp?.name||'—',
       'Loan Asset': ln?.asset_name||'—',
-      'Payment Received': repaymentCashReceived(r),
-      'Applied to Loan': repaymentAppliedAmount(r),
-      'Loan Deposit': repaymentDepositAmount(r),
-      Principal: repaymentAppliedPrincipal(r),
-      Interest: repaymentAppliedInterest(r),
+      Status: r.voided_at?'voided':r.status,
+      'Recorded Amount': repaymentCashReceived(r),
+      'Included in Collection Totals': countsAsCashReceived(r)?repaymentCashReceived(r):0,
+      'Applied to Loan': countsInBalance(r)?repaymentAppliedAmount(r):0,
+      'Loan Deposit': countsAsCashReceived(r)?repaymentDepositAmount(r):0,
+      Principal: countsInBalance(r)?repaymentAppliedPrincipal(r):0,
+      Interest: countsInBalance(r)?repaymentAppliedInterest(r):0,
+      'Edit Note': r.edit_notes||'',
+      'Rejection Reason': repaymentRejectionReason(r),
       'Recorded By': rec?.full_name||'—'
     };
   });
