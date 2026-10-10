@@ -73,6 +73,12 @@ const rules=require('../financial-rules.js');
   assert.equal((await cashTotals(owner)).rows[0].amount,400,'original cash counted once; generated release excluded');
   assert.equal((await cashTotals(owner)).rows[0].interest,20,'release is not new interest collected');
   assert.equal((await cashTotals(outsider)).rows.length,0,'cash tenant isolation');
+  await insert('pb_repayments',{id:id(45),business_id:biz,loan_id:loan.id,group_id:id(10),recorded_by:owner,
+    status:'rejected',amount:620,principal:0,interest:0,meeting_date:start});
+  await insert('pb_excess_payments',{id:'held-deposit',business_id:biz,original_repayment_id:id(45),
+    original_payment_amount:620,source:'scheduled_prepayment',status:'pending'});
+  assert.equal((await cashTotals(owner)).rows[0].amount,1020,'fully held cash counts as received without reducing the loan');
+  assert.equal((await snapshot(owner)).rows.find(row=>row.id===loan.id).paid,150,'held source stays outside loan paid');
   // A transferred-away or deleted loan leaves the cached officer scope even in a delta response.
   await db.query('update pb_groups set officer_id=$1 where id=$2',[old,id(10)]);
   assert.equal((await snapshot(owner,null,new Date(Date.now()+60000).toISOString())).visibleLoanIds.length,0);

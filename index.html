@@ -559,7 +559,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261010-repayment-rejection-clarity';
+const APP_RELEASE='20261011-held-prepayments-clarity';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -4507,11 +4507,11 @@ function pageMemberProfile(){
                 return `<tr${isVoided?' style="opacity:.65;background:var(--surface-2)"':isPending?' style="background:var(--warning-50)"':''}>
                   <td><b>${loan?loanDisplayCode(loan):'—'}</b><div class="muted" style="font-size:11px">${loan?.asset_name||''}</div></td>
                   <td>${fmtDate(r.meeting_date)}</td>
-                  <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${repaymentDepositAmount(r)>0?`<div class="muted" style="font-size:10px">${KES(repaymentAppliedAmount(r))} applied · ${KES(repaymentDepositAmount(r))} deposit</div>`:''}${r.edit_notes?'<span title="Edited" style="margin-left:4px;font-size:10px;color:var(--warning);cursor:help">✎</span>':''}</td>
+                  <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${repaymentDepositAmount(r)>0?`<div class="muted" style="font-size:10px">${KES(repaymentAppliedAmount(r))} applied · ${KES(repaymentDepositAmount(r))} initially held</div>`:''}${r.edit_notes&&!isHeldPrepaymentSource(r)?'<span title="Edited" style="margin-left:4px;font-size:10px;color:var(--warning);cursor:help">✎</span>':''}</td>
                   <td class="num">${KES(repaymentAppliedPrincipal(r))}</td>
                   <td class="num">${KES(repaymentAppliedInterest(r))}</td>
                   <td class="num">${balanceAfterByRepayment.has(String(r.id)) ? KES(balanceAfterByRepayment.get(String(r.id))) : '—'}</td>
-                  <td>${isVoided?'<span class="badge b-grey">Voided</span>':isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':countsAsCashReceived(r)?'<span class="badge b-green">Received</span>':`<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
+                  <td>${isVoided?'<span class="badge b-grey">Voided</span>':isPending?'<span class="badge b-yellow">Pending Admin Approval</span>':isHeldPrepaymentSource(r)?'<span class="badge b-yellow">Held as Loan Deposit</span>':countsAsCashReceived(r)?'<span class="badge b-green">Received</span>':`<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
                   <td>${officer?.full_name||'—'}</td>
                   ${canEdit?`<td><button class="act-btn" onclick="mpRepaymentMenu(event,'${r.id}',${isPending})">···</button></td>`:''}
                 </tr>`;
@@ -10341,7 +10341,9 @@ let _repLedgerPage = 0;
 let _repLedgerStatusFilter = 'current';
 
 function isRepaymentHistoryRow(row){
-  return !!row?.voided_at || ['rejected','cancelled','voided'].includes(String(row?.status||'').toLowerCase());
+  if(row?.voided_at) return true;
+  if(isHeldPrepaymentSource(row)) return false;
+  return ['rejected','cancelled','voided'].includes(String(row?.status||'').toLowerCase());
 }
 function repaymentRejectionReason(row){
   const reasons=[...String(row?.notes||'').matchAll(/(?:^|\n)Rejection reason:\s*([^\n]+)/gi)];
@@ -10718,10 +10720,12 @@ function repaymentCashReceived(repayment){
 
 function countsAsCashReceived(repayment){
   if(!repayment || repayment.voided_at || isScheduledPrepaymentRelease(repayment) ||
-    ['pending','rejected','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
+    ['pending','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
+  const heldSource=isHeldPrepaymentSource(repayment);
+  if(String(repayment.status||'').toLowerCase()==='rejected' && !heldSource) return false;
   const deposit=repaymentDepositRecord(repayment.id);
   if(deposit && ['refunded','cancelled','rejected'].includes(String(deposit.status||'').toLowerCase())) return false;
-  return countsInBalance(repayment) || !!repaymentDepositRecord(repayment.id);
+  return countsInBalance(repayment) || heldSource || !!deposit;
 }
 
 function isScheduledPrepaymentRelease(repayment){
@@ -10729,11 +10733,11 @@ function isScheduledPrepaymentRelease(repayment){
 }
 function repaymentDepositAmount(repayment){
   const deposit=repaymentDepositRecord(repayment?.id);
-  return Math.max(0,Number(deposit?.excess_amount||0));
+  return Math.max(0,Number(deposit?.excess_amount ?? (isHeldPrepaymentSource(repayment)?repayment.amount:0) ?? 0));
 }
 
 function repaymentAppliedAmount(repayment){
-  if(!repayment || repayment.voided_at) return 0;
+  if(!repayment || repayment.voided_at || isHeldPrepaymentSource(repayment) || isRepaymentHistoryRow(repayment)) return 0;
   const deposit=repaymentDepositRecord(repayment.id);
   return Math.max(0,Number(deposit?.amount_applied_to_loan ?? repayment.amount ?? 0));
 }
@@ -10747,8 +10751,13 @@ function repaymentAppliedInterest(repayment){
 }
 
 function isHeldPrepaymentSource(repayment){
-  const deposit=repaymentDepositRecord(repayment?.id);
-  return !!deposit && Number(deposit.amount_applied_to_loan||0)<=0.005;
+  if(!repayment || repayment.voided_at || String(repayment.status||'').toLowerCase()!=='rejected') return false;
+  if(!String(repayment.edit_notes||'').includes('Full amount held in loan prepayment account until scheduled instalments become due.')) return false;
+  if(repaymentRejectionReason(repayment)) return false;
+  // Officers cannot read the protected deposit ledger. The database trigger
+  // writes this marker and the deposit atomically, so the marker is their view.
+  const deposit=repaymentDepositRecord(repayment.id);
+  return !deposit || !['refunded','cancelled','rejected'].includes(String(deposit.status||'').toLowerCase());
 }
 
 async function refreshPendingRepaymentApprovals(){
@@ -11154,7 +11163,7 @@ function pageRepayments(){
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
       ${[['current','Current payments'],['history',`Rejected / voided history (${historyCount})`],['all','All records']].map(([key,label])=>`<button class="btn btn-sm ${_repLedgerStatusFilter===key?'btn-primary':'btn-outline'}" onclick="_repLedgerStatusFilter='${key}';_repLedgerPage=0;pageRepayments()">${label}</button>`).join('')}
     </div>
-    <p class="muted" style="font-size:12px;margin:0 0 14px">Rejected, cancelled and voided entries are kept for review but do not count toward the loan balance or approved collections. “Edited” means the amount was changed; it does not explain why an entry was rejected.</p>
+    <p class="muted" style="font-size:12px;margin:0 0 14px">Genuine rejections and voids are kept for review and excluded from collections. Payments held as loan deposits count as cash received; they reduce the loan balance only when an instalment becomes due.</p>
 
     <div class="table-wrap">
       <table class="tbl">
@@ -11182,11 +11191,11 @@ function pageRepayments(){
               <td><b>${mem?.full_name||'—'}</b><div class="muted" style="font-size:11px">${isFee?`<span style="color:var(--warning);font-size:10px">${r.notes}</span>`:mem?.national_id||''}</div></td>
               <td>${grp?.name||'—'}</td>
               <td style="font-size:12px">${ln?.asset_name||'—'}</td>
-              <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${isHistorical?'<div class="muted" style="font-size:10px">Historical amount · not counted</div>':''}${repaymentDepositAmount(r)>0?`<div style="font-size:10px;color:var(--text-muted)">${KES(r.amount)} applied · ${KES(repaymentDepositAmount(r))} to loan deposit</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px;max-width:240px;overflow-wrap:anywhere">Edit note: ${statementHtml(r.edit_notes)}</div>`:''}
+              <td class="num"><b>${KES(repaymentCashReceived(r))}</b>${isHistorical?'<div class="muted" style="font-size:10px">Historical amount · not counted</div>':''}${repaymentDepositAmount(r)>0?`<div style="font-size:10px;color:var(--text-muted)">${KES(repaymentAppliedAmount(r))} applied · ${KES(repaymentDepositAmount(r))} initially held in loan deposit</div>`:''}${r.edit_notes?`<div class="muted" style="font-size:10px;max-width:240px;overflow-wrap:anywhere">${heldDeposit?'Deposit note':'Edit note'}: ${statementHtml(r.edit_notes)}</div>`:''}
               </td>
               <td class="num">${KES(repaymentAppliedPrincipal(r))}</td>
               <td class="num" style="color:var(--warning)">${KES(repaymentAppliedInterest(r))}</td>
-              <td>${isVoided ? `<span class="badge b-grey">Voided</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${statementHtml(r.void_reason||'Reason not recorded')}</div>` : isRejected ? `<span class="badge b-grey">Rejected</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${rejectionReason?`Reason: ${statementHtml(rejectionReason)}`:'Rejection reason not recorded'}</div>` : isHistorical ? `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>` : isPending ? '<span class="badge b-yellow">Pending Approval</span>' : heldDeposit ? '<span class="badge b-yellow">Moved to Loan Deposit</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
+              <td>${isVoided ? `<span class="badge b-grey">Voided</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${statementHtml(r.void_reason||'Reason not recorded')}</div>` : heldDeposit ? '<span class="badge b-yellow">Held as Loan Deposit</span>' : isRejected ? `<span class="badge b-grey">Rejected</span><div class="muted" style="font-size:10px;max-width:220px;overflow-wrap:anywhere">${rejectionReason?`Reason: ${statementHtml(rejectionReason)}`:'Rejection reason not recorded'}</div>` : isHistorical ? `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>` : isPending ? '<span class="badge b-yellow">Pending Approval</span>' : isFee ? '<span class="badge b-yellow">Upfront Fee</span>' : countsInBalance(r) ? '<span class="badge b-green">Approved</span>' : `<span class="badge b-grey">${statementHtml(r.status||'Excluded')}</span>`}</td>
               <td style="font-size:12px;color:var(--text-muted)">${rec?.full_name||'—'}</td>
               <td><button class="act-btn" onclick="repRowActions(event,'${r.id}')">···</button></td>
               <td>${ln?`<button class="btn btn-outline btn-sm" onclick="openWamamaRepaymentStatement('${ln.id}')">Statement</button>`:'&mdash;'}</td>
@@ -11426,13 +11435,13 @@ function openRepaymentEntryDetails(id){
       <tr><td>Loan</td><td>${statementHtml(loan?.asset_name||'—')}</td></tr>
       <tr><td>Date</td><td>${fmtDate(rep.meeting_date)}</td></tr>
       <tr><td>Recorded amount</td><td>${KES(repaymentCashReceived(rep))}</td></tr>
-      <tr><td>Status</td><td>${statementHtml(rep.voided_at?'voided':rep.status||'—')}</td></tr>
+      <tr><td>Status</td><td>${statementHtml(rep.voided_at?'voided':isHeldPrepaymentSource(rep)?'Held as loan deposit':rep.status||'—')}</td></tr>
       <tr><td>Recorded by</td><td>${statementHtml(recorder?.full_name||'—')}</td></tr>
     </tbody></table></div>
     ${excluded?'<div class="notice notice-warn" style="margin-top:12px">This historical entry is not included in approved collections or the loan balance.</div>':''}
-    ${rep.status==='rejected'?`<p><b>Rejection reason:</b> ${statementHtml(reason||'Not recorded for this entry')}</p>`:''}
+    ${rep.status==='rejected'&&!isHeldPrepaymentSource(rep)?`<p><b>Rejection reason:</b> ${statementHtml(reason||'Not recorded for this entry')}</p>`:''}
     ${rep.voided_at?`<p><b>Void reason:</b> ${statementHtml(rep.void_reason||'Not recorded')}</p>`:''}
-    ${rep.edit_notes?`<p><b>Why it was edited:</b> ${statementHtml(rep.edit_notes)}</p>`:''}`,
+    ${rep.edit_notes?`<p><b>${isHeldPrepaymentSource(rep)?'Deposit note':'Why it was edited'}:</b> ${statementHtml(rep.edit_notes)}</p>`:''}`,
     actions:[{label:'Close',cls:'btn-outline',onClick:closeModal}]
   });
 }
@@ -11446,7 +11455,7 @@ function repRowActions(ev, id){
   const protectedDeposit=repaymentDepositRecord(id);
   const historical=isRepaymentHistoryRow(rep);
   const items = [{label:'View entry details',onClick:()=>openRepaymentEntryDetails(id)}];
-  if(canEdit && rep && !historical) items.push({label:'✏ Edit entry',onClick:()=>openEditRepayment(id)});
+  if(canEdit && rep && !historical && !isHeldPrepaymentSource(rep)) items.push({label:'✏ Edit entry',onClick:()=>openEditRepayment(id)});
   if(canApproveRep && rep && rep.status === 'pending'){
     items.push('sep');
     items.push({ label: '✓ Approve', onClick: async () => {
@@ -11466,7 +11475,7 @@ function repRowActions(ev, id){
   if(canVoid && rep && !historical){
     items.push('sep');
     items.push({ label: 'Void incorrect repayment', danger:true, onClick:()=>openVoidRepayment(id) });
-  } else if(canEdit && !protectedDeposit && rep && !historical){
+  } else if(canEdit && !protectedDeposit && rep && !historical && !isHeldPrepaymentSource(rep)){
     items.push('sep');
     items.push({ label: '🗑 Delete entry', danger: true, onClick: () => confirmDialog(
       'Delete this repayment entry? This cannot be undone.',
@@ -11549,15 +11558,15 @@ function exportRepaymentsFiltered(){
       Member: mem?.full_name||'—',
       Group: grp?.name||'—',
       'Loan Asset': ln?.asset_name||'—',
-      Status: r.voided_at?'voided':r.status,
+      Status: r.voided_at?'voided':isHeldPrepaymentSource(r)?'Held as loan deposit':r.status,
       'Recorded Amount': repaymentCashReceived(r),
       'Included in Collection Totals': countsAsCashReceived(r)?repaymentCashReceived(r):0,
       'Applied to Loan': countsInBalance(r)?repaymentAppliedAmount(r):0,
-      'Loan Deposit': countsAsCashReceived(r)?repaymentDepositAmount(r):0,
+      'Initially Held in Loan Deposit': countsAsCashReceived(r)?repaymentDepositAmount(r):0,
       Principal: countsInBalance(r)?repaymentAppliedPrincipal(r):0,
       Interest: countsInBalance(r)?repaymentAppliedInterest(r):0,
       'Edit Note': r.edit_notes||'',
-      'Rejection Reason': repaymentRejectionReason(r),
+      'Rejection Reason': isHeldPrepaymentSource(r)?'':repaymentRejectionReason(r),
       'Recorded By': rec?.full_name||'—'
     };
   });

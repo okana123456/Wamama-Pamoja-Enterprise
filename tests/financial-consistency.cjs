@@ -47,6 +47,35 @@ run(`state.data.excessPayments=[{id:'deposit',original_repayment_id:'cash',sourc
 assert.equal(run(`repaymentCashReceived({id:'cash',amount:100,status:'approved'})`),400);
 assert.equal(run(`countsAsCashReceived({id:'release',amount:100,status:'approved',notes:'Scheduled prepayment release: deposit'})`),false);
 assert.equal(run(`loanFinancialMetrics({...state.data.loans[0],id:'release-loan'},'2026-09-25').paid`),0);
+const held={id:'held-cash',loan_id:'loan-a',meeting_date:'2026-09-17',amount:620,status:'rejected',
+  edit_notes:'Full amount held in loan prepayment account until scheduled instalments become due.'};
+sandbox.held=held;
+run(`state.data.excessPayments=[{id:'held-deposit',original_repayment_id:'held-cash',source:'scheduled_prepayment',
+  status:'pending',original_payment_amount:620,amount_applied_to_loan:0,excess_amount:620}];`);
+assert.equal(run('isHeldPrepaymentSource(held)'),true);
+assert.equal(run('isRepaymentHistoryRow(held)'),false);
+assert.equal(run('countsAsCashReceived(held)'),true);
+assert.equal(run('repaymentCashReceived(held)'),620);
+assert.equal(run('repaymentAppliedAmount(held)'),0);
+assert.equal(run('repaymentDepositAmount(held)'),620);
+assert.equal(rules.metrics(loan,[held],'2026-09-25').paid,0,'held cash is not yet applied to the loan');
+run('state.data.excessPayments=[];'); // Officers cannot read deposit rows.
+assert.equal(run('countsAsCashReceived(held)'),true,'officer still sees the cash received');
+assert.equal(run('repaymentDepositAmount(held)'),620,'officer sees the held amount');
+assert.equal(run("countsAsCashReceived({...held,notes:'Rejection reason: Entered twice'})"),false);
+assert.equal(run("countsAsCashReceived({...held,edit_notes:''})"),false);
+assert.equal(run("countsAsCashReceived({...held,voided_at:'2026-09-18'})"),false);
+run(`state.data.excessPayments=[{id:'held-deposit',original_repayment_id:'held-cash',source:'scheduled_prepayment',
+  status:'refunded',original_payment_amount:620,amount_applied_to_loan:0,excess_amount:620}];`);
+assert.equal(run('countsAsCashReceived(held)'),false,'refunded deposit is excluded');
+run('state.data.excessPayments=[];');
+run(`state.data.repayments=[held];state.data.members=[{id:'member',full_name:'Test Member',group_id:'group-new'}];
+  state.data.groups=[{id:'group-new',name:'Test Group',officer_id:'owner-new'}];
+  held.member_id='member';held.group_id='group-new';held.recorded_by='owner-new';
+  _repDateFilter='custom';_repCustomStart='2026-09-17';_repCustomEnd='2026-09-17';
+  _repLedgerStatusFilter='current';pageRepayments();`);
+assert.match(node.innerHTML,/Held as Loan Deposit/,'held payment appears in the current register');
+assert.doesNotMatch(node.innerHTML,/Rejection reason not recorded/,'held payment is not called a rejection');
 
 // Legacy loan totals can have fractional cents. The portfolio must sum the
 // same rounded loan balances shown in management reports and the SQL audit.
