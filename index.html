@@ -559,7 +559,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261011-held-prepayments-clarity';
+const APP_RELEASE='20261012-early-loan-closure';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1398,14 +1398,24 @@ function releaseDuePrepaymentsInBackground(){
   const epoch=state._accountEpoch;
   setTimeout(async()=>{
     if(epoch!==state._accountEpoch) return;
-    const {error}=await sb.rpc('pb_release_due_prepayments',{
-      p_loan_ids:null,
-      p_limit:10
-    });
-    if(error && !/could not find the function|does not exist/i.test(error.message||'')){
-      console.warn('Could not release due loan prepayments',error);
+    let releasedTotal=0;
+    // The database selects only loans with due instalments. Continue until
+    // every eligible batch has been processed, rather than stopping at ten.
+    for(let batch=0;batch<30;batch++){
+      if(epoch!==state._accountEpoch) return;
+      const {data,error}=await sb.rpc('pb_release_due_prepayments',{
+        p_loan_ids:null,
+        p_limit:25
+      });
+      if(error){
+        console.warn('Could not release due loan prepayments',error);
+        break;
+      }
+      const released=Number(data||0);
+      releasedTotal+=released;
+      if(!released) break;
     }
-    if(!error) scheduleFinancialSnapshotRefresh();
+    if(releasedTotal>0 && epoch===state._accountEpoch) scheduleFinancialSnapshotRefresh();
   },1800);
 }
 
@@ -4586,10 +4596,17 @@ function loanArrearsAtDate(loan, cutoff){
   return loanFinancialMetrics(loan,cutoff).arrears;
 }
 function loanOverlapsWeek(loan,start,end){
-  if(['pending','rejected','cancelled'].includes(String(loan.status||'').toLowerCase())) return false;
+  const status=String(loan.status||'').toLowerCase();
+  if(['pending','rejected','cancelled'].includes(status)) return false;
   const loanStart=String(loan.start_date||'').slice(0,10);
-  const loanEnd=String(loan.expected_end_date||'2999-12-31').slice(0,10);
-  return !!loanStart && loanStart<=end && loanEnd>=start;
+  if(!loanStart || loanStart>end) return false;
+  const cutoff=end<collectionTodayISO()?end:collectionTodayISO();
+  // The field sheet lists balances still being serviced, not every product
+  // ever issued. A settled loan stays in the client's loan history.
+  if(loanFinancialMetrics(loan,cutoff).outstandingPI<=0.01) return false;
+  if(status==='completed' && cutoff===collectionTodayISO()) return false;
+  // A loan still owing after its scheduled end date remains collectable.
+  return true;
 }
 function loanExpectedWithinWeek(loan,start,end){
   const before=addDateDays(start,-1);
@@ -5758,6 +5775,48 @@ function openCancelUnusedLoan(loan){
       }}]
   });
 }
+function openClosePaidLoanEarly(loan){
+  if(!['admin','ceo'].includes(currentStaffRole()) || loan.status!=='active') return;
+  const member=state.data.members.find(m=>String(m.id)===String(loan.member_id));
+  let processing=false;
+  modal({title:'Close paid loan early',body:`
+    <div class="notice notice-info"><b>${statementHtml(member?.full_name||'Client')}</b><br>${statementHtml(loan.asset_name||'Loan')} · ${KES(loan.total_payable)} total payable</div>
+    <p>The system will check this loan's approved repayments and any unused deposit paid on this same loan. It will close the loan only if they cover the full balance. Any unused deposit remains in the client's loan-deposit account.</p>
+    <p>The loan and its repayment history will remain in the client profile.</p>`,
+    actions:[{label:'Back',cls:'btn-outline',onClick:()=>{if(!processing) closeModal();}},
+      {label:'Check and close if paid',cls:'btn-primary',onClick:async()=>{
+        if(processing) return;
+        processing=true;
+        const staffId=state.staff?.id,epoch=state._accountEpoch;
+        try{
+          if(!(await ensureFreshToken())) return;
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          const {data,error}=await sb.rpc('pb_close_paid_loan_early',{p_loan_id:String(loan.id)});
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          if(error){
+            const missing=/could not find the function|does not exist/i.test(error.message||'');
+            return toast(missing?'The early-close option needs its database update. Please contact your administrator.':error.message,'error');
+          }
+          if(data?.status==='insufficient'){
+            return toast(`This loan still needs ${KES(data.cash_still_needed)}. Its unused loan deposit is ${KES(data.available_deposit)}. No change was made.`,'warn');
+          }
+          if(!data?.success || data.status!=='completed' || String(data.loan_id)!==String(loan.id))
+            return toast('Could not confirm the loan closure. Refresh and check this loan.','error');
+          loan.status='completed';
+          closeModal();
+          await refreshExcessRelatedData({loanIds:[String(loan.id)],memberIds:[String(loan.member_id)]});
+          await refreshFinancialSnapshot([String(loan.id)]);
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          await persistPartialFinancialCache('pb_loans',state.data.loans);
+          if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return;
+          invalidateCollectionComplianceCache();
+          pageLoans();
+          toast('Paid loan closed. It is out of running collections and remains in the client history.','success');
+        }catch{toast('Could not complete the request. Refresh and check this loan before trying again.','error');}
+        finally{processing=false;}
+      }}]
+  });
+}
 function loanActions(ev, id){
   const l = state.data.loans.find(x=>x.id===id);
   const canApproveLoan = can('approve_loan');
@@ -5778,6 +5837,7 @@ function loanActions(ev, id){
   showActMenu(ev, [
     { label:'View member profile', onClick: ()=>{ state._memberProfileTab='loans'; go('memberProfile', { memberId: l.member_id }); } },
     { label:'View schedule', onClick: ()=>showLoanSchedule(l) },
+    ...(['admin','ceo'].includes(currentStaffRole()) && l.status==='active' ? [{label:'Close paid loan early',onClick:()=>openClosePaidLoanEarly(l)}] : []),
     ...(canRepay && l.status==='active' ? [{ label:'📥 Record Repayment', onClick: ()=>openStandaloneRepayment(l.id, l.member_id) }] : []),
     ...(canApproveLoan && l.status==='active' ? [{label:'Resolve duplicate loan',danger:true,onClick:()=>openResolveDuplicateLoan(l)}] : []),
     ...(canRemoveLoan && l.status==='active' ? [{label:'Cancel incorrect loan',danger:true,onClick:()=>openCancelUnusedLoan(l)}] : []),

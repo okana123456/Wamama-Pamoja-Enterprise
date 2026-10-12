@@ -53,6 +53,23 @@ begin
     from public.pb_loans l
     where l.business_id::text = v_business_id
       and lower(coalesce(l.status::text, 'active')) = 'active'
+      and l.start_date is not null
+      and l.start_date <= v_today
+      and coalesce(l.expected_end_date, v_today) >= l.start_date
+      and coalesce(l.weekly_installment, 0) > 0
+      -- A future-only deposit cannot consume one of the limited batch slots.
+      -- Select only a loan whose instalment is due and remains unpaid.
+      and coalesce((
+        select sum(r.amount) from public.pb_repayments r
+        where r.loan_id::text = l.id::text
+          and r.voided_at is null
+          and lower(coalesce(r.status::text, 'approved'))
+            not in ('pending','rejected','cancelled','voided')
+          and coalesce(r.meeting_date,
+            (r.created_at at time zone 'Africa/Nairobi')::date) <= v_today
+      ), 0) + 0.01 < least(l.total_payable,
+        (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+          - l.start_date)::numeric / 7) + 1) * l.weekly_installment)
       and (
         p_loan_ids is null
         or l.member_id::text in (
@@ -70,6 +87,17 @@ begin
           and ep.status = 'pending'
           and ep.source = 'scheduled_prepayment'
           and ep.excess_amount > coalesce(ep.released_amount, 0)
+          and ep.payment_date < l.start_date +
+            (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+              - l.start_date)::numeric / 7)::integer * 7)
+          and not exists (
+            select 1 from public.pb_prepayment_releases existing_release
+            where existing_release.prepayment_id = ep.id::text
+              and existing_release.loan_id = l.id::text
+              and existing_release.due_date = l.start_date +
+                (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+                  - l.start_date)::numeric / 7)::integer * 7)
+          )
           and (
             ep.loan_id = l.id::text
             or not exists (
@@ -88,7 +116,11 @@ begin
       into v_paid
     from public.pb_repayments r
     where r.loan_id::text = loan_row.id::text
-      and lower(coalesce(r.status::text, 'approved')) not in ('pending','rejected','cancelled');
+      and r.voided_at is null
+      and lower(coalesce(r.status::text, 'approved'))
+        not in ('pending','rejected','cancelled','voided')
+      and coalesce(r.meeting_date,
+        (r.created_at at time zone 'Africa/Nairobi')::date) <= v_today;
 
     if loan_row.start_date is null
        or loan_row.start_date > v_today

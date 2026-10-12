@@ -85,6 +85,28 @@ run(`state.data.loans=[0,1].map(n=>({...fixtureLoan,id:'fraction-'+n,total_payab
 assert.match(node.innerHTML,/Outstanding balance<\/div><div class="v">KES 2,000<\/div>/);
 run(`state.data.loans=[{...fixtureLoan,member_id:'member',group_id:'group-old',officer_id:'owner-old',status:'active'}];
   state.data.repayments=fixturePayments;`);
+const closedEarly={...loan,id:'closed-early',start_date:'2026-09-01',expected_end_date:'2026-12-01',total_payable:100,status:'completed'};
+const overdueAfterTerm={...loan,id:'overdue-after-term',start_date:'2026-09-01',expected_end_date:'2026-09-14',total_payable:100,status:'active'};
+sandbox.closedEarly=closedEarly;sandbox.overdueAfterTerm=overdueAfterTerm;
+run(`billingTodayParts=()=>({year:'2026',month:'09',day:25});
+  state.data.repayments=[{loan_id:'closed-early',amount:100,status:'approved',meeting_date:'2026-09-23'}];`);
+assert.equal(run("loanOverlapsWeek(closedEarly,'2026-09-22','2026-09-28')"),false,'paid loan is absent from the current collection sheet');
+assert.equal(run("loanOverlapsWeek(closedEarly,'2026-09-08','2026-09-14')"),true,'paid loan remains in a historical week before payoff');
+assert.equal(run("loanOverlapsWeek(overdueAfterTerm,'2026-09-22','2026-09-28')"),true,'unpaid loan remains collectible after scheduled end date');
+run(`state.data.groups=[{id:'group-new',name:'Nyikanyada',officer_id:'owner-new',status:'active'}];
+  state.data.members=[{id:'member',full_name:'Rose Atieno Okongo',group_id:'group-new',status:'active'}];
+  state.data.loans=[{...closedEarly,member_id:'member',group_id:'group-new',asset_name:'Cleared earlier product'},
+    {...overdueAfterTerm,id:'cement-loan',member_id:'member',group_id:'group-new',asset_name:'Cement'}];
+  state._financialSnapshot=null;state._collectionWeekStart='2026-09-22';
+  state._collectionGroup='';state._collectionOfficer='';state._collectionPortfolioSearch='';
+  invalidateCollectionComplianceCache();`);
+const sheet=run(`collectionFieldSheetRows(buildCollectionCompliance().groupRows[0],buildCollectionCompliance())[0]`);
+assert.match(sheet.product,/Cement/);
+assert.doesNotMatch(sheet.product,/Cleared earlier product/,'weekly collection sheet omits cleared loan but keeps current loan');
+run(`state.data.groups=[{id:'group-old',officer_id:'owner-old'},{id:'group-new',officer_id:'owner-new'}];
+  state.data.members=[{id:'member',group_id:'group-new'}];
+  state.data.loans=[{...fixtureLoan,member_id:'member',group_id:'group-old',officer_id:'owner-old',status:'active'}];
+  state.data.repayments=fixturePayments;invalidateCollectionComplianceCache();`);
 
 (async()=>{
   // A pending-only refresh must never advance a complete-history sync cursor.
