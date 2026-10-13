@@ -559,11 +559,11 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261013-officer-loan-deposits';
+const APP_RELEASE='20261013-officer-deposit-pdf';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
-  return !state.session || (['dashboard','reports','arrears','loans','inventory','purchases'].includes(state.view) &&
+  return !state.session || (['dashboard','reports','arrears','loans','inventory','purchases','collection_compliance','memberProfile'].includes(state.view) &&
     !document.getElementById('modal-root')?.hasChildNodes() && !lsGet('queue',[]).length);
 }
 function applyAvailableAppUpdate(){
@@ -4999,8 +4999,16 @@ function pageCollectionCompliance(){
     ${tab==='exceptions'?`<div class="card">${issues.length?issues.map(i=>`<div class="compliance-issue"><span class="issue-mark"></span><div><b>${i.type}</b><div class="muted" style="font-size:12px;margin-top:2px">${i.detail}</div><div style="font-size:11px;margin-top:3px">Group: ${i.group}</div></div></div>`).join(''):`<div class="empty"><h4>No upload exceptions detected</h4><p>No high-confidence order, loan, client or group mismatch was found for this week.</p></div>`}</div>`:''}
   `;
 }
-function exportCollectionCompliance(){
+async function ensureOfficerLoanDepositsForExport(){
+  if(!needsOfficerLoanDepositFeed()) return true;
+  await refreshOfficerLoanDepositBalances({force:true});
+  if(state._officerLoanDepositsReady) return true;
+  toast('Loan deposit balances are unavailable. Refresh the page and try again before exporting.','error');
+  return false;
+}
+async function exportCollectionCompliance(){
   if(!financialFiguresReady()) return;
+  if(!await ensureOfficerLoanDepositsForExport()) return;
   const report=buildCollectionCompliance();
   const issues=collectionExceptions(report);
   const wb=XLSX.utils.book_new();
@@ -5068,8 +5076,9 @@ function collectionFieldSheetRows(groupRow,report){
   });
 }
 
-function downloadCollectionFieldSheetPdf(){
+async function downloadCollectionFieldSheetPdf(){
   if(!financialFiguresReady()) return;
+  if(!await ensureOfficerLoanDepositsForExport()) return;
   try{
     const report=buildCollectionCompliance();
     if(!report.groupRows.length) return toast('No collection groups match the selected filters.','warn');
@@ -5119,7 +5128,7 @@ function downloadCollectionFieldSheetPdf(){
         row.start?fmtDate(row.start):'-',row.paidInstallments,row.unpaidInstallments,row.end?fmtDate(row.end):'-',
         row.lastPaid?fmtDate(row.lastPaid):'-',KES(row.overdue),row.overdueDays||'-'
       ]);
-      body.push(['','TOTALS',KES(totals.savings),KES(totals.loanDeposits),'',KES(totals.totalPayable),KES(totals.olb),'',totals.paidInstallments,totals.unpaidInstallments,'','',KES(totals.overdue),'']);
+      body.push(['','TOTALS',KES(totals.savings),rows.some(row=>row.loanDeposits===null)?'':KES(totals.loanDeposits),'',KES(totals.totalPayable),KES(totals.olb),'',totals.paidInstallments,totals.unpaidInstallments,'','',KES(totals.overdue),'']);
 
       doc.autoTable({
         startY:50,

@@ -41,4 +41,12 @@ run(`state._officerLoanDepositRows=[
 assert.equal(run('buildCollectionCompliance().memberRows[0].loanDeposits'),admin,'officer and admin see the same client deposit');
 assert.equal(run('buildCollectionCompliance().groupRows[0].loanDeposits'),admin,'group total agrees too');
 assert.equal(run("loanDepositsByDate('member','2026-10-01')"),80,'the report date is respected');
-console.log('Admin and officer loan deposit display parity, unavailable state and date cutoff passed.');
+run(`state.session={user:{id:'auth-officer'}};state.view='collection_compliance';
+  sb.rpc=async()=>({data:[{member_id:'member',payment_date:'2026-10-01',available_amount:80}],error:null});`);
+(async()=>{
+  assert.equal(await run('ensureOfficerLoanDepositsForExport()'),true,'export verifies a fresh database balance');
+  run(`sb.rpc=async()=>({data:null,error:{message:'Service unavailable'}});
+    toast=()=>{};`);
+  assert.equal(await run('ensureOfficerLoanDepositsForExport()'),false,'export stops when the balance cannot be verified');
+  console.log('Admin and officer deposit parity, date cutoff and safe PDF export passed.');
+})().catch(error=>{console.error(error);process.exitCode=1;});
