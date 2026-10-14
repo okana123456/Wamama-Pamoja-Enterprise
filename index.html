@@ -559,7 +559,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261013-officer-deposit-pdf';
+const APP_RELEASE='20261014-flat-loan-terms';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1266,7 +1266,7 @@ async function resetAccountData(){
 async function loadSettings(){
   const settingsId = state.staff?.business_id ? ('biz_' + state.staff.business_id) : 'main';
   const { data } = await sb.from('pb_settings').select('*').eq('id', settingsId).maybeSingle();
-  state.settings = data || { savings_threshold:400, registration_fee:600, max_loan_weeks:48, monthly_interest_rate:2.5, business_name:'Wamama Pamoja Enterprise' };
+  state.settings = data || { savings_threshold:400, registration_fee:600, max_loan_weeks:48, monthly_interest_rate:2, business_name:'Wamama Pamoja Enterprise' };
   lsSet('settings', state.settings);
 }
 
@@ -4467,7 +4467,7 @@ function pageMemberProfile(){
           const paid = loanPaid(l.id);
           const outstanding = loanFinancialMetrics(l).outstandingPI;
           const pct = Math.min(100, Math.round(paid/Number(l.total_payable||1)*100));
-          const schedule = computeSchedule(Number(l.loan_value), Number(l.weekly_installment), 'flat', new Date(l.start_date));
+          const schedule = storedLoanSchedule(l);
           const today = todayISO();
           return `<div class="card" style="margin-bottom:14px">
             <div class="card-head">
@@ -4494,7 +4494,7 @@ function pageMemberProfile(){
                 <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin-bottom:8px">Repayment schedule (${schedule.weeks} weeks)</div>
                 <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm)">
                   <table class="tbl" style="font-size:12px">
-                    <thead><tr><th>Week</th><th>Due date</th><th class="num">Principal</th><th class="num">Interest</th><th class="num">Installment</th><th class="num">Balance</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Week</th><th>Due date</th><th class="num">Principal</th><th class="num">Interest + fees</th><th class="num">Installment</th><th class="num">Balance</th><th>Status</th></tr></thead>
                     <tbody>
                       ${schedule.rows.slice(0,100).map(row=>{
                         const dueISO = row.due.toISOString().slice(0,10);
@@ -6097,12 +6097,12 @@ function lrUpdatePreview(){
   }
 }
 function showLoanSchedule(l){
-  const sched = computeSchedule(Number(l.loan_value), Number(l.weekly_installment), 'flat', new Date(l.start_date));
+  const sched = storedLoanSchedule(l);
   modal({
     title:`Repayment schedule — ${l.asset_name}`,
     size:'lg',
     body:`<div class="table-wrap"><table class="tbl">
-      <thead><tr><th>Wk</th><th>Due</th><th class="num">Principal</th><th class="num">Interest</th><th class="num">Installment</th><th class="num">Balance</th></tr></thead>
+      <thead><tr><th>Wk</th><th>Due</th><th class="num">Principal</th><th class="num">Interest + fees</th><th class="num">Installment</th><th class="num">Balance</th></tr></thead>
       <tbody>${sched.rows.map(r=>`<tr><td>${r.w}</td><td>${fmtDate(r.due)}</td><td class="num">${KES(r.principal)}</td><td class="num">${KES(r.interest)}</td><td class="num">${KES(r.installment)}</td><td class="num">${KES(r.balance)}</td></tr>`).join('')}</tbody>
     </table></div>`,
     actions:[{ label:'Close', cls:'btn-primary', onClick: closeModal }]
@@ -6120,19 +6120,17 @@ function pageCalculator(){
       <div style="font-size:13px;line-height:1.6;color:var(--text-muted)">
         <b>3% Application Fee:</b> One-time fee charged on the loan principal when the loan is issued.<br>
         <b>3% Insurance Cover:</b> One-time insurance fee charged on the loan principal at issuance.<br>
-        <b>Flat Rate:</b> Interest calculated once on the full original loan amount for the entire duration. Every week carries the same charge regardless of balance repaid — simpler but costs more overall.<br>
-        <b>Reducing Balance:</b> Interest calculated only on the outstanding balance each week. As the borrower repays, interest shrinks — cheaper over time.
+        <b>Flat interest:</b> ${loanMonthlyRate()*100}% per month on the financed amount. Four weeks equal one month; 12 weeks equal three months.<br>
+        The one-time 6% charge is added separately. Weekly payments include interest and fees, with a rounding adjustment in the final payment.
       </div>
     </div>
     <div class="grid-2">
       <div class="card card-pad">
         <h3 style="margin:0 0 14px">Inputs</h3>
         <div class="field"><label>Asset value / loan amount (KES)</label><input id="c-amount" type="number" min="0" value="10000" oninput="runCalc()" /></div>
-        <div class="field"><label>Affordable weekly repayment (KES)</label><input id="c-weekly" type="number" min="0" value="500" oninput="runCalc()" /></div>
-        <div class="field"><label>Interest method</label>
-          <select id="c-method" onchange="runCalc()"><option value="flat">Flat rate</option><option value="reducing">Reducing balance</option></select>
-        </div>
-        <div class="field"><label>Loan start date</label><input id="c-start" type="date" value="${todayISO()}" onchange="runCalc()" /></div>
+        <div class="field"><label>Number of weeks</label><input id="c-weeks" type="number" min="1" max="48" step="1" value="12" oninput="runCalc()" /></div>
+        <div class="field"><label>Weekly repayment including fees (KES)</label><input id="c-weekly" type="number" readonly /></div>
+        <div class="field"><label>First repayment date</label><input id="c-start" type="date" value="${todayISO()}" onchange="runCalc()" /></div>
         <button class="btn btn-primary btn-block" onclick="runCalc()">Compute schedule</button>
       </div>
       <div id="calc-out"></div>
@@ -6142,41 +6140,44 @@ function pageCalculator(){
 }
 function runCalc(){
   const amount = Number($('c-amount').value)||0;
-  const weekly = Number($('c-weekly').value)||0;
-  const method = $('c-method').value;
+  const weeks = Number($('c-weeks').value)||0;
+  if(amount<=0||!Number.isInteger(weeks)||weeks<1||weeks>48){$('calc-out').innerHTML='<div class="card card-pad">Enter a positive amount and 1–48 whole weeks.</div>';return;}
+  const weekly = minimumWeeklyForLoanTerm(amount,weeks);
+  $('c-weekly').value=weekly.toFixed(2);
   const start  = new Date($('c-start').value);
-  const r      = computeSchedule(amount, weekly, method, start);
+  const r      = computeSchedule(amount, weekly, 'flat', start, weeks);
   const tooLong = r.weeks > (state.settings?.max_loan_weeks || 48);
 
   // === 3% Application Fee + 3% Insurance Cover ===
   const appFee  = Math.round(amount * 0.03 * 100) / 100;
-  const insFee  = Math.round(amount * 0.03 * 100) / 100;
+  const insFee  = Math.round((loanServiceCharge(amount)-appFee)*100)/100;
   const totalFees = appFee + insFee;
-  const grandTotal = r.totalPayable + totalFees;
+  const grandTotal = r.grandTotal;
 
   $('calc-out').innerHTML = `
     <div class="card card-pad">
       <h3 style="margin:0 0 12px">Result</h3>
       <table class="summary-table">
         <tr><td>Principal</td><td>${KES(amount)}</td></tr>
-        <tr style="color:var(--warning)"><td>⚠ 3% Application Fee (upfront)</td><td><b>${KES(appFee)}</b></td></tr>
-        <tr style="color:var(--warning)"><td>⚠ 3% Insurance Cover (upfront)</td><td><b>${KES(insFee)}</b></td></tr>
+        <tr><td>3% Application Fee (one time)</td><td><b>${KES(appFee)}</b></td></tr>
+        <tr><td>3% Insurance Cover (one time)</td><td><b>${KES(insFee)}</b></td></tr>
         <tr><td>Total interest on repayments</td><td>${KES(r.totalInterest)}</td></tr>
         <tr style="border-top:2px solid var(--border)"><td><b>Total payable (principal + interest)</b></td><td><b>${KES(r.totalPayable)}</b></td></tr>
         <tr style="color:var(--danger)"><td><b>Grand total (incl. all fees)</b></td><td><b>${KES(grandTotal)}</b></td></tr>
         <tr><td>Weeks to complete repayment</td><td>${r.weeks}</td></tr>
         <tr><td>Suggested weekly installment</td><td>${KES(r.suggestedWeekly)}</td></tr>
+        <tr><td>Final installment (rounding adjustment)</td><td>${KES(r.finalInstallment)}</td></tr>
       </table>
       <div style="background:var(--warning-50);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:10px 14px;margin-top:12px;font-size:12px;color:var(--warning)">
-        ⚠ The Application Fee (${KES(appFee)}) and Insurance Cover (${KES(insFee)}) are deducted upfront on the day the loan is issued and do <b>not</b> form part of the weekly repayment schedule shown below.
+        Interest = ${KES(amount)} × ${loanMonthlyRate()*100}% × ${weeks}/4 months. The 6% charge is included once in the total and weekly schedule. Fees collected upfront during approval are recorded against the loan balance.
       </div>
       ${tooLong ? `<div class="auth-error" style="margin-top:12px">Repayment exceeds the maximum loan term of ${state.settings?.max_loan_weeks||48} weeks. Consider increasing the weekly amount to at least ${KES(r.suggestedWeekly)}.</div>`:''}
     </div>
     <div class="card" style="margin-top:14px">
-      <div class="card-head"><h3>Week-by-week repayment schedule</h3><div class="sub">Fees excluded — deducted upfront at issuance</div></div>
+      <div class="card-head"><h3>Week-by-week repayment schedule</h3><div class="sub">Includes interest and the one-time 6% charge</div></div>
       <div class="table-wrap" style="border:none;border-radius:0">
         <table class="tbl">
-          <thead><tr><th>Wk</th><th>Due</th><th class="num">Principal</th><th class="num">Interest</th><th class="num">Installment</th><th class="num">Balance</th></tr></thead>
+          <thead><tr><th>Wk</th><th>Due</th><th class="num">Principal</th><th class="num">Interest + fees</th><th class="num">Installment</th><th class="num">Balance</th></tr></thead>
           <tbody>${r.rows.map(x=>`<tr><td>${x.w}</td><td>${fmtDate(x.due)}</td><td class="num">${KES(x.principal)}</td><td class="num">${KES(x.interest)}</td><td class="num">${KES(x.installment)}</td><td class="num">${KES(x.balance)}</td></tr>`).join('')}</tbody>
         </table>
       </div>
@@ -6193,32 +6194,52 @@ function updateWeeklyRateDisplay(val){
   if(ex) ex.textContent = KES(exInterest);
 }
 
-function computeSchedule(principal, weekly, method, startDate){
-  const monthlyRate = Number(state.settings?.monthly_interest_rate || 2.5) / 100;
+function loanMonthlyRate(){
+  return Number(state.settings?.monthly_interest_rate ?? 2) / 100;
+}
+function flatLoanQuote(principal,weeks){
+  principal=Math.round(Number(principal)*100)/100;
+  weeks=Number(weeks);
+  if(!Number.isFinite(principal)||principal<=0||!Number.isInteger(weeks)||weeks<1||weeks>156) throw Error('Enter a positive loan amount and a valid whole number of weeks.');
+  const totalInterest=Math.round(principal*loanMonthlyRate()*(weeks/4)*100)/100;
+  const totalPayable=Math.round((principal+totalInterest)*100)/100;
+  const fees=loanServiceCharge(principal);
+  const grandTotal=Math.round((totalPayable+fees)*100)/100;
+  const totalCents=Math.round(grandTotal*100);
+  const weeklyCents=Math.ceil(totalCents/weeks);
+  return {weeks,totalInterest,totalPayable,fees,grandTotal,suggestedWeekly:weeklyCents/100,
+    finalInstallment:(totalCents-weeklyCents*(weeks-1))/100};
+}
+function storedLoanSchedule(loan){
+  const totalCents=Math.round(Number(loan.total_payable||0)*100);
+  const weeklyCents=Math.round(Number(loan.weekly_installment||0)*100);
+  if(totalCents<=0||weeklyCents<=0) return {weeks:0,rows:[]};
+  const weeks=Math.ceil(totalCents/weeklyCents);
+  const rows=[];
+  let remaining=totalCents,principalLeft=Math.round(Number(loan.loan_value||0)*100);
+  for(let w=1;w<=Math.min(weeks,156);w++){
+    const installment=Math.min(weeklyCents,remaining);
+    const principalPart=w===weeks?principalLeft:Math.min(principalLeft,Math.round(installment*Number(loan.loan_value||0)/(totalCents/100)));
+    principalLeft-=principalPart;remaining-=installment;
+    const due=new Date(loan.start_date);due.setDate(due.getDate()+7*(w-1));
+    rows.push({w,due,principal:principalPart/100,interest:(installment-principalPart)/100,installment:installment/100,balance:remaining/100});
+  }
+  return {weeks,rows};
+}
+function computeSchedule(principal, weekly, method, startDate, selectedWeeks=null){
+  const monthlyRate = loanMonthlyRate();
   const weeklyRate = monthlyRate / 4;
   const HARD_CAP = 156; // 3 years absolute max to prevent infinite loop / compounding bloat
   const rows = [];
   if(method === 'flat'){
-    // Company formula: totalInterest = principal * weeklyRate * (principal / weeklyInstallment)
-    // This derives the number of periods directly from principal/installment ratio.
-    let totalInterest = weekly > 0 ? principal * weeklyRate * (principal / weekly) : principal * weeklyRate * HARD_CAP;
-    let totalPayable = principal + totalInterest;
-    // Derive weeks from total payable, capped at HARD_CAP to prevent infinite loops
-    let weeks = weekly > 0 ? Math.min(HARD_CAP, Math.ceil(totalPayable / weekly)) : HARD_CAP;
-    if(!isFinite(weeks) || weeks < 1) weeks = HARD_CAP;
-    // Recompute with final week count
-    totalInterest = principal * weeklyRate * (principal / weekly);
-    totalPayable = principal + totalInterest;
-    const inst = totalPayable / weeks;
-    let bal = totalPayable;
-    const principalPerWk = principal / weeks;
-    const interestPerWk = totalInterest / weeks;
-    for(let w=1; w<=weeks; w++){
-      bal -= inst;
-      const due = new Date(startDate); due.setDate(due.getDate() + 7*w);
-      rows.push({ w, due, principal:principalPerWk, interest:interestPerWk, installment:inst, balance:Math.max(0,bal) });
-    }
-    return { weeks, totalInterest, totalPayable, suggestedWeekly: totalPayable/weeks, rows };
+    if(!(principal>0)) return {weeks:0,totalInterest:0,totalPayable:0,grandTotal:0,fees:0,suggestedWeekly:0,rows:[]};
+    const affordable=weekly-principal*weeklyRate;
+    const inferred=affordable>0?Math.ceil((principal+loanServiceCharge(principal))/affordable-1e-9):HARD_CAP+1;
+    const weeks=selectedWeeks===null?Math.max(1,inferred):Number(selectedWeeks);
+    if(weeks>HARD_CAP) return {weeks,totalInterest:0,totalPayable:0,grandTotal:0,fees:0,suggestedWeekly:minimumWeeklyForLoanTerm(principal,48),rows:[]};
+    const quote=flatLoanQuote(principal,weeks);
+    const schedule=storedLoanSchedule({loan_value:principal,total_payable:quote.grandTotal,weekly_installment:quote.suggestedWeekly,start_date:startDate});
+    return {...quote,rows:schedule.rows};
   } else {
     let bal = principal; let w = 0; let totalInterest = 0;
     while(bal > 0.01 && w < HARD_CAP){
@@ -6255,15 +6276,7 @@ function minimumWeeklyForLoanTerm(principal,weeks){
   principal=Number(principal)||0;
   weeks=Math.max(1,Math.min(48,Math.floor(Number(weeks)||1)));
   if(principal<=0) return 0;
-  let low=0.01,high=Math.max(principal,1);
-  for(let i=0;i<60;i++){
-    const mid=(low+high)/2;
-    const schedule=computeSchedule(principal,mid,'flat',new Date());
-    const total=loanTotalWithServiceCharge(schedule,principal);
-    if(Math.ceil(total/mid)<=weeks) high=mid;
-    else low=mid;
-  }
-  return Math.ceil(high*100)/100;
+  return flatLoanQuote(principal,weeks).suggestedWeekly;
 }
 function recalculateApprovalTerms(grossPrincipal,fromWeeks=false){
   const available=Number(document.getElementById('al-deposit')?.max||0);
@@ -6274,11 +6287,11 @@ function recalculateApprovalTerms(grossPrincipal,fromWeeks=false){
   const financed=Math.max(0,Number(grossPrincipal)-deposit);
   const weeks=Math.max(1,Math.min(48,Math.floor(Number(document.getElementById('al-weeks')?.value||1))));
   const weeklyInput=document.getElementById('wi');
-  if(fromWeeks&&weeklyInput) weeklyInput.value=minimumWeeklyForLoanTerm(financed,weeks).toFixed(2);
+  if(weeklyInput) weeklyInput.value=minimumWeeklyForLoanTerm(financed,weeks).toFixed(2);
   const weekly=Number(weeklyInput?.value||0);
-  const schedule=weekly>0?computeSchedule(financed,weekly,'flat',new Date(document.getElementById('sd')?.value||todayISO())):null;
+  const schedule=weekly>0?computeSchedule(financed,weekly,'flat',new Date(document.getElementById('sd')?.value||todayISO()),weeks):null;
   const total=schedule?loanTotalWithServiceCharge(schedule,financed):0;
-  const actualWeeks=weekly>0?Math.ceil(total/weekly):0;
+  const actualWeeks=schedule?.weeks||0;
   const setText=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};
   setText('al-financed-value',KES(financed));
   setText('al-service-value',KES(loanServiceCharge(financed)));
@@ -6296,7 +6309,7 @@ function recalculateApprovalTerms(grossPrincipal,fromWeeks=false){
     ? `<span style="color:var(--danger);font-weight:600">${KES(weekly)} per week would take ${actualWeeks} weeks. Increase it to at least ${KES(minimumWeeklyForLoanTerm(financed,48))}.</span>`
     : actualWeeks>weeks
       ? `<span style="color:var(--danger);font-weight:600">${KES(weekly)} per week would take ${actualWeeks} weeks, not the selected ${weeks}. Use at least ${KES(minimumWeeklyForLoanTerm(financed,weeks))} per week.</span>`
-      : `The deposit reduces the financed amount before interest and the 6% charge are calculated.`;
+      : `Flat interest: ${KES(financed)} × ${loanMonthlyRate()*100}% × ${weeks}/4 months = ${KES(schedule?.totalInterest)}. One-time fees: ${KES(loanServiceCharge(financed))} (3% application + 3% insurance). Final installment: ${KES(schedule?.finalInstallment)}. Any pre-loan deposit is deducted before these calculations.`;
 }
 
 /* =====================================================================
@@ -6805,9 +6818,10 @@ function _addOrderLine(){
 function _updateOrderTotalSummary(){
   const out = document.getElementById('ord-loan-out'); if(!out) return;
   const principal = _orderLines.reduce((a,l)=>a+(Number(l.loan_price||0)*Number(l.quantity||1)),0);
-  const wi = Number(document.getElementById('ord-wi')?.value)||0;
   if(!principal){ out.innerHTML=''; return; }
-  out.innerHTML = `Total loan value: <b>${KES(principal)}</b>${wi ? ` · Total payable ${KES(computeSchedule(principal,wi,'flat',new Date()).totalPayable)}` : ' — enter desired installment to see repayment summary.'}`;
+  const weeks=Number(document.getElementById('ord-weeks')?.value)||0;
+  const quote=Number.isInteger(weeks)&&weeks>=1&&weeks<=48?flatLoanQuote(principal,weeks):null;
+  out.innerHTML = `Total loan value: <b>${KES(principal)}</b>${quote ? ` · Interest ${KES(quote.totalInterest)} · One-time 6% charge ${KES(quote.fees)} · Total payable ${KES(quote.grandTotal)} over ${weeks} weeks` : ' — enter 1–48 whole weeks to see the repayment summary.'}`;
 }
 
 function openOrderForm(){
@@ -6865,6 +6879,7 @@ function openOrderForm(){
         const primaryAsset = validLines[0];
 
         const desiredWeeks = Number($('ord-weeks').value)||null;
+        if(desiredWeeks!==null&&(!Number.isInteger(desiredWeeks)||desiredWeeks<1||desiredWeeks>48)) return toast('Choose 1–48 whole weeks.','error');
         const desiredWeekly = Number($('ord-wi').value)||null;
         const userNotes = $('ord-notes').value||'';
 
@@ -6904,10 +6919,7 @@ function ordCalcFromWeeks(){
   const weeks = Number($('ord-weeks')?.value)||0;
   const principal = _ordGetPrincipal();
   if(weeks > 0 && principal > 0){
-    const rate = state.settings?.monthly_interest_rate || 2.5;
-    const weeklyRate = (rate / 100) / 4;
-    const totalPayable = principal * (1 + weeklyRate * weeks);
-    $('ord-wi').value = Math.ceil(totalPayable / weeks);
+    $('ord-wi').value = minimumWeeklyForLoanTerm(principal,weeks).toFixed(2);
   }
   _ordUpdating = false;
   ordUpdateSummary();
@@ -7041,9 +7053,7 @@ function approveOrder(o){
   const initialDeposit = Math.min(availableDeposit, Math.max(0, principal - 0.01));
   const initialFinancedPrincipal = Math.max(0, principal - initialDeposit);
   const initialWeeks = Math.max(1, Math.min(48, Number(o.desired_weeks)||1));
-  const initialWeekly = initialDeposit > 0
-    ? minimumWeeklyForLoanTerm(initialFinancedPrincipal, initialWeeks)
-    : (Number(o.desired_weekly_installment)||minimumWeeklyForLoanTerm(initialFinancedPrincipal, initialWeeks));
+  const initialWeekly = minimumWeeklyForLoanTerm(initialFinancedPrincipal, initialWeeks);
 
   // === Optional 3% fees — approver decides based on item type ===
   const serviceCharge = loanServiceCharge(initialFinancedPrincipal);
@@ -7087,10 +7097,10 @@ function approveOrder(o){
       <div class="divider"></div>
       <div class="grid-2">
         <div class="field"><label>Desired Number of Weeks</label><input id="al-weeks" type="number" min="1" max="48" placeholder="e.g. 10" value="${initialWeeks}" oninput="recalculateApprovalTerms(${principal},true)" /></div>
-        <div class="field"><label>Weekly Installment (KES)</label><input id="wi" type="number" min="1" placeholder="e.g. 500" value="${initialWeekly.toFixed(2)}" oninput="recalculateApprovalTerms(${principal},false)" /></div>
+        <div class="field"><label>Weekly Installment including fees (KES)</label><input id="wi" type="number" step="0.01" readonly value="${initialWeekly.toFixed(2)}" /></div>
       </div>
       <div class="summary-table" style="padding:10px 12px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:12px"><span>Total payable</span><b id="al-total-value">—</b></div><div style="display:flex;justify-content:space-between;gap:12px;margin-top:5px"><span>Calculated repayment period</span><b id="al-actual-weeks">—</b></div></div>
-      <div class="field"><label>Loan start date</label><input id="sd" type="date" value="${todayISO()}" /></div>
+      <div class="field"><label>First repayment date</label><input id="sd" type="date" value="${todayISO()}" /></div>
       <div id="al-out" class="muted" style="font-size:12px"></div>
     </form>`,
     actions:[
@@ -7129,23 +7139,18 @@ function approveOrder(o){
         }
         const depositToApply=Math.min(requestedDeposit,Math.max(0,principal-0.01));
         const financedPrincipal=Math.round((principal-depositToApply)*100)/100;
-        const weekly = Number($('wi').value)||0;
         const weeksInput = Number($('al-weeks').value)||0;
+        if(!Number.isInteger(weeksInput)||weeksInput<1||weeksInput>48){
+          if(issueBtn){issueBtn.disabled=false;issueBtn.textContent='Issue loan';delete issueBtn.dataset.processing;}
+          return toast('Choose a whole number of weeks between 1 and 48.','error');
+        }
+        const weekly = minimumWeeklyForLoanTerm(financedPrincipal,weeksInput);
         const start = new Date($('sd').value);
         if(weekly <= 0) return toast('Weekly installment must be greater than zero.','error');
-        const r = computeSchedule(financedPrincipal, weekly, 'flat', start);
+        const r = computeSchedule(financedPrincipal, weekly, 'flat', start,weeksInput);
         const totalPayableWithCharge = loanTotalWithServiceCharge(r, financedPrincipal);
-        const serviceChargeWeeks = weekly > 0 ? Math.ceil(totalPayableWithCharge / weekly) : r.weeks;
-        const effectiveWeeks = weeksInput > 0 ? weeksInput : serviceChargeWeeks;
-        if(weeksInput>0 && serviceChargeWeeks>weeksInput){
-          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
-          return toast(`${KES(weekly)} per week would take ${serviceChargeWeeks} weeks, but ${weeksInput} weeks was selected. Increase the weekly instalment to at least ${KES(minimumWeeklyForLoanTerm(financedPrincipal,weeksInput))}.`,'error');
-        }
-        if(effectiveWeeks > 48 || serviceChargeWeeks > 48){
-          if(issueBtn){ issueBtn.disabled=false; issueBtn.textContent='Issue loan'; delete issueBtn.dataset.processing; }
-          return toast(`${KES(weekly)} per week would take ${serviceChargeWeeks} weeks. Increase it to at least ${KES(minimumWeeklyForLoanTerm(financedPrincipal,48))} to remain within the 48-week maximum.`,'error');
-        }
-        const end = new Date(start); end.setDate(end.getDate() + 7*serviceChargeWeeks);
+        const serviceChargeWeeks = weeksInput;
+        const end = new Date(start); end.setDate(end.getDate() + 7*(serviceChargeWeeks-1));
         const primaryLine = resolvedLines[0];
         const memberGroup = state.data.groups.find(g => g.id === member.group_id);
         const resolvedOfficerId = memberGroup?.officer_id || o.recorded_by || null;
@@ -7935,10 +7940,10 @@ function pageSettings(){
           <div class="field"><label>Maximum loan term (weeks)</label><input type="number" min="1" max="48" name="max_loan_weeks" value="${s.max_loan_weeks||48}" /></div>
           <div class="field">
             <label>Monthly interest rate (%)</label>
-            <input type="number" step="0.0001" min="0" name="monthly_interest_rate" id="monthly_interest_input" value="${s.monthly_interest_rate||2.5}" oninput="updateWeeklyRateDisplay(this.value)" />
+            <input type="number" step="0.0001" min="0" name="monthly_interest_rate" id="monthly_interest_input" value="${s.monthly_interest_rate??2}" oninput="updateWeeklyRateDisplay(this.value)" />
             <div id="weekly_rate_display" style="margin-top:6px;font-size:12px;color:var(--text-muted)">
-              ≈ Weekly rate: <b id="weekly_rate_val">${((s.monthly_interest_rate||2.5)/4).toFixed(4)}%</b>
-              &nbsp;·&nbsp; e.g. KES 10,000 loan = <b id="weekly_interest_ex">${KES(((s.monthly_interest_rate||2.5)/4/100)*10000)}</b> interest/week (flat)
+              ≈ Weekly rate: <b id="weekly_rate_val">${((s.monthly_interest_rate??2)/4).toFixed(4)}%</b>
+              &nbsp;·&nbsp; e.g. KES 10,000 loan = <b id="weekly_interest_ex">${KES(((s.monthly_interest_rate??2)/4/100)*10000)}</b> interest/week (flat)
             </div>
           </div>
         </div>
