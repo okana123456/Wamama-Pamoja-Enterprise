@@ -559,7 +559,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261014-separate-collection-loans';
+const APP_RELEASE='20261015-collection-client-name-once';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -5058,7 +5058,7 @@ function collectionFieldSheetRows(groupRow,report){
       return {
       memberId:memberRow.member.id,
       loanId:loan.id,
-      client:memberRow.member.full_name||'-',
+      client:loanIndex===0?(memberRow.member.full_name||'-'):'',
       savings:loanIndex===0?memberRow.savings:null,
       loanDeposits:loanIndex===0?memberRow.loanDeposits:null,
       sharedBalanceRow:loanIndex===0,
@@ -5124,8 +5124,9 @@ async function downloadCollectionFieldSheetPdf(){
       doc.text(`Products in repayment: ${groupRow.products}`,105,41);
       doc.text(`Arrears measured up to: ${fmtDate(report.arrearsCutoff)}`,pageWidth-14,38.5,{align:'right'});
 
-      const body=rows.map((row,index)=>[
-        index+1,row.client,row.savings===null?'':KES(row.savings),row.loanDeposits===null?'':KES(row.loanDeposits),row.product,KES(row.totalPayable),KES(row.olb),
+      let clientNumber=0;
+      const body=rows.map(row=>[
+        row.sharedBalanceRow===false?'':++clientNumber,row.client,row.savings===null?'':KES(row.savings),row.loanDeposits===null?'':KES(row.loanDeposits),row.product,KES(row.totalPayable),KES(row.olb),
         row.start?fmtDate(row.start):'-',row.paidInstallments,row.unpaidInstallments,row.end?fmtDate(row.end):'-',
         row.lastPaid?fmtDate(row.lastPaid):'-',KES(row.overdue),row.overdueDays||'-'
       ]);

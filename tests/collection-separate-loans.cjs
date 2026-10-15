@@ -29,6 +29,7 @@ assert.deepEqual(Array.from(loans,r=>r.end),['2026-12-03','2026-12-10']);
 assert.deepEqual(Array.from(loans,r=>r.lastPaid),['2026-10-01','2026-10-08']);
 assert.equal(loans[0].savings,6200);assert.equal(loans[1].savings,null);
 assert.equal(loans[0].loanDeposits,388);assert.equal(loans[1].loanDeposits,null);
+assert.equal(loans[0].client,'Rose');assert.equal(loans[1].client,'');
 const captures=[];
 sandbox.window.jspdf={jsPDF:class {
  constructor(){this.internal={pageSize:{width:297,height:210},getNumberOfPages(){return 1}};this.lastAutoTable={finalY:100};}
@@ -42,6 +43,9 @@ run('financialFiguresReady=()=>true;ensureOfficerLoanDepositsForExport=async()=>
  assert.equal(total[3],run('KES(388)'),'continued loan rows do not hide deposit total');
  assert.equal(total[2],run('KES(6250)'),'savings counted once per member');
  assert.equal(total[5],run('KES(3000)'));assert.equal(total[6],run('KES(2700)'));
+ assert.equal(body.filter(row=>row[1]==='Rose').length,1,'client name appears once');
+ assert.equal(body[0][0],1);assert.equal(body[1][0],2);
+ assert.equal(body[2][0],'','continued loan has no new client number');
  assert(captures.some(t=>typeof t==='string'&&t.includes('Clients listed: 2')));
  console.log('Separate loan dates, balances and payments; shared balances counted once; PDF totals passed.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
