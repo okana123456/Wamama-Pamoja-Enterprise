@@ -62,6 +62,28 @@ const {PGlite}=require(process.env.PGLITE_MODULE||'@electric-sql/pglite');
     'already released cash is not applied twice');
   assert.equal(Number((await db.query(`select released_amount from pb_excess_payments
     where id='${id(21)}'`)).rows[0].released_amount),0);
+  const biz='b3462eea-1c92-4411-9507-fb6c0b31ba28';
+  const ruth='871ffd6c-c777-40ff-9773-8dbf92ca2ee4',loan='e33a8eea-bf63-4c51-83b5-8f3c38769038';
+  await db.exec(`insert into pb_loans(id,business_id,member_id,group_id,status,total_payable,
+    loan_value,weekly_installment,start_date,expected_end_date) values
+    ('${loan}','${biz}','${ruth}','${id(203)}','active',3502.05,3000,230,'2026-08-04','2026-09-08'),
+    ('${id(4)}','${biz}','${ruth}','${id(203)}','active',3648,3200,228,'2026-10-19','2027-02-01');
+    insert into pb_repayments(id,business_id,loan_id,member_id,group_id,meeting_date,amount,principal,interest,recorded_by,status) values
+    ('${id(13)}','${biz}','${loan}','${ruth}','${id(203)}','2026-10-12',2400,2000,400,'${id(8)}','approved'),
+    ('${id(14)}','${biz}','${loan}','${ruth}','${id(203)}','2026-08-03',1110,0,0,'${id(8)}','rejected');
+    insert into pb_excess_payments(id,business_id,member_id,group_id,loan_id,original_repayment_id,payment_date,excess_amount,status,source) values
+    ('${id(23)}','${biz}','${ruth}','${id(203)}','${loan}','${id(14)}','2026-08-03',1110,'pending','scheduled_prepayment');`);
+  const repair=fs.readFileSync(path.join(__dirname,'../wamama-ruth-due-deposit-repair.sql'),'utf8')
+    .replaceAll("(now() at time zone 'Africa/Nairobi')::date","date '2026-10-15'");
+  await db.exec(repair);
+  const check=async()=>({
+    paid:Number((await db.query(`select sum(amount) amount from pb_repayments where loan_id='${loan}' and status='approved'`)).rows[0].amount),
+    released:Number((await db.query(`select released_amount amount from pb_excess_payments where id='${id(23)}'`)).rows[0].amount)
+  });
+  assert.deepEqual(await check(),{paid:2530,released:130},'stale end date cannot block the 130 due');
+  assert.equal((await db.query(`select count(*) n from pb_repayments where loan_id='${id(4)}'`)).rows[0].n,0,'future loan preserved');
+  await db.exec(repair);assert.deepEqual(await check(),{paid:2530,released:130},'repair is repeatable');
+  assert.equal(Number((await db.query(`select total_payable from pb_loans where id='${loan}'`)).rows[0].total_payable),3502.05,'loan pricing preserved');
   await db.close();
   console.log('Due prepayment release selects eligible loans and prevents double use.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

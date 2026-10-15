@@ -55,8 +55,9 @@ begin
       and lower(coalesce(l.status::text, 'active')) = 'active'
       and l.start_date is not null
       and l.start_date <= v_today
-      and coalesce(l.expected_end_date, v_today) >= l.start_date
       and coalesce(l.weekly_installment, 0) > 0
+      -- Saved end dates can predate the remaining instalments after edits.
+      -- Keep accruing weekly dues through today, capped by total_payable.
       -- A future-only deposit cannot consume one of the limited batch slots.
       -- Select only a loan whose instalment is due and remains unpaid.
       and coalesce((
@@ -68,7 +69,7 @@ begin
           and coalesce(r.meeting_date,
             (r.created_at at time zone 'Africa/Nairobi')::date) <= v_today
       ), 0) + 0.01 < least(l.total_payable,
-        (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+        (floor((v_today
           - l.start_date)::numeric / 7) + 1) * l.weekly_installment)
       and (
         p_loan_ids is null
@@ -88,14 +89,14 @@ begin
           and ep.source = 'scheduled_prepayment'
           and ep.excess_amount > coalesce(ep.released_amount, 0)
           and ep.payment_date < l.start_date +
-            (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+            (floor((v_today
               - l.start_date)::numeric / 7)::integer * 7)
           and not exists (
             select 1 from public.pb_prepayment_releases existing_release
             where existing_release.prepayment_id = ep.id::text
               and existing_release.loan_id = l.id::text
               and existing_release.due_date = l.start_date +
-                (floor((least(v_today, coalesce(l.expected_end_date, v_today))
+                (floor((v_today
                   - l.start_date)::numeric / 7)::integer * 7)
           )
           and (
@@ -133,7 +134,7 @@ begin
              row_number() over (order by gs)::numeric as instalment_number
       from generate_series(
         loan_row.start_date,
-        least(v_today, coalesce(loan_row.expected_end_date, v_today)),
+        v_today,
         interval '7 days'
       ) gs
       order by gs
