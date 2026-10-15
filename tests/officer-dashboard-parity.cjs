@@ -47,6 +47,10 @@ run(`state.staff=fixture.staff[0];state.session={user:{id:'admin-auth'}};
     {recordedBy:'a',groupId:'ga',amount:1500,interest:230,entries:3},
     {recordedBy:'a',groupId:'gb',amount:60,interest:12,entries:1},
     {recordedBy:'b',groupId:'gb',amount:9000,interest:500,entries:20}]});
+  bookActivitySnapshots.set(cashSnapshotKey(range),{rows:range.start===todayISO()?[]:[
+    {officerId:'a',groupId:'ga',collections:1500,interest:230,savings:100},
+    {officerId:'a',groupId:'gb',collections:60,interest:12,savings:30},
+    {officerId:'b',groupId:'gb',collections:9000,interest:500,savings:0}]});
  }`);
 const raw=run(`buildReportRows('management_summary')[0]`);
 assert.equal(raw.ActiveLoans,4);
@@ -176,5 +180,17 @@ assert.equal(release.version,run(`APP_RELEASE`));
  assert.equal(run(`appUpdateAvailable`),true);
  modal.hasChildNodes=()=>false;await run(`checkAppRelease()`);
  assert.equal(sandbox.reloads,2,'safe reporting page upgrades when the entry closes');
+ run(`state.staff=fixture.staff[0];state._reportOfficerFilter='a';state._reportGroupFilter='';state._reportLoanStatusFilter='';
+   _reportFilter='month';appUpdateAvailable=false;
+   state.data.savings=[{recorded_by:'a',amount:13210,status:'approved',meeting_date:todayISO()}];
+   cashSnapshots.set(cashSnapshotKey(reportDateRange()),{rows:[{recordedBy:'a',amount:37920,interest:100}]});
+   bookActivitySnapshots.set(cashSnapshotKey(reportDateRange()),{rows:[{officerId:'a',groupId:'ga',collections:122295.23,interest:200,savings:35510}]});`);
+ const attributed=run(`buildReportRows('management_summary')[0]`);
+ assert.equal(attributed.Collections,122295.23);assert.equal(attributed.RecordedCollections,37920);
+ assert.equal(attributed.SavingsMobilized,35510);assert.equal(attributed.RecordedSavings,13210);
+ assert.equal(attributed.PeriodStart,'2026-09-01');assert.equal(attributed.PeriodEnd,'2026-09-26');
+ run(`exportReport('management_summary')`);
+ assert.equal(exported[0].Collections,122295.23,'export uses book totals');
+ assert.equal(exported[0].RecordedCollections,37920,'export preserves recorder totals separately');
  console.log('Rendered admin dashboard, officer dashboard, management report and Excel parity passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
