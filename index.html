@@ -591,7 +591,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261015-officer-book-reporting';
+const APP_RELEASE='20261021-function-security';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1201,10 +1201,10 @@ async function registerBusiness({ businessName, adminName, email, password, key 
   }
 
   if(!userId) return { ok:false, error:'Authentication account could not be created.' };
+  if(!session) return {ok:true,requiresEmailConfirmation:true};
 
-  // 2. Provision business, admin staff registry, permissions and settings in one
-  //    server-side database call, so email confirmation cannot leave the account
-  //    without a matching staff registry row.
+  // Provision only after authentication. The database binds the new staff
+  // profile to the caller and rejects anonymous or cross-account provisioning.
   const { error: provisionErr } = await sb.rpc('pb_register_business_admin', {
     p_auth_user_id: userId,
     p_business_name: businessName,
@@ -2105,9 +2105,12 @@ function renderAuth(){
       } else if(res.signedIn){
         toast('Business registered and signed in successfully.', 'success');
       } else {
-        $('auth-msg').innerHTML = `<div class="auth-info">Business registered successfully. ${res.requiresEmailConfirmation ? 'A confirmation email has been sent to the administrator address. Please confirm the email, then return here to sign in.' : 'You may now sign in.'}</div>`;
-        e.target.reset();
-        setTimeout(()=>{ authMode='signin'; renderAuth(); }, 1200);
+        $('auth-msg').innerHTML = `<div class="auth-info">${res.requiresEmailConfirmation ? 'Check the administrator email for the confirmation link. After confirming, return to Register business and submit the same details to finish setup.' : 'Business registered successfully. You may now sign in.'}</div>`;
+        if(!res.requiresEmailConfirmation){
+          e.target.reset();
+          setTimeout(()=>{ authMode='signin'; renderAuth(); }, 1200);
+        }
+        btn.disabled=false;btn.innerHTML='Register business';
       }
     });
   }
