@@ -9,9 +9,7 @@
 <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='100%25' height='100%25' rx='12' fill='%23e65c00'/><text x='50%25' y='62%25' font-size='30' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>WP</text></svg>" />
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jspdf@2/dist/jspdf.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3/dist/jspdf.plugin.autotable.min.js"></script>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <style>
 :root{
   --bg:#fffaf5; --surface:#ffffff; --surface-2:#fff5eb; --border:#ffe0c0;
@@ -419,7 +417,36 @@ function currentFinancialSnapshotRow(loanId){
 }
 function loanFinancialMetrics(loan,cutoff=todayISO()){
   return (cutoff===todayISO() && currentFinancialSnapshotRow(loan.id)) ||
-    WamamaFinance.metrics(loan,state.data.repayments,cutoff);
+    WamamaFinance.metrics(loan,financialReadRows('repayments','loan_id',loan.id),cutoff);
+}
+
+// Index only within a synchronous page calculation. A later render always reads
+// current arrays, including approvals, voids, account changes and transfers.
+let financialReadScope=null;
+function withFinancialReadIndex(fn){
+  if(financialReadScope) return fn();
+  financialReadScope=new Map();
+  try{return fn();}finally{financialReadScope=null;}
+}
+function financialReadRows(table,column,value,stringKeys=true){
+  const rows=state.data[table]||[];
+  const key=value=>stringKeys?String(value):value;
+  if(!financialReadScope) return rows.filter(row=>key(row[column])===key(value));
+  const cacheKey=`rows:${table}:${column}:${stringKeys}`;
+  let index=financialReadScope.get(cacheKey);
+  if(!index){
+    index=new Map();
+    rows.forEach(row=>{
+      const id=key(row[column]);
+      if(!index.has(id)) index.set(id,[]);
+      index.get(id).push(row);
+    });
+    financialReadScope.set(cacheKey,index);
+  }
+  return index.get(key(value))||[];
+}
+function financialReadRow(table,id,stringKeys=true){
+  return financialReadRows(table,'id',id,stringKeys)[0];
 }
 function financialFiguresReady(){
   if(appUpdateAvailable){
@@ -541,11 +568,19 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false}={}){
       state.data.loans.push(...result.data);
     }
     if(loanIds) loanIds.forEach(id=>byLoan.delete(String(id)));
+    const loansById=new Map(state.data.loans.map(loan=>[String(loan.id),loan]));
+    const groupsById=new Map(state.data.groups.map(group=>[String(group.id),group]));
+    const ledgerByLoan=new Map();
+    state.data.repayments.forEach(payment=>{
+      const id=String(payment.loan_id);
+      if(!ledgerByLoan.has(id)) ledgerByLoan.set(id,[]);
+      ledgerByLoan.get(id).push(payment);
+    });
     data.rows.forEach(row=>{
       byLoan.set(String(row.id),row);
-      const loan=state.data.loans.find(l=>String(l.id)===String(row.id));
+      const loan=loansById.get(String(row.id));
       if(loan) ['status','start_date','weekly_installment','loan_value','total_payable'].forEach(key=>loan[key]=row[key]);
-      const group=state.data.groups.find(g=>String(g.id)===String(row.group_id));
+      const group=groupsById.get(String(row.group_id));
       if(group) group.officer_id=row.officer_id;
     });
     state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.complete || since?data.checkedAt:(previous?.checkedAt||data.checkedAt),byLoan};
@@ -553,10 +588,11 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false}={}){
     // Repair only loans whose cached ledger differs, rather than redownloading
     // every officer's complete repayment history. This also heals old caches.
     const mismatches=data.rows.filter(row=>{
-      const loan=state.data.loans.find(l=>String(l.id)===String(row.id));
+      const loan=loansById.get(String(row.id));
       if(!loan) return false;
-      const local=WamamaFinance.metrics(loan,state.data.repayments,data.asOfDate);
-      const localRows=state.data.repayments.filter(r=>String(r.loan_id)===String(row.id) && countsInBalance(r) && WamamaFinance.paymentDate(r)<=data.asOfDate);
+      const ledger=ledgerByLoan.get(String(row.id))||[];
+      const local=WamamaFinance.metrics(loan,ledger,data.asOfDate);
+      const localRows=ledger.filter(r=>countsInBalance(r) && WamamaFinance.paymentDate(r)<=data.asOfDate);
       const latest=localRows.reduce((value,r)=>Math.max(value,Date.parse(r.updated_at||r.created_at)||0),0);
       return Math.abs(local.paid-Number(row.paid))>0.009 ||
         Math.abs(local.principalPaid-Number(row.principalPaid))>0.009 ||
@@ -591,7 +627,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261021-function-security';
+const APP_RELEASE='20261022-faster-financial-pages';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1249,17 +1285,16 @@ async function afterLogin(offline){
     state._portfolioRefreshFailed = true;
   }
   clearLegacyHeavyCache();
-  await loadSettings();
-  await loadBillingStatus({ silent:true });
+  await Promise.all([loadSettings(),loadBillingStatus({ silent:true })]);
   if(isSubscriptionLocked()){
     render();
     return;
   }
+  state.view = 'dashboard';
   if(!offline) await smartLoadAll();
   await audit('login', 'auth', state.staff.id);
   flushQueue();
   setupRealtime();
-  state.view = 'dashboard';
   render();
 }
 
@@ -1272,6 +1307,7 @@ async function signOut(){
 }
 async function resetAccountData(){
   state._accountEpoch++;
+  state._dataTablesLoading=null;state._dataTableErrors=null;
   state._officerLoanDepositRows=[];
   state._officerLoanDepositsReady=false;
   state._officerLoanDepositsCheckedAt=0;
@@ -1297,8 +1333,10 @@ async function resetAccountData(){
 }
 
 async function loadSettings(){
+  const epoch=state._accountEpoch,staffId=state.staff?.id;
   const settingsId = state.staff?.business_id ? ('biz_' + state.staff.business_id) : 'main';
   const { data } = await sb.from('pb_settings').select('*').eq('id', settingsId).maybeSingle();
+  if(epoch!==state._accountEpoch || staffId!==state.staff?.id) return;
   state.settings = data || { savings_threshold:400, registration_fee:600, max_loan_weeks:48, monthly_interest_rate:2, business_name:'Wamama Pamoja Enterprise' };
   lsSet('settings', state.settings);
 }
@@ -1517,6 +1555,8 @@ async function loadAllFinancialData(){
     state.session = sessionData.session;
   }
   const tables = ['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders','pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases','pb_purchase_lines','pb_reconciliations','pb_expenses'];
+  state._dataTablesLoading=new Set(tables);
+  state._dataTableErrors=new Set();
   const map = { pb_groups:'groups', pb_members:'members', pb_guarantors:'guarantors', pb_staff:'staff', pb_inventory:'inventory', pb_loans:'loans', pb_orders:'orders', pb_savings:'savings', pb_repayments:'repayments', pb_excess_payments:'excessPayments', pb_meetings:'meetings', pb_suppliers:'suppliers', pb_purchases:'purchases', pb_purchase_lines:'purchaseLines', pb_reconciliations:'reconciliations', pb_expenses:'expenses' };
   const cacheHits=await hydrateDataFromFinancialCache(tables,map);
   if(epoch!==state._accountEpoch) return;
@@ -1526,19 +1566,21 @@ async function loadAllFinancialData(){
   const coreTables=new Set(['pb_groups','pb_members','pb_staff','pb_inventory','pb_loans','pb_orders']);
   const stages=[
     tables.filter(table=>coreTables.has(table)),
-    tables.filter(table=>!coreTables.has(table)&&!historyTables.has(table)),
-    tables.filter(table=>historyTables.has(table))
+    tables.filter(table=>historyTables.has(table)),
+    tables.filter(table=>!coreTables.has(table)&&!historyTables.has(table))
   ];
   const failedPortfolioTables = new Set();
   const portfolioTables = new Set(['pb_groups','pb_members','pb_staff','pb_loans','pb_repayments','pb_savings']);
 
   for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
     const stageTables=stages[stageIndex];
-    const results=await loadOptimizedTablesWithLimit(stageTables,stageIndex===0?4:2);
+    const results=await loadOptimizedTablesWithLimit(stageTables,4);
     if(epoch!==state._accountEpoch) return;
     results.forEach((r,i)=>{
       const table=stageTables[i];
       const key=map[table];
+      state._dataTablesLoading.delete(table);
+      if(r.error || r.stale) state._dataTableErrors.add(table);
       if(portfolioTables.has(table) && (r.error || r.stale)) failedPortfolioTables.add(table);
       if(r.syncSetupNeeded) state._portfolioSyncSetupNeeded = true;
       if(!r.error){
@@ -1569,6 +1611,19 @@ async function loadAllFinancialData(){
       if(cacheHits) scheduleRealtimeRender();
       else render();
     }
+    if(stageIndex===1 && !jwtBroken){
+      // Verify balances as soon as the core ledger is ready. Purchases and
+      // other independent tabs can finish without blocking the dashboard.
+      applySupervisorDataScope();
+      state._portfolioDataVerified=failedPortfolioTables.size===0;
+      state._portfolioRefreshFailed=failedPortfolioTables.size>0;
+      await Promise.all([
+        refreshOfficerLoanDepositBalances({force:true}),
+        state._portfolioDataVerified?refreshFinancialSnapshot():Promise.resolve(false)
+      ]);
+      if(epoch!==state._accountEpoch) return;
+      scheduleRealtimeRender();
+    }
     await new Promise(resolve=>setTimeout(resolve,0));
   }
   // Fix 1: Reconstruct purchase items from purchase lines after page reload
@@ -1578,11 +1633,6 @@ async function loadAllFinancialData(){
       p.items = state.data.purchaseLines.filter(l => l.purchase_id === p.id);
     });
     applySupervisorDataScope();
-    await refreshOfficerLoanDepositBalances({force:true});
-    if(epoch!==state._accountEpoch) return;
-    state._portfolioDataVerified = failedPortfolioTables.size === 0;
-    state._portfolioRefreshFailed = failedPortfolioTables.size > 0;
-    if(state._portfolioDataVerified) await refreshFinancialSnapshot();
     if(state._portfolioSyncSetupNeeded) console.warn('Wamama support code WPE-01: savings or repayment incremental sync needs setup.');
     state.loading = false;
     scheduleRealtimeRender();
@@ -1679,9 +1729,11 @@ function installmentsPastDue(startDateValue, asOfDate=todayISO()){
   return Math.max(0,Math.ceil(daysSinceStart/7));
 }
 function memberSavings(memberId){
-  return state.data.savings.filter(s=>s.member_id===memberId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
+  return financialReadRows('savings','member_id',memberId,false).filter(countsInBalance).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 function buildBalanceIndexes(){
+  if(financialReadScope?.has('balances')) return financialReadScope.get('balances');
+  const cutoff=todayISO();
   const savingsByMember=new Map();
   const repaymentsByLoan=new Map();
   for(const saving of state.data.savings||[]){
@@ -1689,13 +1741,15 @@ function buildBalanceIndexes(){
     savingsByMember.set(saving.member_id,(savingsByMember.get(saving.member_id)||0)+Number(saving.amount||0));
   }
   for(const repayment of state.data.repayments||[]){
-    if(!countsInBalance(repayment) || !repayment.loan_id || !WamamaFinance.paymentDate(repayment) || WamamaFinance.paymentDate(repayment)>todayISO()) continue;
+    if(!countsInBalance(repayment) || !repayment.loan_id || !WamamaFinance.paymentDate(repayment) || WamamaFinance.paymentDate(repayment)>cutoff) continue;
     repaymentsByLoan.set(repayment.loan_id,(repaymentsByLoan.get(repayment.loan_id)||0)+Number(repayment.amount||0));
   }
-  if(state._financialSnapshot?.asOfDate===todayISO()){
+  if(state._financialSnapshot?.asOfDate===cutoff){
     state._financialSnapshot.byLoan.forEach((row,id)=>repaymentsByLoan.set(id,Number(row.paid||0)));
   }
-  return {savingsByMember,repaymentsByLoan};
+  const result={savingsByMember,repaymentsByLoan};
+  if(financialReadScope) financialReadScope.set('balances',result);
+  return result;
 }
 function buildDuplicateMemberIds(members){
   const ids=new Map(), phones=new Map(), namesInGroup=new Map();
@@ -1724,8 +1778,8 @@ function cleanMemberText(v){
   return String(v||'').trim().toLowerCase().replace(/\s+/g,' ');
 }
 function loanMemberInfo(loan){
-  const member = state.data.members.find(x => String(x.id) === String(loan?.member_id));
-  const group = state.data.groups.find(x => String(x.id) === String(loan?.group_id));
+  const member = financialReadRow('members',loan?.member_id);
+  const group = financialReadRow('groups',loan?.group_id);
   const missing = !member;
   return {
     member,
@@ -1774,7 +1828,8 @@ function isSafeEmptyDuplicateMember(member){
 function loanPaid(loanId){
   const verified=currentFinancialSnapshotRow(loanId);
   if(verified) return Number(verified.paid||0);
-  return state.data.repayments.filter(r=>r.loan_id===loanId && countsInBalance(r) && WamamaFinance.paymentDate(r)<=todayISO()).reduce((a,b)=>a + Number(b.amount||0), 0);
+  const cutoff=todayISO();
+  return financialReadRows('repayments','loan_id',loanId,false).filter(r=>countsInBalance(r) && WamamaFinance.paymentDate(r)<=cutoff).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 async function closeFullyPaidLoans(loanIds, opts={}){
   const ids = [...new Set((loanIds||[]).filter(Boolean))];
@@ -1840,7 +1895,7 @@ function memberEligible(memberId){
   return memberSavings(memberId) >= t;
 }
 function groupSavingsTotal(groupId){
-  return state.data.savings.filter(s=>s.group_id===groupId && countsInBalance(s)).reduce((a,b)=>a + Number(b.amount||0), 0);
+  return financialReadRows('savings','group_id',groupId,false).filter(countsInBalance).reduce((a,b)=>a + Number(b.amount||0), 0);
 }
 
 /* =====================================================================
@@ -1866,6 +1921,7 @@ function billingReminderMinimized(){ return sessionStorage.getItem('wp_billing_r
 function minimizeBillingReminder(){ sessionStorage.setItem('wp_billing_reminder_minimized', state.billing?.cycleMonth || billingMonthISO()); render(); }
 function showBillingReminder(){ sessionStorage.removeItem('wp_billing_reminder_minimized'); render(); }
 async function loadBillingStatus({ silent=false } = {}){
+  const epoch=state._accountEpoch,staffId=state.staff?.id;
   if(!isAdminBillingUser()){
     state.billing = { status:'not_applicable', paid:true, cycleMonth:billingMonthISO(), checkedAt:new Date().toISOString(), locked:false, reminder:false, pending:false };
     return state.billing;
@@ -1879,6 +1935,7 @@ async function loadBillingStatus({ silent=false } = {}){
     return state.billing;
   }
   const { data, error } = await sb.from('pb_billing_cycles').select('status,paid_at,paid_until,receipt_number,phone').eq('business_id', state.staff.business_id).eq('billing_month', cycleMonth).maybeSingle();
+  if(epoch!==state._accountEpoch || staffId!==state.staff?.id) return state.billing;
   if(error){
     if(!silent) toast('Could not check subscription payment status. Please try again.', 'error');
     const cachedPaid = cached && cached.cycleMonth === cycleMonth && cached.paid;
@@ -2269,6 +2326,18 @@ function toggleSidebar(force){
 }
 
 function renderPage(){
+  const dependencies={suppliers:['pb_suppliers'],purchases:['pb_purchases','pb_purchase_lines','pb_suppliers'],
+    expenses:['pb_expenses'],reconciliation:['pb_reconciliations'],meeting:['pb_meetings'],
+    accounting:['pb_purchases','pb_purchase_lines','pb_expenses']};
+  const required=dependencies[state.view]||[];
+  if(required.some(table=>state._dataTablesLoading?.has(table))){
+    $('page').innerHTML='<div class="card card-pad"><h3>Loading this section…</h3><p>Checking the latest records.</p></div>';
+    return;
+  }
+  if(required.some(table=>state._dataTableErrors?.has(table))){
+    $('page').innerHTML='<div class="card card-pad"><h3>Records could not be verified</h3><p>Please retry before using this section.</p><button class="btn btn-primary" onclick="smartLoadAll()">Retry</button></div>';
+    return;
+  }
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
     meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
@@ -2884,19 +2953,18 @@ function staffLoanRoles(){
 function loanBalanceInfo(loan){
   const verified=currentFinancialSnapshotRow(loan.id);
   if(verified) return verified;
-  return WamamaFinance.metrics(loan,state.data.repayments,todayISO());
+  return WamamaFinance.metrics(loan,financialReadRows('repayments','loan_id',loan.id),todayISO());
 }
 function loanDisplayCode(loan){
   return loan.loan_no || loan.loan_number || loan.application_no || String(loan.id||'').slice(0,8);
 }
 
 function buildLoanRepaymentHistory(loanId){
-  const loan = state.data.loans.find(l=>String(l.id)===String(loanId));
+  const loan = financialReadRow('loans',loanId);
   if(!loan) return [];
   const totalPayable = Number(loan.total_payable||0);
   let runningPaid = 0;
-  return (state.data.repayments||[])
-    .filter(r=>String(r.loan_id)===String(loanId))
+  return financialReadRows('repayments','loan_id',loanId)
     .filter(r=>countsInBalance(r) && isClientRepayment(r))
     .sort((a,b)=>String(a.meeting_date||a.created_at||'').localeCompare(String(b.meeting_date||b.created_at||'')))
     .map(r=>{
@@ -2975,7 +3043,7 @@ function pageDashboard(){
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
   const closedLoans = state.data.loans.filter(l=>l.status==='completed' && inRangeFallback(l.updated_at||l.expected_end_date||l.start_date,l.updated_at)).length;
   const closedClients = state.data.members.filter(m=>{
-    const loans = state.data.loans.filter(l=>l.member_id===m.id);
+    const loans = financialReadRows('loans','member_id',m.id,false);
     return loans.length && loans.every(l=>l.status==='completed') && loans.some(l=>inRangeFallback(l.updated_at||l.expected_end_date||l.start_date,l.updated_at));
   }).length;
   const newMembers = state.data.members.filter(m=>inRangeFallback(m.registered_on||m.created_at,m.created_at)).length;
@@ -4664,7 +4732,7 @@ function daysBetweenDates(from, to){
   return !a || !b ? 0 : Math.floor((b-a)/86400000);
 }
 function repaymentPaidByDate(loanId, cutoff){
-  return state.data.repayments
+  return financialReadRows('repayments','loan_id',loanId,false)
     .filter(r=>r.loan_id===loanId && countsInBalance(r) && WamamaFinance.paymentDate(r)<=cutoff)
     .reduce((sum,r)=>sum+Number(r.amount||0),0);
 }
@@ -4733,16 +4801,16 @@ function collectionAccessibleGroups(){
   return visiblePortfolioGroupsForCurrentStaff().filter(g=>g.status!=='inactive');
 }
 function currentPortfolioGroupForLoan(loan){
-  const member=state.data.members.find(m=>m.id===loan?.member_id);
+  const member=financialReadRow('members',loan?.member_id,false);
   const verified=currentFinancialSnapshotRow(loan?.id);
   const groupId=verified?verified.group_id:(member?.group_id||loan?.group_id);
-  return state.data.groups.find(g=>String(g.id)===String(groupId))||null;
+  return financialReadRow('groups',groupId)||null;
 }
 function currentPortfolioOfficerForLoan(loan){
   const group=currentPortfolioGroupForLoan(loan);
   const verified=currentFinancialSnapshotRow(loan?.id);
   const officerId=verified?verified.officer_id:(group?group.officer_id:loan?.officer_id);
-  return state.data.staff.find(s=>String(s.id)===String(officerId))||null;
+  return financialReadRow('staff',officerId)||null;
 }
 function buildArrearsRows(options={}){
   const portfolioView = options.portfolioView ?? canViewAllPortfolio();
@@ -5071,7 +5139,7 @@ function collectionLoanInstallmentSummary(loan,cutoff){
     ?Math.min(totalInstallments,installmentsPastDue(loan.start_date,cutoff))
     :0;
   const unpaidInstallments=Math.max(0,dueInstallments-paidInstallments);
-  const repayments=state.data.repayments
+  const repayments=financialReadRows('repayments','loan_id',loan.id,false)
     .filter(r=>r.loan_id===loan.id&&countsInBalance(r))
     .filter(r=>String(r.meeting_date||r.created_at||'').slice(0,10)<=cutoff)
     .sort((a,b)=>String(b.meeting_date||b.created_at||'').localeCompare(String(a.meeting_date||a.created_at||'')));
@@ -7501,7 +7569,7 @@ function buildReportRows(kind){
       const officerLoans=summary.loans;
       const closedLoans = officerLoans.filter(l=>l.status==='completed' && dateInReportRange(l.updated_at||l.expected_end_date||l.start_date,l.updated_at,range));
       const closedClientIds = new Set(closedLoans.map(l=>l.member_id).filter(Boolean).filter(memberId=>{
-        const memberLoans = state.data.loans.filter(l=>l.member_id===memberId);
+        const memberLoans = financialReadRows('loans','member_id',memberId,false);
         return memberLoans.length && memberLoans.every(l=>l.status==='completed');
       }));
       return {
@@ -10885,10 +10953,8 @@ function repaymentApprovalAllocation(repayment){
 }
 
 function repaymentDepositRecord(repaymentId){
-  return (state.data.excessPayments||[]).find(row=>
-    String(row.original_repayment_id)===String(repaymentId)
-    && row.source==='scheduled_prepayment'
-  )||null;
+  return financialReadRows('excessPayments','original_repayment_id',repaymentId)
+    .find(row=>row.source==='scheduled_prepayment')||null;
 }
 
 function repaymentCashReceived(repayment){
@@ -12203,6 +12269,65 @@ function exportAccountingReport(){
   XLSX.writeFile(wb, `accounting_${start}_${end}.xlsx`);
   toast('Accounting report exported','success');
 }
+// Export tools are optional until a user requests an import/export. Keep their
+// download and parsing cost off the sign-in and dashboard startup path.
+const exportScriptRequests=new Map();
+function exportLibraryReady(kind){
+  return kind==='excel'?typeof XLSX!=='undefined':
+    !!(window.jspdf?.jsPDF && (window.jspdf.jsPDF.API?.autoTable || window.jspdf.jsPDF.prototype?.autoTable));
+}
+function loadExportScript(url){
+  if(exportScriptRequests.has(url)) return exportScriptRequests.get(url);
+  const request=new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+    script.src=url;script.async=true;
+    const timeout=setTimeout(()=>fail(),20000);
+    const fail=()=>{clearTimeout(timeout);script.remove();reject(new Error('The export tool could not load. Check your connection and try again.'));};
+    script.onload=()=>{clearTimeout(timeout);resolve();};
+    script.onerror=fail;
+    document.head.appendChild(script);
+  }).catch(error=>{exportScriptRequests.delete(url);throw error;});
+  exportScriptRequests.set(url,request);return request;
+}
+async function ensureExportLibrary(kind){
+  if(exportLibraryReady(kind)) return;
+  if(kind==='excel') await loadExportScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  else{
+    if(!window.jspdf?.jsPDF) await loadExportScript('https://cdn.jsdelivr.net/npm/jspdf@2/dist/jspdf.umd.min.js');
+    await loadExportScript('https://cdn.jsdelivr.net/npm/jspdf-autotable@3/dist/jspdf.plugin.autotable.min.js');
+  }
+  if(!exportLibraryReady(kind)) throw new Error('The export tool is unavailable. Please try again.');
+}
+function deferredExportAction(fn,kind){
+  return function(...args){
+    if(exportLibraryReady(kind)) return fn.apply(this,args);
+    const epoch=state._accountEpoch;
+    return ensureExportLibrary(kind).then(()=>{
+      if(epoch!==state._accountEpoch) return;
+      return fn.apply(this,args);
+    }).catch(error=>toast(error.message,'error'));
+  };
+}
+function indexedFinancialAction(fn){
+  return function(...args){return withFinancialReadIndex(()=>fn.apply(this,args));};
+}
+[render,pageDashboard,pageOfficerDashboard,pageInventoryDashboard,pageLoans,pageArrears,pageMembers,pageGroups,
+ pageReports,pageMeeting,pageSavings,pageRepayments,pageRepaymentApprovals,pageSavingsApprovals,pageCollectionCompliance,
+ pageMemberProfile,pageAccounting,buildArrearsRows,buildCollectionCompliance,collectionFieldSheetRows,buildReportRows]
+ = [render,pageDashboard,pageOfficerDashboard,pageInventoryDashboard,pageLoans,pageArrears,pageMembers,pageGroups,
+ pageReports,pageMeeting,pageSavings,pageRepayments,pageRepaymentApprovals,pageSavingsApprovals,pageCollectionCompliance,
+ pageMemberProfile,pageAccounting,buildArrearsRows,buildCollectionCompliance,collectionFieldSheetRows,buildReportRows]
+ .map(indexedFinancialAction);
+[downloadCollectionSheet,downloadInventoryTemplate,exportAccountingReport,exportArrearsCollectionSheet,
+ exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRepaymentsFiltered,exportReport,
+ exportSavingsFiltered,exportSoldItemsExcel,importInventory]
+ = [downloadCollectionSheet,downloadInventoryTemplate,exportAccountingReport,exportArrearsCollectionSheet,
+ exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRepaymentsFiltered,exportReport,
+ exportSavingsFiltered,exportSoldItemsExcel,importInventory].map(fn=>deferredExportAction(fn,'excel'));
+[downloadCollectionFieldSheetPdf,downloadWamamaRepaymentStatementPdf,downloadWamamaSavingsStatementPdf]
+ = [downloadCollectionFieldSheetPdf,downloadWamamaRepaymentStatementPdf,downloadWamamaSavingsStatementPdf]
+ .map(fn=>deferredExportAction(fn,'pdf'));
+
 (async function boot(){
   applyTheme();
   await checkAppRelease();
@@ -12213,8 +12338,7 @@ function exportAccountingReport(){
     state.session = data.session;
     const ok = await loadStaff();
     if(!ok){ await sb.auth.signOut(); state.session=null; render(); return; }
-    await loadSettings();
-    await loadBillingStatus({ silent:true });
+    await Promise.all([loadSettings(),loadBillingStatus({ silent:true })]);
     if(isSubscriptionLocked()){ render(); return; }
     await smartLoadAll();
     setupRealtime();
