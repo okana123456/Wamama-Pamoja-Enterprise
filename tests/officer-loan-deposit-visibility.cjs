@@ -42,7 +42,7 @@ assert.equal(run('buildCollectionCompliance().memberRows[0].loanDeposits'),admin
 assert.equal(run('buildCollectionCompliance().groupRows[0].loanDeposits'),admin,'group total agrees too');
 assert.equal(run("loanDepositsByDate('member','2026-10-01')"),80,'the report date is respected');
 run(`state.session={user:{id:'auth-officer'}};state.view='collection_compliance';
-  sb.rpc=async()=>({data:[{member_id:'member',payment_date:'2026-10-01',available_amount:80}],error:null});`);
+  sb.rpc=async name=>name==='pb_release_due_prepayments'?{data:0,error:null}:{data:[{member_id:'member',payment_date:'2026-10-01',available_amount:80}],error:null};`);
 (async()=>{
   assert.equal(await run('ensureOfficerLoanDepositsForExport()'),true,'export verifies a fresh database balance');
   run(`sb.rpc=async()=>({data:null,error:{message:'Service unavailable'}});

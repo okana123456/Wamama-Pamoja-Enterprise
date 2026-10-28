@@ -627,7 +627,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261022-faster-financial-pages';
+const APP_RELEASE='20261028-shared-deposit-allocation';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1500,28 +1500,37 @@ async function hydrateDataFromFinancialCache(tables,map){
   return cacheHits;
 }
 
+let scheduledDepositRelease=null,scheduledDepositReleaseEpoch=-1;
+async function settleScheduledLoanDeposits(){
+  if(!navigator.onLine || !state.staff?.business_id) throw new Error('Connect to verify loan deposits before exporting.');
+  const epoch=state._accountEpoch;
+  if(scheduledDepositRelease && scheduledDepositReleaseEpoch===epoch) return scheduledDepositRelease;
+  scheduledDepositReleaseEpoch=epoch;
+  const request=(async()=>{
+    let total=0;
+    for(let batch=0;batch<30;batch++){
+      if(epoch!==state._accountEpoch) throw new Error('Account changed while checking loan deposits.');
+      const {data,error}=await sb.rpc('pb_release_due_prepayments',{p_loan_ids:null,p_limit:25});
+      if(epoch!==state._accountEpoch) throw new Error('Account changed while checking loan deposits.');
+      if(error) throw new Error('Loan deposits could not be applied. '+error.message);
+      const count=Number(data);
+      if(data===null || !Number.isInteger(count) || count<0) throw new Error('Loan deposit verification returned an invalid result.');
+      total+=count;
+      if(!count) return total;
+    }
+    throw new Error('Loan deposit processing is continuing. Please retry the export shortly.');
+  })();
+  scheduledDepositRelease=request;
+  try{return await request;}finally{if(scheduledDepositRelease===request) scheduledDepositRelease=null;}
+}
 function releaseDuePrepaymentsInBackground(){
   if(!navigator.onLine || !state.staff?.business_id) return;
   const epoch=state._accountEpoch;
   setTimeout(async()=>{
     if(epoch!==state._accountEpoch) return;
     let releasedTotal=0;
-    // The database selects only loans with due instalments. Continue until
-    // every eligible batch has been processed, rather than stopping at ten.
-    for(let batch=0;batch<30;batch++){
-      if(epoch!==state._accountEpoch) return;
-      const {data,error}=await sb.rpc('pb_release_due_prepayments',{
-        p_loan_ids:null,
-        p_limit:25
-      });
-      if(error){
-        console.warn('Could not release due loan prepayments',error);
-        break;
-      }
-      const released=Number(data||0);
-      releasedTotal+=released;
-      if(!released) break;
-    }
+    try{releasedTotal=await settleScheduledLoanDeposits();}
+    catch(error){console.warn('Could not release due loan prepayments',error);return;}
     if(releasedTotal>0 && epoch===state._accountEpoch){
       await refreshOfficerLoanDepositBalances({force:true,rerender:true});
       scheduleFinancialSnapshotRefresh();
@@ -5106,11 +5115,32 @@ function pageCollectionCompliance(){
   `;
 }
 async function ensureOfficerLoanDepositsForExport(){
-  if(!needsOfficerLoanDepositFeed()) return true;
-  await refreshOfficerLoanDepositBalances({force:true});
-  if(state._officerLoanDepositsReady) return true;
-  toast('Loan deposit balances are unavailable. Refresh the page and try again before exporting.','error');
-  return false;
+  const epoch=state._accountEpoch;
+  try{
+    await settleScheduledLoanDeposits();
+    // Wait out an older in-flight snapshot before requesting the post-release check.
+    if(financialRefreshPromise) await financialRefreshPromise;
+    if(epoch!==state._accountEpoch) return false;
+    if(state._financialSnapshotAvailable && !await refreshFinancialSnapshot(null,{incremental:true})){
+      throw new Error('Loan balances could not be verified after applying deposits.');
+    }
+    if(needsOfficerLoanDepositFeed()){
+      if(state._officerLoanDepositsPromise) await state._officerLoanDepositsPromise;
+      await refreshOfficerLoanDepositBalances({force:true});
+      if(!state._officerLoanDepositsReady) throw new Error('Loan deposit balances are unavailable.');
+    }else{
+      const result=await loadBusinessTableOptimized('pb_excess_payments');
+      if(result.error || result.stale) throw new Error('The latest loan deposit ledger could not be verified.');
+      if(epoch!==state._accountEpoch) return false;
+      state.data.excessPayments=result.data||[];
+    }
+    if(epoch!==state._accountEpoch) return false;
+    invalidateCollectionComplianceCache();
+    return true;
+  }catch(error){
+    toast(error.message||'Loan deposits could not be verified. Please retry the export.','error');
+    return false;
+  }
 }
 async function exportCollectionCompliance(){
   if(!financialFiguresReady()) return;
