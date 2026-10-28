@@ -32,3 +32,5 @@ fixed. Setup is repeatable and retains the prior RPC definition in a private bac
 Regression coverage: `tests/shared-deposit-auto-allocation-sql.cjs` and
 `tests/deposit-export-settlement.cjs`. The embedded SQL test simulates Cron scheduling;
 successful scheduling and real job execution must also be checked in Supabase.
+Job activation uses `cron.alter_job`, rather than direct writes to Supabase's
+managed `cron.job` table.

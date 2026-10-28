@@ -279,7 +279,7 @@ grant execute on function public.pb_release_due_prepayments(text[],integer) to a
 create extension if not exists pg_cron with schema pg_catalog;
 select cron.schedule('wamama-due-loan-deposits','*/5 * * * *',
  'select wamama_deposit_private.release_due(''b3462eea-1c92-4411-9507-fb6c0b31ba28'',null,100);') into job_id;
-update cron.job set active=true where jobid=job_id;
+perform cron.alter_job(job_id,active:=true);
 -- Catch up Peres first, then other eligible clients. The job continues subsequent batches.
 select coalesce(array_agg(l.id::text),array[]::text[]) into target_loans
 from public.pb_loans l join public.pb_members m on m.id::text=l.member_id::text and m.business_id::text=l.business_id::text

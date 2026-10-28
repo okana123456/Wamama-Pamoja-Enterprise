@@ -16,6 +16,8 @@ const fs=require('fs'),path=require('path'),assert=require('node:assert/strict')
  create schema cron;create table cron.job(jobid bigint generated always as identity,jobname text unique,schedule text,command text,active bool default true);
  create function cron.schedule(text,text,text) returns bigint language plpgsql as $$declare v bigint;begin
  insert into cron.job(jobname,schedule,command) values($1,$2,$3) on conflict(jobname) do update set schedule=$2,command=$3 returning jobid into v;return v;end$$;
+ create function cron.alter_job(job_id bigint,schedule text default null,command text default null,database text default null,username text default null,active boolean default null)
+ returns void language plpgsql as $$begin update cron.job set active=coalesce($6,cron.job.active) where jobid=$1;end$$;
  insert into pb_staff values('${id(1)}','${biz}','${id(1)}','active');
  insert into pb_members values('${id(101)}','${biz}','${id(201)}','PERES AKONG''O WAGOYA');
  insert into pb_groups values('${id(201)}','${biz}','Mumbo women group');
@@ -32,6 +34,8 @@ const fs=require('fs'),path=require('path'),assert=require('node:assert/strict')
  const sql=fs.readFileSync(path.join(__dirname,'../wamama-shared-deposit-auto-allocation.sql'),'utf8')
  .replace('create extension if not exists pg_cron with schema pg_catalog;','-- Cron is simulated in the embedded test.')
  .replaceAll("(now() at time zone 'Africa/Nairobi')::date","date '2026-10-28'");
+ assert.doesNotMatch(sql,/update\s+cron\.job/i,'managed job table must only be changed through the Cron API');
+ assert.match(sql,/cron\.alter_job\(job_id,active:=true\)/);
  await db.exec(sql);
  const balance=async()=>Number((await db.query(`select excess_amount-released_amount amount from pb_excess_payments where id='${id(40)}'`)).rows[0].amount);
  assert.equal(await balance(),1156.2,'15.40 from shared deposits covers the oldest due loan');
