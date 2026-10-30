@@ -627,7 +627,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261030-sold-items-client-button';
+const APP_RELEASE='20261030-combined-sold-items';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -2614,9 +2614,11 @@ function reviewSoldItemsLoanGroup(orderId,memberId){
   if(!group) issues.push('Group is not linked');
   const required=new Map();
   loans.forEach(loan=>{
-    if(!loan.asset_id) issues.push(`${loan.asset_name||'An item'} is not linked to inventory`);
-    const qty=Math.max(1,Number(loan.asset_quantity||1));
-    required.set(String(loan.asset_id||''),(required.get(String(loan.asset_id||''))||0)+qty);
+    const items=loan.sold_items?.length?loan.sold_items:[{asset_id:loan.asset_id,quantity:loan.asset_quantity||1}];
+    items.forEach(item=>{
+      if(!item.asset_id) issues.push('An item is not linked to inventory');
+      required.set(String(item.asset_id||''),(required.get(String(item.asset_id||''))||0)+Number(item.quantity||1));
+    });
   });
   required.forEach((qty,assetId)=>{
     const asset=state.data.inventory.find(x=>String(x.id)===assetId);
@@ -2636,7 +2638,7 @@ function reviewSoldItemsLoanGroup(orderId,memberId){
       <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Item loan</th><th class="num">Qty</th><th class="num">Principal</th><th class="num">Total payable</th><th class="num">Weekly</th><th>Status</th></tr></thead>
       <tbody>${loans.map(l=>`<tr><td><b>${statementHtml(l.asset_name||'Item')}</b></td><td class="num">${Number(l.asset_quantity||1)}</td><td class="num">${KES(l.loan_value||0)}</td><td class="num">${KES(l.total_payable||0)}</td><td class="num">${KES(l.weekly_installment||0)}</td><td><span class="badge ${l.status==='active'?'b-green':'b-yellow'}">${statementHtml(l.status)}</span></td></tr>`).join('')}</tbody>
       <tfoot><tr style="font-weight:700;background:var(--surface-2)"><td>Combined totals</td><td class="num">${loans.reduce((sum,l)=>sum+Number(l.asset_quantity||1),0)}</td><td class="num">${KES(principal)}</td><td class="num">${KES(payable)}</td><td class="num">${KES(weekly)}</td><td></td></tr></tfoot></table></div>
-      <div class="notice notice-info" style="margin-top:12px">This appears as one application for review, but every item remains a separate loan with its own balance and repayment schedule.</div>`,
+      <div class="notice notice-info" style="margin-top:12px">Products issued together share one loan balance and repayment schedule. Older forms retain their original separate loans.</div>`,
     actions:[
       {label:'Close',cls:'btn-outline',onClick:closeModal},
       ...(!issues.length&&loans.some(l=>l.status==='pending')?[{label:'Approve all items',cls:'btn-primary',onClick:async()=>{closeModal();await approveSoldItemsLoanGroup(orderId,memberId);}}]:[]),
@@ -2691,6 +2693,7 @@ async function rejectSoldItemsLoanGroup(orderId,memberId){
 function reviewSoldItemsLoan(loanId){
   const loan=state.data.loans.find(x=>String(x.id)===String(loanId));
   if(!loan) return toast('Sold-items loan not found.','error');
+  if(loan.sold_items?.length) return reviewSoldItemsLoanGroup(loan.order_id,loan.member_id);
   const member=state.data.members.find(x=>String(x.id)===String(loan.member_id));
   const group=state.data.groups.find(x=>String(x.id)===String(loan.group_id));
   const asset=state.data.inventory.find(x=>String(x.id)===String(loan.asset_id));
@@ -2739,6 +2742,7 @@ function reviewSoldItemsLoan(loanId){
 async function approveSoldItemsLoan(loanId, btn){
   if(btn){ btn.disabled = true; btn.textContent = 'Approving…'; }
   const loan = state.data.loans.find(x=>x.id===loanId);
+  if(loan?.sold_items?.length) return approveSoldItemsLoanGroup(loan.order_id,loan.member_id,btn);
   if(loan && loan.status === 'active'){
     if(btn){ btn.disabled=false; btn.textContent='Approve'; }
     return toast('This loan is already active.','warn');
@@ -7407,6 +7411,7 @@ function confirmedSaleLoans(){
 function productLinesForLoan(loan){
   const order=loan.order_id?state.data.orders.find(o=>o.id===loan.order_id):null;
   const meta=safeOrderMeta(order);
+  if(Array.isArray(loan.sold_items)&&loan.sold_items.length){return loan.sold_items.map(item=>({name:item.asset_name,quantity:Number(item.quantity),principal:Number(item.principal)}));}
   if(meta.source!=='sold_items'&&Array.isArray(meta.assets)&&meta.assets.length){
     return meta.assets.map(line=>({
       name:String(line.asset_name||'Unspecified item').trim(),
@@ -8717,7 +8722,7 @@ function openSoldItemsForm(){
         Loan Details — Total Payable = Principal + Interest (2%/month) + 6% Service Charge
       </div>
       <div class="notice notice-info" style="margin-bottom:10px">
-        Select the client and first product, then choose <b>+ Add item for this client</b> beside their name for each additional product. Each item becomes a separate loan for approval and keeps its own repayment schedule. For more units of the same product, increase Qty.
+        Select the client and first product, then choose <b>+ Add item for this client</b> beside their name for each additional product. Items for the same client in this form become one combined loan with one term and repayment schedule. For more units of the same product, increase Qty.
       </div>
       <div style="overflow-x:auto">
         <table class="tbl" id="si-table" style="min-width:820px;font-size:12px">
@@ -8733,6 +8738,7 @@ function openSoldItemsForm(){
           <tfoot id="si-totals"></tfoot>
         </table>
       </div>
+      <div id="si-client-summary" style="margin-top:12px"></div>
       <div style="margin-top:10px">
         <button class="btn btn-outline btn-sm" onclick="siAddRow()" style="font-size:12px">+ Add row</button>
         <span class="muted" style="font-size:11px;margin-left:10px" id="si-row-count"></span>
@@ -8868,7 +8874,7 @@ function renderSoldItemsRows(){
     return `<tr id="si-row-${i}" style="${isAdditional?'background:var(--primary-50);box-shadow:inset 3px 0 0 var(--primary)':i%2===1?'background:var(--surface-2)':''}">
       <td style="text-align:center;color:var(--text-muted);font-size:11px">${row.sr}.</td>
       <td style="position:relative">${isAdditional
-        ? `<div style="min-width:165px;padding:7px 8px"><b style="color:var(--primary)">Additional item</b><div class="muted" style="font-size:10px">${statementHtml(row.client_name)}</div></div>`
+        ? `<div style="min-width:165px;padding:7px 8px"><b style="color:var(--primary)">Additional product</b><div class="muted" style="font-size:10px">Part of the same loan above</div></div>`
         : `<input style="min-width:165px;font-size:12px" data-si="${i}" data-f="client_name"
         value="${statementHtml(row.client_name)}" placeholder="Search name, phone or ID" autocomplete="off" list="si-members-${i}"
         oninput="siSaveField(${i},'client_name',this.value)" onchange="siResolveClient(${i},this.value)" />
@@ -8896,7 +8902,7 @@ function renderSoldItemsRows(){
       <td>
         <input type="text" inputmode="numeric" style="width:70px;font-size:12px;text-align:right"
           data-si="${i}" data-f="loan_term"
-          value="${row.loan_term||''}" placeholder="wks"
+          value="${row.loan_term||''}" placeholder="wks" ${isAdditional?'readonly title="Shared loan term — change it on the first product row"':''}
           onchange="siSaveField(${i},'loan_term',this.value);siRecalcRow(${i})"
           onblur="siSaveField(${i},'loan_term',this.value);siRecalcRow(${i})" />
       </td>
@@ -8915,8 +8921,10 @@ function renderSoldItemsRows(){
     </tr>`;
   }).join('');
 
+  const combinedTotals=soldItemsSummaryTotals();
+  if(combinedTotals){totalPrincipal=combinedTotals.principal;totalCharge=combinedTotals.charge;totalInterest=combinedTotals.interest;totalPayable=combinedTotals.payable;}
   tfoot.innerHTML = `<tr style="background:var(--surface-2);font-weight:700;border-top:2px solid var(--border)">
-    <td colspan="5" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} item loan${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''} for ${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size} client${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size!==1?'s':''})</td>
+    <td colspan="5" style="padding:8px 14px;font-size:12px;color:var(--text-muted)">TOTALS (${_soldItems.filter(r=>Number(r.loan_amount)>0).length} product line${_soldItems.filter(r=>Number(r.loan_amount)>0).length!==1?'s':''} for ${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size} client${new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size!==1?'s':''})</td>
     <td class="num" style="padding:8px 14px;font-size:12px">${KES(totalPrincipal)}</td>
     <td></td>
     <td class="num" style="padding:8px 14px;font-size:12px;color:var(--warning)">${KES(totalCharge)}</td>
@@ -8925,12 +8933,16 @@ function renderSoldItemsRows(){
     <td colspan="2"></td>
   </tr>`;
 
-  if(counter) counter.textContent = `${_soldItems.length} row${_soldItems.length!==1?'s':''} total`;
+  if(counter) counter.textContent = `${_soldItems.length} product row${_soldItems.length!==1?'s':''} total`;
+  renderSoldClientSummary();
 }
 
 /* Save a single field without re-rendering the whole table (preserves focus) */
 function siSaveField(i, field, value){
   _soldItems[i][field] = value;
+  if(field==='loan_term' && _soldItems[i].member_id){
+    _soldItems.forEach((row,index)=>{if(String(row.member_id)===String(_soldItems[i].member_id)){row.loan_term=value;const input=document.querySelector(`[data-si="${index}"][data-f="loan_term"]`);if(input)input.value=value;siRecalcRow(index);}});
+  }
 }
 
 function soldFormMemberOptions(){
@@ -9005,22 +9017,60 @@ function siRecalcRow(i){
     ti   += p > 0 && w > 0 ? Math.round(p*0.02*(w/4)*100)/100 : 0;
     tpay += p + (p>0?Math.round(p*0.06*100)/100:0) + (p>0&&w>0?Math.round(p*0.02*(w/4)*100)/100:0);
   });
+  const combinedTotals=soldItemsSummaryTotals();
+  if(combinedTotals){tp=combinedTotals.principal;tc=combinedTotals.charge;ti=combinedTotals.interest;tpay=combinedTotals.payable;}
   const tfoot = document.getElementById('si-totals');
   if(tfoot){
     const cells = tfoot.querySelectorAll('td');
     const filled = _soldItems.filter(r=>Number(r.loan_amount)>0).length;
     const clients=new Set(_soldItems.filter(r=>Number(r.loan_amount)>0&&r.member_id).map(r=>String(r.member_id))).size;
-    if(cells[0]) cells[0].textContent = `TOTALS (${filled} item loan${filled!==1?'s':''} for ${clients} client${clients!==1?'s':''})`;
+    if(cells[0]) cells[0].textContent = `TOTALS (${filled} product line${filled!==1?'s':''} for ${clients} client${clients!==1?'s':''})`;
     if(cells[1]) cells[1].textContent = KES(tp);
     if(cells[3]) cells[3].textContent = KES(tc);
     if(cells[4]) cells[4].textContent = KES(ti);
     if(cells[5]) cells[5].textContent = KES(tpay);
   }
+  renderSoldClientSummary();
 }
 
 function siUpdateRow(i, el){
   _soldItems[i][el.dataset.f] = el.value;
   renderSoldItemsRows();
+}
+
+function soldItemsSummaryTotals(){
+  const rows=_soldItems.filter(row=>Number(String(row.loan_amount).replace(/,/g,''))>0).map((row,index)=>({...row,member_id:row.member_id||'unlinked-'+index}));
+  try{return soldItemsCombinedRows(rows).reduce((sum,loan)=>({principal:sum.principal+loan.loan_amount,charge:sum.charge+loan.serviceCharge,interest:sum.interest+loan.interest,payable:sum.payable+loan.totalPayable}),{principal:0,charge:0,interest:0,payable:0});}catch{return null;}
+}
+
+function renderSoldClientSummary(){
+  const target=document.getElementById('si-client-summary');
+  if(!target)return;
+  const rows=_soldItems.filter(row=>row.member_id&&Number(String(row.loan_amount).replace(/,/g,''))>0);
+  let loans;try{loans=soldItemsCombinedRows(rows);}catch(error){target.textContent=error.message;return;}
+  target.innerHTML=loans.map(loan=>`<div class="notice notice-info" style="margin-bottom:6px"><b>${statementHtml(loan.client_name)} — one combined loan</b><br>${loan.items.length} product line(s) · Principal ${KES(loan.loan_amount)} · Term ${loan.weeks||'—'} weeks · Total payable ${KES(loan.totalPayable)}${loan.weeks>0?' · Weekly '+KES(Math.ceil(loan.totalPayable/loan.weeks*100-1e-8)/100):''}</div>`).join('');
+}
+
+function soldItemsCombinedRows(rows){
+  const clients=new Map();
+  rows.forEach(row=>{
+    const key=String(row.member_id);
+    let combined=clients.get(key);
+    if(!combined){combined={...row,items:[],loan_amount:0,quantity:0};clients.set(key,combined);}
+    if(Number(combined.loan_term)!==Number(row.loan_term)) throw new Error('All items for '+row.client_name+' must use the same loan term.');
+    const principal=Number(String(row.loan_amount).replace(/,/g,''))||0;
+    combined.items.push({asset_id:row.asset_id,asset_name:row.product,quantity:Number(row.quantity||1),principal});
+    combined.loan_amount=Math.round((combined.loan_amount+principal)*100)/100;
+    combined.quantity+=Number(row.quantity||1);
+  });
+  return [...clients.values()].map((row,index)=>{
+    const weeks=Number(row.loan_term);
+    const charge=Math.round(row.loan_amount*0.06*100)/100;
+    const interest=Math.round(row.loan_amount*0.02*(weeks/4)*100)/100;
+    return {...row,sr:index+1,asset_id:row.items.length===1?row.items[0].asset_id:null,
+      product:row.items.map(item=>item.asset_name+' (x'+item.quantity+')').join(', '),
+      weeks,interest,serviceCharge:charge,totalPayable:Math.round((row.loan_amount+charge+interest)*100)/100};
+  });
 }
 
 async function saveSoldItemsForm(){
@@ -9032,7 +9082,7 @@ async function saveSoldItemsForm(){
   if(validRows.some(r=>!r.member_id)) return toast('Every row must use a registered client selected from the client search list.', 'error');
   if(validRows.some(r=>!r.asset_id)) return toast('Every row must use a product selected from inventory.', 'error');
   if(validRows.some(r=>Number(String(r.loan_amount).replace(/,/g,''))<=0)) return toast('Every row must have a valid loan amount.', 'error');
-  if(validRows.some(r => !parseInt(r.loan_term))) return toast('Please enter a loan term (weeks) for every client row.', 'error');
+  if(validRows.some(r => !Number.isInteger(Number(r.loan_term))||Number(r.loan_term)<=0)) return toast('Please enter a loan term (weeks) for every client row.', 'error');
 
   const itemKeys=new Set();
   for(const row of validRows){
@@ -9061,15 +9111,11 @@ async function saveSoldItemsForm(){
   const officerId     = group?.officer_id || state.staff.id;
 
   // ── 1. Save the order record (batch header) ──────────────────────────────
-  const rowsWithCalc = validRows.map(r => {
-    const principal = Number(String(r.loan_amount).replace(/,/g,'')) || 0;
-    const weeks     = parseInt(r.loan_term) || 0;
-    const months    = weeks / 4;
-    const interest  = Math.round(principal * 0.02 * months * 100) / 100;
-    const serviceCharge = Math.round(principal * 0.06 * 100) / 100;
-    const totalPayable = principal + interest + serviceCharge;
-    return { ...r, quantity:Math.max(1,Number(r.quantity||1)), loan_amount:principal, weeks, interest, serviceCharge, totalPayable };
-  });
+  let rowsWithCalc;
+  try{rowsWithCalc=soldItemsCombinedRows(validRows);}catch(error){return toast(error.message,'error');}
+  // Do not save a bundled loan until the server can deduct every product at approval.
+  const {error:bundleSetupError}=await sb.from('pb_loans').select('sold_items').limit(0);
+  if(bundleSetupError) return toast('The combined Sold Items database update must be installed before saving. Nothing was saved.','error');
 
   // Recheck the live database immediately before saving. This catches a
   // repeated form submission even when it generated a different order id or
@@ -9091,7 +9137,7 @@ async function saveSoldItemsForm(){
   }
 
   const meta = {
-    source:'sold_items', credit_officer: creditOfficer, group_name: group?.name || '',
+    source:'sold_items', loan_mode:'combined_client_items', credit_officer: creditOfficer, group_name: group?.name || '',
     branch, location, meeting_day: meetingDay, meeting_time: meetingTime,
     nearest_landmark: landmark, rows: rowsWithCalc
   };
@@ -9100,7 +9146,7 @@ async function saveSoldItemsForm(){
   const orderIns = {
     business_id: state.staff.business_id || null,
     member_id: null, group_id: groupId || null,
-    asset_id: null, asset_name: `Sold Items Form — ${validRows.length} item loan(s)`,
+    asset_id: null, asset_name: `Sold Items Form — ${rowsWithCalc.length} client loan(s)`,
     quantity: rowsWithCalc.reduce((sum,row)=>sum+Number(row.quantity||1),0), ordered_on: date, status: 'pending',
     recorded_by: state.staff.id, approved_by: null,
     notes: JSON.stringify(meta),
@@ -9122,8 +9168,6 @@ async function saveSoldItemsForm(){
     }
 
     const memberId = member.id;
-    const asset=state.data.inventory.find(a=>String(a.id)===String(row.asset_id));
-    if(!asset){ errors.push(`${row.client_name}: selected inventory item was not found.`); continue; }
 
     // Calculate loan schedule.
     // Repayments start AFTER one week — so start_date is set 7 days after the form date.
@@ -9133,15 +9177,15 @@ async function saveSoldItemsForm(){
     const startDate     = new Date(formDate);
     startDate.setDate(startDate.getDate() + 7);           // first repayment week begins after 1 week
     const endDate       = new Date(startDate);
-    endDate.setDate(endDate.getDate() + 7 * row.weeks);
+    endDate.setDate(endDate.getDate() + 7 * (row.weeks-1));
     // Weekly installment derived from full P+I+C total so passbook figure matches exactly
-    const weeklyInstallment = row.weeks > 0 ? Math.round((row.totalPayable / row.weeks) * 100) / 100 : 0;
+    const weeklyInstallment = row.weeks > 0 ? Math.ceil((row.totalPayable / row.weeks) * 100-1e-8) / 100 : 0;
 
     // Final in-memory guard for the current batch.
     const existingActiveLoan = state.data.loans.find(ex =>
       ['pending','active'].includes(ex.status) &&
       ex.member_id === memberId &&
-      String(ex.asset_id||ex.asset_name||'').trim().toLowerCase() === String(asset.id||asset.name||'').trim().toLowerCase() &&
+      String(ex.asset_id||ex.asset_name||'').trim().toLowerCase() === String(row.asset_id||row.product||'').trim().toLowerCase() &&
       Number(ex.loan_value||0) === Number(row.loan_amount||0)
     );
     if(existingActiveLoan){
@@ -9155,8 +9199,9 @@ async function saveSoldItemsForm(){
       group_id:           groupId || null,
       officer_id:         officerId,
       order_id:           orderData.id,
-      asset_id:           asset.id,
-      asset_name:         asset.name,
+      asset_id:           row.asset_id,
+      asset_name:         row.product,
+      sold_items:         row.items,
       asset_quantity:     row.quantity,
       loan_value:         row.loan_amount,
       weekly_installment: weeklyInstallment,
@@ -9187,7 +9232,7 @@ async function saveSoldItemsForm(){
     toast(`${loansCreated} loan(s) ${isPending?'submitted for approval':'created'}. ${errors.length} error(s): ${errors.join('; ')}`, 'warn');
   } else {
     const clientCount=new Set(rowsWithCalc.filter(r=>r.member_id).map(r=>String(r.member_id))).size;
-    toast(`✅ ${loansCreated} item loan(s) for ${clientCount} client(s) ${isPending ? 'submitted for BM/Admin approval — they will appear in the Approvals Queue' : 'issued and activated'}. Total principal: ${KES(totalPrincipal)}.`, 'success');
+    toast(`✅ ${loansCreated} combined loan(s) for ${clientCount} client(s) ${isPending ? 'submitted for BM/Admin approval — they will appear in the Approvals Queue' : 'issued and activated'}. Total principal: ${KES(totalPrincipal)}.`, 'success');
   }
 }
 
@@ -9198,7 +9243,9 @@ function exportSoldItemsExcel(){
   const groupName     = document.getElementById('si-group-search')?.value||'';
   const branch        = document.getElementById('si-branch')?.value||'';
   const date          = document.getElementById('si-date')?.value||todayISO();
-  const rows = validRows.map(r=>{
+  let grouped;
+  try{grouped=soldItemsCombinedRows(validRows);}catch(error){return toast(error.message,'error');}
+  const rows = grouped.map(r=>{
     const principal = Number(String(r.loan_amount).replace(/,/g,''))||0;
     const weeks     = parseInt(r.loan_term)||0;
     const months    = weeks/4;
@@ -9206,7 +9253,7 @@ function exportSoldItemsExcel(){
     const interest  = Math.round(principal*0.02*months*100)/100;
     return {
       'SR.': r.sr, 'Client Name': r.client_name, 'Phone No': r.phone,
-      'Product': r.product, 'Loan Amount (KES)': principal,
+      'Product': r.items.map(item=>item.asset_name+' (x'+item.quantity+') — '+KES(item.principal)).join('\n'), 'Loan Amount (KES)': principal,
       'Loan Term (Weeks)': r.loan_term,
       '6% Service Charge (KES)': charge,
       'Interest (2%/mo) (KES)': interest,
@@ -9232,7 +9279,7 @@ function previewSoldItemsForm(orderId){
   if(!o) return;
   let meta = {}; try{ meta=JSON.parse(o.notes||'{}'); }catch{}
   const r = state.staff?.app_role || state.staff?.role || 'officer';
-  const canEdit   = r==='admin'||r==='ceo'||r==='branch_manager'||r==='inventory_officer'||r==='storekeeper';
+  const canEdit   = meta.loan_mode!=='combined_client_items' && (r==='admin'||r==='ceo'||r==='branch_manager'||r==='inventory_officer'||r==='storekeeper');
   const canDelete = r==='admin'||r==='ceo'||r==='branch_manager';
   const rows = meta.rows||[];
 
@@ -9327,7 +9374,7 @@ function renderSiEditRows(canEdit){
       <td style="text-align:center;color:var(--text-muted)">${row.sr}.</td>
       <td><b>${row.client_name||'—'}</b>${matchBadge}</td>
       <td>${row.phone||'—'}</td>
-      <td>${row.product||'—'}</td>
+      <td>${row.items?.length?row.items.map(item=>`${statementHtml(item.asset_name)} (x${Number(item.quantity)}) — ${KES(item.principal)}`).join('<br>'):statementHtml(row.product||'—')}</td>
       <td class="num">${KES(principal)}</td>
       <td>${weeks} wks</td>
       <td class="num" style="color:var(--warning)">${KES(charge)}</td>
@@ -9355,6 +9402,7 @@ async function saveSoldItemsEdit(orderId){
   if(!(await ensureFreshToken())) return;
   const o = state.data.orders.find(x=>x.id===orderId);
   if(!o || !window._siEditRows) return;
+  if(safeOrderMeta(o).loan_mode==='combined_client_items') return toast('Combined loan forms are read-only after submission. Review the loan through Approvals.','warn');
 
   const btn = document.querySelector('.modal-foot .btn-primary');
   if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
@@ -9891,10 +9939,11 @@ function pageAccounting(){
 
   // === COST OF ASSETS ISSUED (COGS) ===
   const totalCOGS = loansIssued.reduce((a, l) => {
-    const invItem = state.data.inventory.find(i => i.id === l.asset_id || i.name === l.asset_name);
-    const buyingPrice = Number(invItem?.buying_price || 0);
-    const qty = Number(l.asset_quantity || 1);
-    return a + buyingPrice * qty;
+    const items=l.sold_items?.length?l.sold_items:[{asset_id:l.asset_id,asset_name:l.asset_name,quantity:l.asset_quantity||1}];
+    return a+items.reduce((sum,item)=>{
+      const invItem=state.data.inventory.find(i=>String(i.id)===String(item.asset_id)||i.name===item.asset_name);
+      return sum+Number(invItem?.buying_price||0)*Number(item.quantity||1);
+    },0);
   }, 0);
 
   // === OPERATIONAL EXPENSES ===

@@ -1,0 +1,42 @@
+const fs=require('fs'),path=require('path'),assert=require('node:assert/strict');
+const {PGlite}=require(process.env.PGLITE_MODULE||'@electric-sql/pglite');
+(async()=>{
+ const db=new PGlite();
+ await db.exec(`create role anon;create role authenticated;create schema auth;
+ create function auth.uid() returns uuid language sql as $$select nullif(current_setting('test.uid',true),'')::uuid$$;
+ create table pb_staff(id text primary key,auth_user_id uuid,business_id text,status text,role text);
+ create table pb_permissions(staff_id text,can_approve_orders boolean);
+ create table pb_members(id text primary key,business_id text,status text);
+ create table pb_inventory(id text primary key,business_id text,name text,stock numeric);
+ create table pb_orders(id text primary key,business_id text,notes text,status text,approved_by text);
+ create table pb_loans(id text primary key,business_id text,member_id text,order_id text,status text,asset_id text,asset_quantity numeric,loan_value numeric);
+ insert into pb_staff values('admin','00000000-0000-0000-0000-000000000001','biz','active','admin');
+ insert into pb_members values('client','biz','active');
+ insert into pb_inventory values('a','biz','Teapot',10),('b','biz','Sufuria',5),('other','otherbiz','Other',10);
+ insert into pb_orders values('order','biz','{"source":"sold_items"}','pending',null);
+ select set_config('test.uid','00000000-0000-0000-0000-000000000001',false);`);
+ const sql=fs.readFileSync(path.join(__dirname,'../wamama-combined-sold-items-loan.sql'),'utf8');
+ await db.exec(sql);await db.exec(sql);
+ const items=JSON.stringify([{asset_id:'a',quantity:1,principal:1200},{asset_id:'b',quantity:2,principal:4750}]);
+ await db.query(`insert into pb_loans values('loan','biz','client','order','pending',null,3,5950,$1::jsonb)`,[items]);
+ const call=()=>db.query(`select pb_approve_sold_items_loan_group('order','client') result`);
+ let result=(await call()).rows[0].result;
+ assert.equal(result.approved_count,1);
+ assert.deepEqual((await db.query(`select stock from pb_inventory where id in ('a','b') order by id`)).rows.map(r=>Number(r.stock)),[9,3]);
+ assert.equal((await db.query(`select status from pb_loans where id='loan'`)).rows[0].status,'active');
+ await assert.rejects(call(),/No pending/);
+ // A failed later stock check must not deduct an earlier product.
+ await db.exec(`insert into pb_orders values('order2','biz','{"source":"sold_items"}','pending',null);`);
+ await db.query(`insert into pb_loans values('short','biz','client','order2','pending',null,101,5950,$1::jsonb)`,[JSON.stringify([{asset_id:'a',quantity:1,principal:1200},{asset_id:'b',quantity:100,principal:4750}])]);
+ await assert.rejects(db.query(`select pb_approve_sold_items_loan_group('order2','client')`),/Insufficient stock/);
+ assert.equal(Number((await db.query(`select stock from pb_inventory where id='a'`)).rows[0].stock),9);
+ await assert.rejects(db.query(`insert into pb_loans values('bad','biz','client','order','pending',null,1,100,$1::jsonb)`,[JSON.stringify([{asset_id:'other',quantity:1,principal:100}])]),/not in this business/);
+ await assert.rejects(db.query(`insert into pb_loans values('bad','biz','client','order','pending',null,3,100,$1::jsonb)`,[items]),/totals must match/);
+ // Legacy item loans still approve using their inventory link.
+ await db.exec(`insert into pb_orders values('legacy','biz','{"source":"sold_items"}','pending',null);insert into pb_loans values('legacy','biz','client','legacy','pending','a',2,2400,null);`);
+ await db.query(`select pb_approve_sold_items_loan_group('legacy','client')`);
+ assert.equal(Number((await db.query(`select stock from pb_inventory where id='a'`)).rows[0].stock),7);
+ await db.exec(`select set_config('test.uid','00000000-0000-0000-0000-000000000002',false);`);
+ await assert.rejects(call(),/session was not found/);
+ await db.close();console.log('Combined and legacy stock approval, rollback, rerun, cross-business and total validation passed.');
+})().catch(error=>{console.error(error);process.exit(1)});
