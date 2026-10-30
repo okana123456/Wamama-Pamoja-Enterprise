@@ -627,7 +627,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261028-shared-deposit-allocation';
+const APP_RELEASE='20261030-sold-items-client-button';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -8717,7 +8717,7 @@ function openSoldItemsForm(){
         Loan Details — Total Payable = Principal + Interest (2%/month) + 6% Service Charge
       </div>
       <div class="notice notice-info" style="margin-bottom:10px">
-        A client may receive several different items in this same form. Each item becomes a separate loan for approval and keeps its own repayment schedule.
+        Select the client and first product, then choose <b>+ Add item for this client</b> beside their name for each additional product. Each item becomes a separate loan for approval and keeps its own repayment schedule. For more units of the same product, increase Qty.
       </div>
       <div style="overflow-x:auto">
         <table class="tbl" id="si-table" style="min-width:820px;font-size:12px">
@@ -8874,6 +8874,7 @@ function renderSoldItemsRows(){
         oninput="siSaveField(${i},'client_name',this.value)" onchange="siResolveClient(${i},this.value)" />
         <datalist id="si-members-${i}">${soldFormMemberOptions().map(m=>`<option value="${statementHtml(m.full_name)} — ${statementHtml(m.phone||m.national_id||'No phone')}"></option>`).join('')}</datalist>
         <div id="si-match-${i}" style="font-size:10px;margin-top:2px">${row.member_id?'<span style="color:var(--success)">Client linked</span>':''}</div>`}
+        ${row.member_id?`<button type="button" class="btn btn-outline btn-sm" style="margin-top:6px;white-space:normal;font-size:11px" onclick="siAddItemForClient(${i})">+ Add item for this client</button>`:''}
       </td>
       <td>
         ${isAdditional?'<span class="muted" style="font-size:11px">Same client</span>':`<input style="width:110px;font-size:12px;background:var(--surface-2)" value="${statementHtml(row.phone)}" placeholder="Auto-filled" readonly />`}
@@ -8906,8 +8907,6 @@ function renderSoldItemsRows(){
         value="${row.loan_no}" placeholder="Ref"
         onchange="siSaveField(${i},'loan_no',this.value)" /></td>
       <td style="text-align:center">
-        <button onclick="siAddItemForClient(${i})" title="Add another item for this client"
-          style="background:none;border:none;color:var(--primary);cursor:pointer;font-size:18px;padding:2px 4px;line-height:1">+</button>
         ${_soldItems.length > 1
           ? `<button onclick="siRemoveRow(${i})" title="Remove row"
                style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 4px">✕</button>`
