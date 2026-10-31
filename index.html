@@ -627,7 +627,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261030-combined-sold-items';
+const APP_RELEASE='20261031-authorized-deposit-transfer';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -11042,7 +11042,7 @@ function repaymentCashReceived(repayment){
 }
 
 function countsAsCashReceived(repayment){
-  if(!repayment || repayment.voided_at || isScheduledPrepaymentRelease(repayment) ||
+  if(!repayment || repayment.voided_at || String(repayment.notes||'').startsWith('Auto-deducted from pre-loan product deposit:') || isScheduledPrepaymentRelease(repayment) ||
     ['pending','cancelled','voided'].includes(String(repayment.status||'').toLowerCase())) return false;
   const heldSource=isHeldPrepaymentSource(repayment);
   if(String(repayment.status||'').toLowerCase()==='rejected' && !heldSource) return false;
@@ -11631,7 +11631,7 @@ function pageExcessPayments(){
 
   $('page').innerHTML=`
     <div class="page-head">
-      <div><h1>Scheduled Loan Prepayments</h1><div class="desc">Advance payments on existing loans are held separately and released as each scheduled instalment becomes due. Normal savings and pre-loan product deposits are not included.</div></div>
+      <div><h1>Loan Deposits &amp; Product Deposits</h1><div class="desc">Scheduled loan deposits pay due instalments automatically. Product deposits stay reserved for purchases unless management authorizes a transfer to an existing loan. Savings are separate.</div></div>
       <button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Refresh</button>
     </div>
     <div class="kpi-grid" style="margin-bottom:14px">
@@ -11661,13 +11661,13 @@ function pageExcessPayments(){
         return `<tr>
           <td>${fmtDate(row.payment_date||row.created_at)}</td>
           <td><b>${statementHtml(member?.full_name||'Unknown member')}</b><div class="muted" style="font-size:11px">${statementHtml(member?.phone||member?.national_id||'')} ${group?.name?`&middot; ${statementHtml(group.name)}`:''}</div></td>
-          <td><b>${statementHtml(loan?.asset_name||'Loan')}</b><div class="muted" style="font-size:11px">${loan?.total_payable?`Total ${KES(loan.total_payable)}`:''}</div></td>
+          <td><b>${statementHtml(row.source==='pre_loan_deposit'?'Reserved product deposit':loan?.asset_name||'Loan')}</b><div class="muted" style="font-size:11px">${loan?.total_payable?`Total ${KES(loan.total_payable)}`:''}</div></td>
           <td class="num">${KES(row.original_payment_amount)}</td>
           <td class="num">${KES(row.amount_applied_to_loan)}</td>
           <td class="num"><b style="color:var(--warning)">${KES(row.excess_amount)}</b></td>
           <td class="num">${KES(row.released_amount||0)}</td>
           <td class="num"><b>${KES(Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)))}</b></td>
-          <td>${excessStatusBadge(row.status)}</td>
+          <td>${row.source==='pre_loan_deposit'&&row.status==='pending'?'<span class="badge b-yellow">Reserved for purchases</span>':excessStatusBadge(row.status)}</td>
           <td style="font-size:12px">${row.resolution_reference?`<b>${statementHtml(row.resolution_reference)}</b><br>`:''}${resolver?`<span class="muted">By ${statementHtml(resolver.full_name)}</span>`:''}</td>
           <td>${row.status==='pending'&&row.source!=='scheduled_prepayment'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
         </tr>`;
@@ -11689,11 +11689,47 @@ function excessPaymentActions(ev,id){
   if(row.source==='scheduled_prepayment'){
     return toast('This deposit is reserved for this loan and will be released automatically on each due date.','info');
   }
+  if(row.source==='pre_loan_deposit') return showActMenu(ev,[
+    ...(['admin','ceo','branch_manager'].includes(String(state.staff?.role||''))?[{label:'Authorize transfer to unpaid loan instalments',onClick:()=>openProductDepositTransfer(id)}]:[]),
+    {label:'Mark loan deposit as refunded',onClick:()=>openExcessRefund(id)}
+  ]);
   showActMenu(ev,[
     {label:'Apply prepayment to another active loan',onClick:()=>openExcessToLoan(id)},
     'sep',
     {label:'Mark loan deposit as refunded',onClick:()=>openExcessRefund(id)}
   ]);
+}
+
+function openProductDepositTransfer(id){
+  const row=state.data.excessPayments.find(item=>String(item.id)===String(id));
+  if(!row||row.source!=='pre_loan_deposit'||row.status!=='pending')return;
+  if(!['admin','ceo','branch_manager'].includes(String(state.staff?.role||'')))return toast('Management authorization is required.','error');
+  const member=state.data.members.find(item=>String(item.id)===String(row.member_id));
+  const available=Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0));
+  const eligible=state.data.loans.filter(loan=>String(loan.member_id)===String(row.member_id)&&loan.status==='active'&&loanAmountDueAtDate(loan,todayISO())>0);
+  const requestId=crypto.randomUUID();let submitting=false;
+  modal({title:'Authorize product deposit repayment',body:`
+    <p><b>${statementHtml(member?.full_name||'Client')}</b> · Available product deposit: ${KES(available)}</p>
+    <div class="notice notice-info">Only the amount you authorize will pay instalments already due. The remainder stays reserved for purchases. This moves existing money and does not record new cash.</div>
+    <div class="field"><label>Loan</label><select id="product-transfer-loan">${eligible.map(loan=>`<option value="${loan.id}">${statementHtml(loan.asset_name)} — Due ${KES(loanAmountDueAtDate(loan,todayISO()))}</option>`).join('')}</select></div>
+    <div class="field"><label>Amount to transfer (KES)</label><input id="product-transfer-amount" type="number" min="0.01" step="0.01" max="${available}" value="${eligible.length?Math.min(available,loanAmountDueAtDate(eligible[0],todayISO())).toFixed(2):''}" /></div>
+    <div class="field"><label>Authorization reason / reference</label><input id="product-transfer-note" placeholder="Reason and approval reference" /></div>
+    ${!eligible.length?'<div class="notice notice-warn">No active loan has an unpaid instalment due.</div>':''}
+  `,actions:[{label:'Cancel',onClick:closeModal},...(eligible.length?[{label:'Authorize transfer',cls:'btn-primary',onClick:async()=>{
+    if(submitting)return;submitting=true;
+    try{
+      const amount=Number($('product-transfer-amount')?.value);
+      const loanId=$('product-transfer-loan')?.value;
+      const note=$('product-transfer-note')?.value?.trim();
+      if(!(amount>0)||amount>available||!note||!loanId)return toast('Select a loan, enter a valid amount and give the authorization reason.','error');
+      if(!(await ensureFreshToken()))return;
+      const {data,error}=await sb.rpc('pb_transfer_product_deposit_to_due_loan',{p_deposit_id:String(id),p_loan_id:String(loanId),p_amount:amount,p_note:note,p_request_id:requestId});
+      if(error)return toast(error.message,'error');
+      await refreshExcessRelatedData({loanIds:[loanId],repaymentIds:[data.repayment_id],memberIds:[row.member_id]});
+      await refreshFinancialSnapshot([loanId]);invalidateCollectionComplianceCache();closeModal();render();
+      toast('Authorized deposit transfer applied; the unused product deposit remains available.','success');
+    }catch(error){toast(error.message||'Could not confirm the transfer. Refresh before trying again.','error');}finally{submitting=false;}
+  }}]:[])]});
 }
 
 function openExcessRefund(id){

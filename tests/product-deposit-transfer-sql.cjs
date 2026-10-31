@@ -1,0 +1,28 @@
+const fs=require('fs'),path=require('path'),assert=require('node:assert/strict');
+const {PGlite}=require(process.env.PGLITE_MODULE||'@electric-sql/pglite');
+(async()=>{const db=new PGlite();await db.exec(`
+create role anon;create role authenticated;create schema auth;create function auth.uid() returns text language sql as $$select current_setting('test.actor',true)$$;
+create table pb_staff(id text,business_id text,auth_user_id text,status text,role text);
+create table pb_loans(id text,business_id text,member_id text,group_id text,status text,start_date date,weekly_installment numeric,total_payable numeric,loan_value numeric);
+create table pb_excess_payments(id text,business_id text,member_id text,loan_id text,source text,status text,payment_date date,excess_amount numeric,released_amount numeric,last_released_at timestamptz,updated_at timestamptz,resolved_at timestamptz,resolution_reference text);
+create table pb_repayments(id text default gen_random_uuid()::text,business_id text,loan_id text,member_id text,group_id text,meeting_date date,amount numeric,principal numeric,interest numeric,recorded_by text,status text,notes text,voided_at timestamptz,created_at timestamptz default now());
+insert into pb_staff values('admin','biz','admin','active','admin'),('officer','biz','officer','active','loan_officer');
+insert into pb_loans values('loan','biz','nancy','group','active',current_date,522.67,6272,5600);
+insert into pb_excess_payments values('dep','biz','nancy',null,'pre_loan_deposit','pending',current_date,1300,0,null,null,null,null),('other','biz','different',null,'pre_loan_deposit','pending',current_date,1300,0,null,null,null,null);
+insert into pb_repayments(business_id,loan_id,member_id,amount,status,meeting_date)values('biz','loan','nancy',333.61,'approved',current_date);
+select set_config('test.actor','admin',false);
+`);
+await db.exec(fs.readFileSync(path.join(__dirname,'../wamama-authorized-product-deposit-transfer.sql'),'utf8'));
+const call=(dep='dep',amount=189.06,request='nancy-transfer-test-1')=>db.query(`select pb_transfer_product_deposit_to_due_loan($1,'loan',$2,'Authorized test',$3) result`,[dep,amount,request]);
+const result=(await call()).rows[0].result;assert.equal(Number(result.due_remaining),0);assert.equal(Number(result.deposit_remaining),1110.94);
+assert.equal((await call()).rows[0].result.already_applied,true);
+assert.equal((await db.query(`select count(*)::int n from pb_repayments where notes like 'Auto-deducted from pre-loan%'`)).rows[0].n,1);
+await assert.rejects(call('other',1,'foreign-client-test-1'),/same client/);
+await assert.rejects(call('dep',1,'above-due-test-001'),/already due/);
+await assert.rejects(call('dep',189,'nancy-transfer-test-1'),/different instructions/);
+await assert.rejects(db.query("delete from pb_repayments where notes like 'Auto-deducted from pre-loan%'"),/cannot be deleted/);
+await assert.rejects(db.query("update pb_repayments set amount=1 where notes like 'Auto-deducted from pre-loan%'"),/cannot be edited/);
+await db.exec(`select set_config('test.actor','officer',false)`);
+await assert.rejects(call(),/Only an active administrator/);
+assert.equal((await db.query(`select has_function_privilege('anon','public.pb_transfer_product_deposit_to_due_loan(text,text,numeric,text,text)','execute') ok`)).rows[0].ok,false);
+console.log('Partial transfer clears due amount, preserves remainder, retries once, rejects officer/foreign-client/excess-due instructions and denies anonymous execution.');await db.close();})().catch(e=>{console.error(e);process.exit(1)});
