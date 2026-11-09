@@ -48,5 +48,21 @@ run(`state.session={user:{id:'auth-officer'}};state.view='collection_compliance'
   run(`sb.rpc=async()=>({data:null,error:{message:'Service unavailable'}});
     toast=()=>{};`);
   assert.equal(await run('ensureOfficerLoanDepositsForExport()'),false,'export stops when the balance cannot be verified');
+  assert.equal(run("canView('loan_deposits')"),false);
+  run(`state.staff={id:'supervisor',role:'supervisor',business_id:'biz'};
+    state.view='loan_deposits';state.data.excessPayments=[{id:'hidden-deposit'}];
+    sb.rpc=async name=>{
+      if(name!=='pb_supervisor_product_deposits')throw Error('Expected scoped deposit listing');
+      return {data:[{id:'team-deposit',member_id:'member',group_id:'group',source:'pre_loan_deposit',
+        status:'pending',excess_amount:100,payment_date:'2026-10-01'}],error:null};
+    };`);
+  assert.equal(run("canView('loan_deposits')"),true);
+  await run('loadSupervisorProductDeposits()');
+  assert.match(node.innerHTML,/team-deposit/);
+  assert.doesNotMatch(node.innerHTML,/hidden-deposit/);
+  run("showActMenu=(event,items)=>globalThis.depositMenu=items.map(item=>item.label); excessPaymentActions(null,'team-deposit')");
+  assert.deepEqual(Array.from(sandbox.depositMenu),['Authorize transfer to unpaid loan instalments']);
+  run('state._accountEpoch++');
+  assert.equal(run('productDepositPageRows()'),null,'a new session cannot reuse a supervisor deposit view');
   console.log('Admin and officer deposit parity, date cutoff and safe PDF export passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

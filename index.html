@@ -629,7 +629,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261109-deposit-management-entry';
+const APP_RELEASE='20261109-supervisor-deposit-transfer';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1173,7 +1173,7 @@ const PAGE_ACCESS = {
   memberProfile:  'ALL'
 };
 function canView(page){
-  if(page === 'loan_deposits') return canManageExcessPayments();
+  if(page === 'loan_deposits') return canManageExcessPayments() || isSupervisorScoped();
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
@@ -2321,6 +2321,7 @@ function go(view, ctx=null){
     toast('You do not have access to that section.','error');
     return;
   }
+  if(view==='loan_deposits' && usesScopedProductDepositPage()) supervisorProductDepositView=undefined;
   state.view = view;
   state.viewCtx = ctx;
   try{
@@ -11511,7 +11512,7 @@ function pageRepayments(){
       </div>
       <div class="actions" style="gap:8px">
         <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Pre-loan Product Deposit</button>
-        ${canManageExcessPayments()?'<button class="btn btn-outline" onclick="go(&#39;loan_deposits&#39;)">Loan Deposits &amp; Product Deposits</button>':''}
+        ${canView('loan_deposits')?'<button class="btn btn-outline" onclick="go(&#39;loan_deposits&#39;)">Loan Deposits &amp; Product Deposits</button>':''}
         <button class="btn btn-outline" onclick="exportRepaymentsFiltered()">⬇ Export to Excel</button>
       </div>
     </div>
@@ -11661,17 +11662,54 @@ async function refreshExcessRelatedData({loanIds=[],repaymentIds=[],memberIds=[]
   await refreshOfficerLoanDepositBalances({force:true,rerender:true});
 }
 
+function usesScopedProductDepositPage(){
+  return isSupervisorScoped() && !canManageExcessPayments();
+}
+
+let supervisorProductDepositView;
+async function loadSupervisorProductDeposits(){
+  const view={epoch:state._accountEpoch,staffId:state.staff?.id,rows:null,error:null};
+  supervisorProductDepositView=view;
+  try {
+    const {data,error}=await sb.rpc('pb_supervisor_product_deposits');
+    if(error) throw error;
+    view.rows=data||[];
+  } catch(error){
+    view.error=error.message||'Could not load your team’s product deposits.';
+  }
+  if(supervisorProductDepositView===view && view.epoch===state._accountEpoch &&
+    view.staffId===state.staff?.id && state.view==='loan_deposits') renderPage();
+}
+
+function productDepositPageRows(){
+  if(!usesScopedProductDepositPage()) return state.data.excessPayments||[];
+  const view=supervisorProductDepositView;
+  if(view?.epoch!==state._accountEpoch || view.staffId!==state.staff?.id) return null;
+  return view.rows;
+}
+
 function pageExcessPayments(){
-  if(!canManageExcessPayments()){
+  if(!canView('loan_deposits')){
     $('page').innerHTML='<div class="card card-pad"><h3>Access restricted</h3><p class="muted">Only administrators and specifically authorised staff can manage excess payments.</p></div>';
     return;
   }
 
   const search=String(_excessSearch||'').trim().toLowerCase();
-  const all=[...(state.data.excessPayments||[])].sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  const scoped=usesScopedProductDepositPage();
+  const rows=productDepositPageRows();
+  if(rows===null){
+    const view=supervisorProductDepositView;
+    if(view?.epoch!==state._accountEpoch || view.staffId!==state.staff?.id) void loadSupervisorProductDeposits();
+    const error=supervisorProductDepositView?.error;
+    $('page').innerHTML=error
+      ? '<div class="card card-pad"><p>'+statementHtml(error)+'</p><button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Retry</button></div>'
+      : '<div class="card card-pad">Loading your team’s product deposits…</div>';
+    return;
+  }
+  const all=[...rows].sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
   const pending=all.filter(x=>x.status==='pending');
   const visible=all.filter(x=>{
-    if(_excessStatusFilter!=='all' && x.status!==_excessStatusFilter) return false;
+    if(!scoped && _excessStatusFilter!=='all' && x.status!==_excessStatusFilter) return false;
     const member=state.data.members.find(m=>String(m.id)===String(x.member_id));
     const group=state.data.groups.find(g=>String(g.id)===String(x.group_id));
     const loan=state.data.loans.find(l=>String(l.id)===String(x.loan_id));
@@ -11696,7 +11734,7 @@ function pageExcessPayments(){
     <div class="card card-pad" style="padding:12px;margin-bottom:14px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
         <input value="${statementHtml(_excessSearch)}" placeholder="Search member, phone, ID, group or reference" oninput="_excessSearch=this.value;pageExcessPayments()" />
-        <select onchange="_excessStatusFilter=this.value;pageExcessPayments()">
+        <select ${scoped?'hidden':''} onchange="_excessStatusFilter=this.value;pageExcessPayments()">
           <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Available deposits</option>
           <option value="all" ${_excessStatusFilter==='all'?'selected':''}>All records</option>
           <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Historical moved-to-savings records</option>
@@ -11725,11 +11763,17 @@ function pageExcessPayments(){
           <td style="font-size:12px">${row.resolution_reference?`<b>${statementHtml(row.resolution_reference)}</b><br>`:''}${resolver?`<span class="muted">By ${statementHtml(resolver.full_name)}</span>`:''}</td>
           <td>${row.status==='pending'&&row.source!=='scheduled_prepayment'?`<button class="act-btn" onclick="excessPaymentActions(event,'${row.id}')">&middot;&middot;&middot;</button>`:'&mdash;'}</td>
         </tr>`;
-      }).join(''):`<tr><td colspan="11"><div class="empty"><h4>No scheduled prepayments found</h4><p>${_excessStatusFilter==='pending'?'There are no available scheduled prepayments.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
+      }).join(''):`<tr><td colspan="11"><div class="empty"><h4>No matching deposits found</h4><p>${_excessStatusFilter==='pending'?'There are no available deposits matching your search.':'Try changing the search or status filter.'}</p></div></td></tr>`}</tbody>
     </table></div>`;
 }
 
 async function refreshExcessPaymentsPage(){
+  if(usesScopedProductDepositPage()){
+    const pending=loadSupervisorProductDeposits();
+    renderPage();
+    await pending;
+    return;
+  }
   try{
     await refreshExcessRelatedData();
     render();
@@ -11738,14 +11782,14 @@ async function refreshExcessPaymentsPage(){
 }
 
 function excessPaymentActions(ev,id){
-  const row=(state.data.excessPayments||[]).find(x=>x.id===id);
+  const row=productDepositPageRows()?.find(x=>String(x.id)===String(id));
   if(!row || row.status!=='pending') return;
   if(row.source==='scheduled_prepayment'){
     return toast('This deposit is reserved for this loan and will be released automatically on each due date.','info');
   }
   if(row.source==='pre_loan_deposit') return showActMenu(ev,[
-    ...(['admin','ceo','branch_manager'].includes(String(state.staff?.role||''))?[{label:'Authorize transfer to unpaid loan instalments',onClick:()=>openProductDepositTransfer(id)}]:[]),
-    {label:'Mark loan deposit as refunded',onClick:()=>openExcessRefund(id)}
+    ...(['admin','ceo','branch_manager','supervisor'].includes(String(state.staff?.role||''))?[{label:'Authorize transfer to unpaid loan instalments',onClick:()=>openProductDepositTransfer(id)}]:[]),
+    ...(canManageExcessPayments()?[{label:'Mark loan deposit as refunded',onClick:()=>openExcessRefund(id)}]:[])
   ]);
   showActMenu(ev,[
     {label:'Apply prepayment to another active loan',onClick:()=>openExcessToLoan(id)},
@@ -11755,9 +11799,10 @@ function excessPaymentActions(ev,id){
 }
 
 function openProductDepositTransfer(id){
-  const row=state.data.excessPayments.find(item=>String(item.id)===String(id));
+  const row=productDepositPageRows()?.find(item=>String(item.id)===String(id));
   if(!row||row.source!=='pre_loan_deposit'||row.status!=='pending')return;
-  if(!['admin','ceo','branch_manager'].includes(String(state.staff?.role||'')))return toast('Management authorization is required.','error');
+  if(!['admin','ceo','branch_manager','supervisor'].includes(String(state.staff?.role||'')))return toast('Transfer authorization is required.','error');
+  const epoch=state._accountEpoch,staffId=state.staff?.id;
   const member=state.data.members.find(item=>String(item.id)===String(row.member_id));
   const available=Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0));
   const eligible=state.data.loans.filter(loan=>String(loan.member_id)===String(row.member_id)&&loan.status==='active'&&loanAmountDueAtDate(loan,todayISO())>0);
@@ -11777,10 +11822,21 @@ function openProductDepositTransfer(id){
       const note=$('product-transfer-note')?.value?.trim();
       if(!(amount>0)||amount>available||!note||!loanId)return toast('Select a loan, enter a valid amount and give the authorization reason.','error');
       if(!(await ensureFreshToken()))return;
+      if(epoch!==state._accountEpoch||staffId!==state.staff?.id)return;
       const {data,error}=await sb.rpc('pb_transfer_product_deposit_to_due_loan',{p_deposit_id:String(id),p_loan_id:String(loanId),p_amount:amount,p_note:note,p_request_id:requestId});
+      if(epoch!==state._accountEpoch||staffId!==state.staff?.id)return;
       if(error)return toast(error.message,'error');
-      await refreshExcessRelatedData({loanIds:[loanId],repaymentIds:[data.repayment_id],memberIds:[row.member_id]});
-      await refreshFinancialSnapshot([loanId]);invalidateCollectionComplianceCache();closeModal();render();
+      if(usesScopedProductDepositPage()){
+        await Promise.all([
+          loadSupervisorProductDeposits(),
+          refreshOfficerLoanDepositBalances({force:true})
+        ]);
+      }else{
+        await refreshExcessRelatedData({loanIds:[loanId],repaymentIds:[data.repayment_id],memberIds:[row.member_id]});
+      }
+      await refreshFinancialSnapshot([loanId]);
+      if(epoch!==state._accountEpoch||staffId!==state.staff?.id)return;
+      invalidateCollectionComplianceCache();closeModal();render();
       toast('Authorized deposit transfer applied; the unused product deposit remains available.','success');
     }catch(error){toast(error.message||'Could not confirm the transfer. Refresh before trying again.','error');}finally{submitting=false;}
   }}]:[])]});
