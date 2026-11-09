@@ -629,7 +629,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261031-loan-return-control';
+const APP_RELEASE='20261109-deposit-management-entry';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1173,6 +1173,7 @@ const PAGE_ACCESS = {
   memberProfile:  'ALL'
 };
 function canView(page){
+  if(page === 'loan_deposits') return canManageExcessPayments();
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   // Only CEO and Administrator get unrestricted full access
   if(r === 'ceo' || r === 'admin') return true;
@@ -2306,7 +2307,7 @@ function renderShell(){
 function pageTitle(){
   return ({
     dashboard:'Dashboard', approvals:'Approvals Queue', groups:'Groups', members:'Members', meeting:'Meeting Recorder', collection_compliance:'Collection Compliance',
-    savings:'Savings', repayments:'Repayments', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
+    savings:'Savings', repayments:'Repayments', loan_deposits:'Loan Deposits & Product Deposits', repayment_approvals:'Repayment Approvals', savings_approvals:'Savings Approvals',
     loans:'Active Loans', arrears:'Due & Arrears', calculator:'Loan Calculator', inventory:'Inventory',
     suppliers:'Suppliers', purchases:'Purchases', orders:'Orders', sold_items:'Sold Items Loan Form',
     reconciliation:'Remittances', expenses:'Expenses', reports:'Reports', accounting:'Accounting',
@@ -2351,7 +2352,7 @@ function renderPage(){
   }
   const fns = {
     dashboard: pageDashboard, approvals: pageApprovals, groups: pageGroups, members: pageMembers,
-    meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
+    meeting: pageMeeting, collection_compliance: pageCollectionCompliance, savings: pageSavings, repayments: pageRepayments, loan_deposits: pageExcessPayments, repayment_approvals: pageRepaymentApprovals, savings_approvals: pageSavingsApprovals,
     loans: pageLoans, arrears: pageArrears, calculator: pageCalculator,
     inventory: pageInventory, suppliers: pageSuppliers, purchases: pagePurchases,
     orders: pageOrders, sold_items: pageSoldItems, reconciliation: pageReconciliation, expenses: pageExpenses, reports: pageReports, accounting: pageAccounting,
@@ -4487,7 +4488,7 @@ function pageMemberProfile(){
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
       <div class="kpi k-success"><div class="l">Total savings</div><div class="v">${KES(totalSv)}</div><div class="d">${memberEligible(m.id)?'<span class="badge b-green">Eligible</span>':'<span class="badge b-grey">Below threshold</span>'}${sv.filter(s=>s.status==='pending').length>0?`<span class="badge b-yellow" style="margin-left:4px">${sv.filter(s=>s.status==='pending').length} pending</span>`:''}</div></div>
-      <div class="kpi k-primary"><div class="l">Available loan deposits</div><div class="v">${availableLoanDeposits===null?'—':KES(availableLoanDeposits)}</div><div class="d">${availableLoanDeposits===null?'Balance temporarily unavailable':'Prepayments not yet applied to loans'}</div></div>
+      <div class="kpi k-primary"><div class="l">Available loan deposits</div><div class="v">${availableLoanDeposits===null?'—':KES(availableLoanDeposits)}</div><div class="d">${availableLoanDeposits===null?'Balance temporarily unavailable':'Includes product deposits reserved for purchases'}</div></div>
       <div class="kpi k-primary"><div class="l">Active loans</div><div class="v">${activeMemberLoans.length?KES(activeLoanPrincipal):'—'}</div><div class="d">${activeMemberLoans.length?`${activeMemberLoans.length} loan${activeMemberLoans.length!==1?'s':''} · Outstanding ${KES(activeLoanOutstanding)}`:'No active loan'}</div></div>
       <div class="kpi"><div class="l">Total repaid</div><div class="v">${KES(repayments.filter(r=>r.status!=='pending').reduce((a,b)=>a+Number(b.amount||0),0))}</div><div class="d">${repayments.filter(r=>r.status!=='pending').length} approved entries${repayments.filter(r=>r.status==='pending').length>0?` · <span style="color:var(--warning)">${repayments.filter(r=>r.status==='pending').length} pending</span>`:''}</div></div>
       <div class="kpi k-warn"><div class="l">Member since</div><div class="v" style="font-size:16px">${fmtDate(m.registered_on)}</div></div>
@@ -11510,6 +11511,7 @@ function pageRepayments(){
       </div>
       <div class="actions" style="gap:8px">
         <button class="btn btn-primary" onclick="openPreLoanDeposit()">Record Pre-loan Product Deposit</button>
+        ${canManageExcessPayments()?'<button class="btn btn-outline" onclick="go(&#39;loan_deposits&#39;)">Loan Deposits &amp; Product Deposits</button>':''}
         <button class="btn btn-outline" onclick="exportRepaymentsFiltered()">⬇ Export to Excel</button>
       </div>
     </div>
@@ -11687,7 +11689,7 @@ function pageExcessPayments(){
       <button class="btn btn-outline" onclick="refreshExcessPaymentsPage()">Refresh</button>
     </div>
     <div class="kpi-grid" style="margin-bottom:14px">
-      <div class="kpi"><div class="l">Available prepayment</div><div class="v" style="color:var(--warning)">${KES(pending.reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0))}</div><div class="d">${pending.length} deposit${pending.length===1?'':'s'}</div></div>
+      <div class="kpi"><div class="l">Available deposits</div><div class="v" style="color:var(--warning)">${KES(pending.reduce((sum,row)=>sum+Math.max(0,Number(row.excess_amount||0)-Number(row.released_amount||0)),0))}</div><div class="d">${pending.length} deposit${pending.length===1?'':'s'}</div></div>
       <div class="kpi"><div class="l">Resolved</div><div class="v">${KES(resolvedTotal)}</div><div class="d">${resolved.length} payment${resolved.length===1?'':'s'}</div></div>
       <div class="kpi"><div class="l">Total protected</div><div class="v">${KES(pendingTotal+resolvedTotal)}</div><div class="d">No prepayment is discarded</div></div>
     </div>
@@ -11695,7 +11697,7 @@ function pageExcessPayments(){
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
         <input value="${statementHtml(_excessSearch)}" placeholder="Search member, phone, ID, group or reference" oninput="_excessSearch=this.value;pageExcessPayments()" />
         <select onchange="_excessStatusFilter=this.value;pageExcessPayments()">
-          <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Available for future instalments</option>
+          <option value="pending" ${_excessStatusFilter==='pending'?'selected':''}>Available deposits</option>
           <option value="all" ${_excessStatusFilter==='all'?'selected':''}>All records</option>
           <option value="transferred_to_savings" ${_excessStatusFilter==='transferred_to_savings'?'selected':''}>Historical moved-to-savings records</option>
           <option value="refunded" ${_excessStatusFilter==='refunded'?'selected':''}>Refunded</option>
