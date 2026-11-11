@@ -262,7 +262,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 .compliance-issue{display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border-bottom:1px solid var(--border)}
 .compliance-issue:last-child{border-bottom:0}
 .compliance-issue .issue-mark{width:8px;height:8px;margin-top:5px;border-radius:50%;background:var(--warning);flex:0 0 auto}
-.product-sales-filters{display:grid;grid-template-columns:minmax(170px,.6fr) minmax(220px,1.4fr) auto;gap:10px;align-items:end}
+.product-sales-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}
 .product-sales-filters .field{margin:0}
 .product-sales-metrics{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
 @media(max-width:900px){.compliance-filters{grid-template-columns:1fr 1fr}.compliance-group .group-metrics{grid-template-columns:repeat(3,1fr)}}
@@ -629,7 +629,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261109-supervisor-deposit-transfer';
+const APP_RELEASE='20261111-monthly-incentive-reports';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -7455,6 +7455,54 @@ function approveOrder(o){
 /* =====================================================================
  * PAGE: REPORTS
  * ===================================================================== */
+function incentiveReportOfficers(){
+  return [...state.data.staff].sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
+}
+function recruitmentMonth(){return state._recruitmentMonth||todayISO().slice(0,7);}
+function buildRecruitmentReport(){
+  const month=recruitmentMonth();
+  const officerId=state._recruitmentOfficer||'';
+  const rows=state.data.members.filter(member=>
+    !['pending','rejected','cancelled'].includes(String(member.status||'').toLowerCase())
+  ).map(member=>{
+    const group=state.data.groups.find(group=>String(group.id)===String(member.group_id));
+    const ownerId=member.officer_id||group?.officer_id;
+    const officer=state.data.staff.find(officer=>String(officer.id)===String(ownerId));
+    const date=member.registered_on?String(member.registered_on).slice(0,10):member.created_at?kenyaDateISO(new Date(member.created_at)):'';
+    return {Month:month,RegistrationDate:date,Client:member.full_name,Phone:member.phone||'',
+      NationalID:member.national_id||'',Group:group?.name||'Unassigned',Officer:officer?.full_name||'Unassigned',
+      OfficerID:ownerId||'',MemberID:member.id,Status:member.status||'',
+      Attribution:member.officer_id?'Recorded member officer':'Current group officer fallback'};
+  }).filter(row=>row.RegistrationDate.startsWith(month)&&(!officerId||String(row.OfficerID)===String(officerId)))
+    .sort((a,b)=>a.RegistrationDate.localeCompare(b.RegistrationDate)||String(a.Client).localeCompare(String(b.Client)));
+  const officers=new Map();
+  rows.forEach(row=>{
+    if(!officers.has(row.OfficerID))officers.set(row.OfficerID,{Month:month,Officer:row.Officer,OfficerID:row.OfficerID,ClientsRecruited:0});
+    officers.get(row.OfficerID).ClientsRecruited++;
+  });
+  return {month,rows,summary:[...officers.values()]};
+}
+function recruitmentReportHtml(){
+  const report=buildRecruitmentReport();
+  return `<div class="card" style="margin-bottom:18px">
+    <div class="card-head"><h3>Monthly Client Recruitment</h3><button class="btn btn-primary btn-sm" onclick="exportRecruitmentReport()">Export Excel</button></div>
+    <div class="card-pad"><div class="product-sales-filters">
+      <div class="field"><label>Recruitment month</label><input type="month" value="${report.month}" onchange="state._recruitmentMonth=this.value;pageReports()" /></div>
+      <div class="field"><label>Officer</label><select onchange="state._recruitmentOfficer=this.value;pageReports()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._recruitmentOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
+    </div><p>${report.rows.length} approved clients registered in this month. Attribution uses the member’s recorded officer, with the current group officer as a fallback.</p></div>
+    <div class="table-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Client</th><th>Phone</th><th>Group</th><th>Officer</th><th>Status</th></tr></thead>
+    <tbody>${report.rows.map(row=>`<tr><td>${fmtDate(row.RegistrationDate)}</td><td>${statementHtml(row.Client)}</td><td>${statementHtml(row.Phone)}</td><td>${statementHtml(row.Group)}</td><td>${statementHtml(row.Officer)}</td><td>${statementHtml(row.Status)}</td></tr>`).join('')||'<tr><td colspan="6">No approved recruits found for this selection.</td></tr>'}</tbody></table></div>
+  </div>`;
+}
+function exportRecruitmentReport(){
+  const report=buildRecruitmentReport();
+  if(!report.rows.length)return toast('No recruited clients for this selection.','warn');
+  const workbook=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet(report.summary),'Officer Summary');
+  XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet(report.rows),'Recruited Clients');
+  XLSX.writeFile(workbook,'client_recruitment_'+report.month+'.xlsx');
+}
+
 function productSalesMonth(){ return state._productSalesMonth||todayISO().slice(0,7); }
 function handleProductSalesSearch(input){
   rerenderSearchWithFocus(input,'_productSalesSearch','_productSalesSearchTimer',pageReports,'product-sales-search');
@@ -7473,6 +7521,12 @@ function productLinesForLoan(loan){
       principal:Number(line.loan_price||0)*Math.max(1,Number(line.quantity||1))
     }));
   }
+  const legacyItems=[...String(loan.asset_name||'').matchAll(/(?:^|,\s*)(.*?)\s*\(x(\d+)\)(?=\s*(?:,|$))/gi)];
+  if(legacyItems.length>1){
+    const units=legacyItems.reduce((sum,item)=>sum+Number(item[2]),0);
+    return legacyItems.map(item=>({name:item[1].trim(),quantity:Number(item[2]),
+      principal:Number(loan.loan_value||0)*Number(item[2])/units,valueBasis:'Estimated by units; original item prices unavailable'}));
+  }
   return [{name:String(loan.asset_name||'Unspecified item').trim(),quantity:Math.max(1,Number(loan.asset_quantity||1)),principal:Number(loan.loan_value||0)}];
 }
 function buildProductSalesReport(){
@@ -7485,14 +7539,16 @@ function buildProductSalesReport(){
     if(!saleDate.startsWith(month)) return;
     const member=state.data.members.find(m=>m.id===loan.member_id);
     const group=currentPortfolioGroupForLoan(loan);
-    const officer=currentPortfolioOfficerForLoan(loan)||state.data.staff.find(s=>s.id===order?.recorded_by);
+    const recordedOfficerId=loan.officer_id||order?.recorded_by;
+    const officer=state.data.staff.find(item=>String(item.id)===String(recordedOfficerId))||currentPortfolioOfficerForLoan(loan);
+    if(state._productSalesOfficer && String(officer?.id||'')!==String(state._productSalesOfficer))return;
     const lines=productLinesForLoan(loan);
     const linePrincipalTotal=lines.reduce((sum,line)=>sum+Number(line.principal||0),0);
     lines.forEach(line=>{
       if(query&&!cleanMemberText(line.name).includes(query)) return;
       const principal=Number(line.principal||0)||(Number(loan.loan_value||0)/Math.max(1,lines.length));
       const payable=linePrincipalTotal>0?Number(loan.total_payable||0)*(principal/linePrincipalTotal):Number(loan.total_payable||0)/Math.max(1,lines.length);
-      details.push({date:saleDate,product:line.name,quantity:line.quantity,principal,payable,client:member?.full_name||'Unlinked client',group:group?.name||'Unassigned',officer:officer?.full_name||'Unassigned',loanId:loan.id});
+      details.push({date:saleDate,product:line.name,quantity:line.quantity,principal,payable,client:member?.full_name||'Unlinked client',group:group?.name||'Unassigned',officer:officer?.full_name||'Unassigned',officerId:officer?.id||'',memberId:loan.member_id,groupId:group?.id||'',valueBasis:line.valueBasis||'Recorded product value',loanId:loan.id});
     });
   });
   const map=new Map();
@@ -7501,7 +7557,7 @@ function buildProductSalesReport(){
     if(!map.has(key)) map.set(key,{product:row.product,quantity:0,principal:0,payable:0,clients:new Set(),groups:new Set(),sales:0});
     const rec=map.get(key);
     rec.quantity+=row.quantity; rec.principal+=row.principal; rec.payable+=row.payable; rec.sales++;
-    rec.clients.add(row.client); rec.groups.add(row.group);
+    rec.clients.add(String(row.memberId)); rec.groups.add(String(row.groupId));
   });
   const summary=[...map.values()].map(r=>({...r,clientCount:r.clients.size,groupCount:r.groups.size})).sort((a,b)=>b.quantity-a.quantity||a.product.localeCompare(b.product));
   return {month,details,summary};
@@ -7511,12 +7567,15 @@ function productSalesReportHtml(){
   const qty=report.summary.reduce((s,r)=>s+r.quantity,0);
   const principal=report.summary.reduce((s,r)=>s+r.principal,0);
   return `<div class="card" style="margin-top:18px">
-    <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed items issued through approved or disbursed loans</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
+    <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed product loans, using order date and the recorded loan officer for sales credit</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
     <div class="card-pad" style="padding-bottom:12px"><div class="product-sales-filters">
       <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;pageReports()"></div>
+      <div class="field"><label>Officer</label><select onchange="state._productSalesOfficer=this.value;pageReports()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._productSalesOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
       <div class="field"><label>Product</label><input id="product-sales-search" value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="handleProductSalesSearch(this)"></div>
-      <button class="btn btn-outline" onclick="state._productSalesSearch='';pageReports()">Clear product</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='plastic chair';pageReports()">Plastic chairs</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='';pageReports()">All products</button>
     </div></div>
+    <p class="helper" style="padding:0 18px">Each product’s quantity is counted for the selected officer and month. Legacy combined loans may have estimated item values, identified in the Excel details.</p>
     <div class="product-sales-metrics">
       <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Product types</span><b style="display:block;margin-top:3px">${report.summary.length}</b></div>
       <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Units sold</span><b style="display:block;margin-top:3px">${qty}</b></div>
@@ -7531,10 +7590,17 @@ function exportProductSalesReport(){
   const report=buildProductSalesReport();
   if(!report.details.length) return toast('No product sales to export for this selection.','warn');
   const summary=report.summary.map(r=>({Month:report.month,Product:r.product,UnitsSold:r.quantity,ClientSales:r.clientCount,Groups:r.groupCount,PrincipalValue:r.principal,TotalPayableValue:r.payable}));
-  const details=report.details.map(r=>({Date:r.date,Product:r.product,Quantity:r.quantity,Client:r.client,Group:r.group,Officer:r.officer,PrincipalValue:r.principal,TotalPayableValue:r.payable,LoanID:r.loanId}));
+  const details=report.details.map(r=>({Date:r.date,Product:r.product,Quantity:r.quantity,Client:r.client,Group:r.group,Officer:r.officer,OfficerID:r.officerId,MemberID:r.memberId,PrincipalValue:r.principal,TotalPayableValue:r.payable,ValueBasis:r.valueBasis,LoanID:r.loanId}));
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Product Summary');
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(details),'Sales Details');
+  const officers=new Map();
+  report.details.forEach(row=>{
+    const key=String(row.officerId);
+    if(!officers.has(key))officers.set(key,{Month:report.month,Officer:row.officer,OfficerID:key,ProductFilter:state._productSalesSearch||'All products',UnitsSold:0,PrincipalValue:0});
+    const summary=officers.get(key);summary.UnitsSold+=row.quantity;summary.PrincipalValue+=row.principal;
+  });
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([...officers.values()]),'Officer Summary');
   XLSX.writeFile(wb,`monthly_product_sales_${report.month}.xlsx`);
   toast('Monthly product sales report exported','success');
 }
@@ -7627,6 +7693,7 @@ function pageReports(){
         </div>
       </div>`).join('')}
     </div>
+    ${recruitmentReportHtml()}
     ${productSalesReportHtml()}
   `;
 }
@@ -12543,10 +12610,10 @@ function indexedFinancialAction(fn){
  pageMemberProfile,pageAccounting,buildArrearsRows,buildCollectionCompliance,collectionFieldSheetRows,buildReportRows]
  .map(indexedFinancialAction);
 [downloadCollectionSheet,downloadInventoryTemplate,exportAccountingReport,exportArrearsCollectionSheet,
- exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRepaymentsFiltered,exportReport,
+ exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRecruitmentReport,exportRepaymentsFiltered,exportReport,
  exportSavingsFiltered,exportSoldItemsExcel,importInventory]
  = [downloadCollectionSheet,downloadInventoryTemplate,exportAccountingReport,exportArrearsCollectionSheet,
- exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRepaymentsFiltered,exportReport,
+ exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRecruitmentReport,exportRepaymentsFiltered,exportReport,
  exportSavingsFiltered,exportSoldItemsExcel,importInventory].map(fn=>deferredExportAction(fn,'excel'));
 [downloadCollectionFieldSheetPdf,downloadWamamaRepaymentStatementPdf,downloadWamamaSavingsStatementPdf]
  = [downloadCollectionFieldSheetPdf,downloadWamamaRepaymentStatementPdf,downloadWamamaSavingsStatementPdf]
