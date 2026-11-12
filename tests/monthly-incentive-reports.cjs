@@ -53,3 +53,24 @@ assert.equal(workbooks[0].book.sheets.find(sheet=>sheet.name==='Recruited Client
 assert.equal(workbooks[1].book.sheets.find(sheet=>sheet.name==='Sales Details').rows.length,1);
 assert.equal(workbooks[1].book.sheets.find(sheet=>sheet.name==='Officer Summary').rows[0].UnitsSold,2);
 console.log('Monthly officer filtering, recruitment status/date boundaries, recorded officer attribution, combined chair quantities and filtered Excel sheets passed.');
+
+run(`
+state._recruitmentOfficer='one';
+state.data.members=Array.from({length:120},(_,index)=>({
+  id:'paged-'+index,full_name:'Recruit '+index,officer_id:'one',group_id:'g',registered_on:'2026-10-10',status:'active'
+}));
+state._recruitmentPage=0;
+buildReportRows=()=>{throw Error('Monthly filter rebuilt management summary');};
+pageReports=()=>{throw Error('Monthly filter rebuilt Reports');};
+`);
+const sections={'recruitment-report-section':{innerHTML:''},'product-sales-report-section':{innerHTML:''}};
+sandbox.document.getElementById=id=>sections[id]||node;
+run('renderRecruitmentReport()');
+assert.equal((sections['recruitment-report-section'].innerHTML.match(/<tr>/g)||[]).length,51,'50 client rows plus header');
+run('state._recruitmentPage=2;renderRecruitmentReport()');
+assert.equal((sections['recruitment-report-section'].innerHTML.match(/<tr>/g)||[]).length,21);
+run('exportRecruitmentReport()');
+assert.equal(workbooks[2].book.sheets.find(sheet=>sheet.name==='Recruited Clients').rows.length,120,'Excel keeps every matching client');
+run('renderProductSalesReport()');
+assert.match(sections['product-sales-report-section'].innerHTML,/Monthly Product Sales/);
+console.log('Section filters skip management recalculation, recruitment pages stay bounded, and Excel retains all 120 clients.');

@@ -192,5 +192,18 @@ assert.equal(release.version,run(`APP_RELEASE`));
  run(`exportReport('management_summary')`);
  assert.equal(exported[0].Collections,122295.23,'export uses book totals');
  assert.equal(exported[0].RecordedCollections,37920,'export preserves recorder totals separately');
+ run(`
+   const originalArrearsForPerformance=buildArrearsRows;
+   let summaryArrearsCalls=0;
+   buildArrearsRows=(...args)=>{summaryArrearsCalls++;return originalArrearsForPerformance(...args);};
+   withFinancialReadIndex(()=>{
+     officerFinancialSummary('a',reportDateRange());
+     officerFinancialSummary('b',reportDateRange());
+   });
+ `);
+ assert.equal(run('summaryArrearsCalls'),1,'one portfolio arrears calculation serves all officers in a render');
+ assert.equal(run('financialReadScope'),null,'calculated balances are released after the render');
+ run("withFinancialReadIndex(()=>officerFinancialSummary('a',reportDateRange()))");
+ assert.equal(run('summaryArrearsCalls'),2,'next render recalculates the current ledger');
  console.log('Rendered admin dashboard, officer dashboard, management report and Excel parity passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

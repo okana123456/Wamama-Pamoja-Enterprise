@@ -413,12 +413,20 @@ async function persistPartialFinancialCache(table,rows){
 
 function currentFinancialSnapshotRow(loanId){
   const snapshot=state._financialSnapshot;
-  return snapshot?.asOfDate===todayISO()?snapshot.byLoan.get(String(loanId)):null;
+  const asOfDate=financialReadScope?.get('as-of-date')||todayISO();
+  return snapshot?.asOfDate===asOfDate?snapshot.byLoan.get(String(loanId)):null;
 }
-function loanFinancialMetrics(loan,cutoff=todayISO()){
-  const metrics=(cutoff===todayISO() && currentFinancialSnapshotRow(loan.id)) ||
+function loanFinancialMetrics(loan,cutoff){
+  const today=financialReadScope?.get('as-of-date')||todayISO();
+  cutoff=cutoff??today;
+  const key='loan-metrics:'+String(loan.id)+':'+cutoff;
+  if(financialReadScope?.has(key)) return financialReadScope.get(key);
+  let metrics=(cutoff===today && currentFinancialSnapshotRow(loan.id)) ||
     WamamaFinance.metrics(loan,financialReadRows('repayments','loan_id',loan.id),cutoff);
-  if(loan.return_settlement && cutoff>=kenyaDateISO(new Date(loan.return_settlement.settled_at))) return {...metrics,outstandingPI:0,outstandingPrincipal:0,amountDue:0,arrears:0,nextDueDate:null};
+  if(loan.return_settlement && cutoff>=kenyaDateISO(new Date(loan.return_settlement.settled_at))){
+    metrics={...metrics,outstandingPI:0,outstandingPrincipal:0,amountDue:0,arrears:0,nextDueDate:null};
+  }
+  if(financialReadScope) financialReadScope.set(key,metrics);
   return metrics;
 }
 
@@ -427,7 +435,7 @@ function loanFinancialMetrics(loan,cutoff=todayISO()){
 let financialReadScope=null;
 function withFinancialReadIndex(fn){
   if(financialReadScope) return fn();
-  financialReadScope=new Map();
+  financialReadScope=new Map([['as-of-date',todayISO()]]);
   try{return fn();}finally{financialReadScope=null;}
 }
 function financialReadRows(table,column,value,stringKeys=true){
@@ -629,7 +637,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261111-monthly-incentive-reports';
+const APP_RELEASE='20261112-responsive-financial-reports';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -874,11 +882,15 @@ state._officerLoanDepositsCheckedAt=0;
 state._officerLoanDepositsPromise=null;
 
 /* ----- Money formatter ----- */
-const KES = n => 'KES ' + (Number(n||0)).toLocaleString('en-KE', { minimumFractionDigits:0, maximumFractionDigits:2 });
+const KES = n => 'KES ' + shillingFormatter.format(Number(n||0));
+const kenyaISOFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Nairobi',year:'numeric',month:'2-digit',day:'2-digit'});
+const displayDateFormatter=new Intl.DateTimeFormat('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric'});
+const displayDateTimeFormatter=new Intl.DateTimeFormat('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+const shillingFormatter=new Intl.NumberFormat('en-KE',{minimumFractionDigits:0,maximumFractionDigits:2});
 function kenyaDateISO(value=new Date()){
   const date=value instanceof Date?value:new Date(value);
   if(Number.isNaN(date.getTime())) return '';
-  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Nairobi',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date);
+  const parts=kenyaISOFormatter.formatToParts(date);
   const pick=type=>parts.find(part=>part.type===type)?.value||'';
   return `${pick('year')}-${pick('month')}-${pick('day')}`;
 }
@@ -886,9 +898,14 @@ const fmtDate = d => {
   if(!d) return '—';
   const raw=String(d);
   const value=/^\d{4}-\d{2}-\d{2}$/.test(raw)?`${raw}T12:00:00+03:00`:d;
-  return new Date(value).toLocaleDateString('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric'});
+  const date=new Date(value);
+  return Number.isNaN(date.getTime())?'Invalid Date':displayDateFormatter.format(date);
 };
-const fmtDateTime = d => d ? new Date(d).toLocaleString('en-KE',{timeZone:'Africa/Nairobi',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+const fmtDateTime = d => {
+  if(!d) return '—';
+  const date=new Date(d);
+  return Number.isNaN(date.getTime())?'Invalid Date':displayDateTimeFormatter.format(date);
+};
 const todayISO = () => kenyaDateISO(new Date());
 const initials = name => (name||'').split(/\s+/).filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase() || '—';
 const normalisePhone = p => {
@@ -3362,14 +3379,16 @@ function officerFinancialSummary(officerId,range,{groupId='',status=''}={}){
     (!groupId || String(currentPortfolioGroupForLoan(l)?.id)===String(groupId)) &&
     (!status || l.status===status));
   const activeLoans=loans.filter(l=>l.status==='active');
-  const arrearsRows=buildArrearsRows({portfolioView:true,tab:'arrears',
-    dateRange:{start:'2000-01-01',end:'2999-12-31'}})
-    .filter(r=>ownsLoan(r.loan) && (!groupId || String(r.group?.id)===String(groupId)) &&
+  let portfolioArrears=financialReadScope?.get('officer-summary-arrears');
+  if(!portfolioArrears){
+    portfolioArrears=buildArrearsRows({portfolioView:true,tab:'arrears',
+      dateRange:{start:'2000-01-01',end:'2999-12-31'}});
+    if(financialReadScope) financialReadScope.set('officer-summary-arrears',portfolioArrears);
+  }
+  const arrearsRows=portfolioArrears.filter(r=>ownsLoan(r.loan) && (!groupId || String(r.group?.id)===String(groupId)) &&
       (!status || r.loan.status===status));
-  const savings=state.data.savings.filter(s=>countsInBalance(s) && inGroup(s) &&
-    (!officerId || String(s.recorded_by)===String(officerId)) && dateInReportRange(s.meeting_date,s.created_at,range));
-  const repayments=state.data.repayments.filter(r=>countsAsCashReceived(r) && isClientRepayment(r) && inGroup(r) &&
-    (!officerId || String(r.recorded_by)===String(officerId)) && dateInReportRange(r.meeting_date,r.created_at,range));
+  const savings=state.data.savings.filter(s=>(!officerId || String(s.recorded_by)===String(officerId)) && inGroup(s) && countsInBalance(s) && dateInReportRange(s.meeting_date,s.created_at,range));
+  const repayments=state.data.repayments.filter(r=>(!officerId || String(r.recorded_by)===String(officerId)) && inGroup(r) && isClientRepayment(r) && countsAsCashReceived(r) && dateInReportRange(r.meeting_date,r.created_at,range));
   const cash=periodCashTotals(range,officerId,groupId);
   const balances=activeLoans.map(l=>loanFinancialMetrics(l));
   const money=n=>Math.round((n+Number.EPSILON)*100)/100;
@@ -4848,7 +4867,7 @@ function buildArrearsRows(options={}){
   });
 
   let rows = activeLoans.map(l => {
-    const member = state.data.members.find(x => x.id === l.member_id);
+    const member = financialReadRow('members',l.member_id,false);
     const group = currentPortfolioGroupForLoan(l);
     const officer = currentPortfolioOfficerForLoan(l);
     const metrics=loanFinancialMetrics(l,today);
@@ -7482,16 +7501,35 @@ function buildRecruitmentReport(){
   });
   return {month,rows,summary:[...officers.values()]};
 }
+function renderRecruitmentReport(){
+  withFinancialReadIndex(()=>{
+    const section=document.getElementById('recruitment-report-section');
+    if(section) section.innerHTML=recruitmentReportHtml();
+  });
+}
+function renderProductSalesReport(){
+  withFinancialReadIndex(()=>{
+    const section=document.getElementById('product-sales-report-section');
+    if(section) section.innerHTML=productSalesReportHtml();
+  });
+}
 function recruitmentReportHtml(){
   const report=buildRecruitmentReport();
+  const pages=Math.max(1,Math.ceil(report.rows.length/50));
+  const page=Math.min(Number(state._recruitmentPage||0),pages-1);
+  const visibleRows=report.rows.slice(page*50,(page+1)*50);
   return `<div class="card" style="margin-bottom:18px">
     <div class="card-head"><h3>Monthly Client Recruitment</h3><button class="btn btn-primary btn-sm" onclick="exportRecruitmentReport()">Export Excel</button></div>
     <div class="card-pad"><div class="product-sales-filters">
-      <div class="field"><label>Recruitment month</label><input type="month" value="${report.month}" onchange="state._recruitmentMonth=this.value;pageReports()" /></div>
-      <div class="field"><label>Officer</label><select onchange="state._recruitmentOfficer=this.value;pageReports()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._recruitmentOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Recruitment month</label><input type="month" value="${report.month}" onchange="state._recruitmentMonth=this.value;state._recruitmentPage=0;renderRecruitmentReport()" /></div>
+      <div class="field"><label>Officer</label><select onchange="state._recruitmentOfficer=this.value;state._recruitmentPage=0;renderRecruitmentReport()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._recruitmentOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
     </div><p>${report.rows.length} approved clients registered in this month. Attribution uses the member’s recorded officer, with the current group officer as a fallback.</p></div>
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Client</th><th>Phone</th><th>Group</th><th>Officer</th><th>Status</th></tr></thead>
-    <tbody>${report.rows.map(row=>`<tr><td>${fmtDate(row.RegistrationDate)}</td><td>${statementHtml(row.Client)}</td><td>${statementHtml(row.Phone)}</td><td>${statementHtml(row.Group)}</td><td>${statementHtml(row.Officer)}</td><td>${statementHtml(row.Status)}</td></tr>`).join('')||'<tr><td colspan="6">No approved recruits found for this selection.</td></tr>'}</tbody></table></div>
+    <tbody>${visibleRows.map(row=>`<tr><td>${fmtDate(row.RegistrationDate)}</td><td>${statementHtml(row.Client)}</td><td>${statementHtml(row.Phone)}</td><td>${statementHtml(row.Group)}</td><td>${statementHtml(row.Officer)}</td><td>${statementHtml(row.Status)}</td></tr>`).join('')||'<tr><td colspan="6">No approved recruits found for this selection.</td></tr>'}</tbody></table></div>
+    <div class="card-pad">Page ${page+1} of ${pages} · ${report.rows.length} clients · Excel includes all matching clients.
+      <button class="btn btn-sm btn-outline" ${page===0?'disabled':''} onclick="state._recruitmentPage=${page-1};renderRecruitmentReport()">Previous</button>
+      <button class="btn btn-sm btn-outline" ${page+1>=pages?'disabled':''} onclick="state._recruitmentPage=${page+1};renderRecruitmentReport()">Next</button>
+    </div>
   </div>`;
 }
 function exportRecruitmentReport(){
@@ -7505,7 +7543,7 @@ function exportRecruitmentReport(){
 
 function productSalesMonth(){ return state._productSalesMonth||todayISO().slice(0,7); }
 function handleProductSalesSearch(input){
-  rerenderSearchWithFocus(input,'_productSalesSearch','_productSalesSearchTimer',pageReports,'product-sales-search');
+  rerenderSearchWithFocus(input,'_productSalesSearch','_productSalesSearchTimer',renderProductSalesReport,'product-sales-search');
 }
 function confirmedSaleLoans(){
   return state.data.loans.filter(l=>['active','completed','defaulted'].includes(String(l.status||'').toLowerCase()));
@@ -7569,11 +7607,11 @@ function productSalesReportHtml(){
   return `<div class="card" style="margin-top:18px">
     <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed product loans, using order date and the recorded loan officer for sales credit</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
     <div class="card-pad" style="padding-bottom:12px"><div class="product-sales-filters">
-      <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;pageReports()"></div>
-      <div class="field"><label>Officer</label><select onchange="state._productSalesOfficer=this.value;pageReports()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._productSalesOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;renderProductSalesReport()"></div>
+      <div class="field"><label>Officer</label><select onchange="state._productSalesOfficer=this.value;renderProductSalesReport()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._productSalesOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
       <div class="field"><label>Product</label><input id="product-sales-search" value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="handleProductSalesSearch(this)"></div>
-      <button class="btn btn-outline" onclick="state._productSalesSearch='plastic chair';pageReports()">Plastic chairs</button>
-      <button class="btn btn-outline" onclick="state._productSalesSearch='';pageReports()">All products</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='plastic chair';renderProductSalesReport()">Plastic chairs</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='';renderProductSalesReport()">All products</button>
     </div></div>
     <p class="helper" style="padding:0 18px">Each product’s quantity is counted for the selected officer and month. Legacy combined loans may have estimated item values, identified in the Excel details.</p>
     <div class="product-sales-metrics">
@@ -7606,8 +7644,9 @@ function exportProductSalesReport(){
 }
 function pageReports(){
   if(!financialFiguresReady()) return;
-  if(!ensureCashTotals(reportDateRange())) return;
-  if(!ensureBookActivity(reportDateRange())) return;
+  const cashReady=ensureCashTotals(reportDateRange());
+  const bookReady=ensureBookActivity(reportDateRange());
+  if(!cashReady || !bookReady) return;
   const range = reportDateRange();
   const officers = staffLoanRoles();
   const groups = (state.data.groups||[]).filter(g=>g.status!=='inactive').sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
@@ -7693,8 +7732,8 @@ function pageReports(){
         </div>
       </div>`).join('')}
     </div>
-    ${recruitmentReportHtml()}
-    ${productSalesReportHtml()}
+    <div id="recruitment-report-section">${recruitmentReportHtml()}</div>
+    <div id="product-sales-report-section">${productSalesReportHtml()}</div>
   `;
 }
 function buildReportRows(kind){
