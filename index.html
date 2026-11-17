@@ -496,7 +496,7 @@ function periodBookActivity(range,officerId,groupId=''){
 function bookActivityStatusHtml(range){
   const error=bookActivityErrors.get(cashSnapshotKey(range));
   if(!error){
-    return '<div class="card card-pad"><h3>Checking officer book totals…</h3><p>Management totals will appear after the latest collections and savings are confirmed. Other reports are available below.</p></div>';
+    return '<div class="card card-pad"><h3>Checking officer book totals…</h3><p>Management totals will appear after the latest collections and savings are confirmed. Choose another report from the dropdown while these totals are loading.</p></div>';
   }
   let message='The latest officer book totals could not be loaded. Check the connection and retry.';
   if(['PGRST202','42883'].includes(error.code)){
@@ -512,11 +512,12 @@ function bookActivityStatusHtml(range){
     <p>${statementHtml(message)}</p>
     <button class="btn btn-primary" onclick="retryBookActivity()">Retry book totals</button>
     <details style="margin-top:12px"><summary>Report error details</summary><p>${statementHtml(error.code||'REQUEST_FAILED')} · ${statementHtml(error.message)} · ${statementHtml(range.start)} to ${statementHtml(range.end)}</p></details>
-    <p>Client recruitment, product sales and the other reports remain available below.</p></div>`;
+    <p>Use the report dropdown to open client recruitment, product sales or other exports.</p></div>`;
 }
 function retryBookActivity(){
   const range=reportDateRange();
   bookActivityErrors.delete(cashSnapshotKey(range));
+  ensureBookActivity(range,{renderStatus:false});
   pageReports();
 }
 async function fetchBookActivity(range){
@@ -561,7 +562,7 @@ function ensureBookActivity(range,{renderStatus=true}={}){
     });
     bookActivityRequests.set(key,request);
   }
-  if(renderStatus) $('page').innerHTML=bookActivityStatusHtml(range);
+  if(renderStatus) $('page').innerHTML=(state.view==='reports'?reportSelectorHtml():'')+bookActivityStatusHtml(range);
   return false;
 }
 
@@ -687,7 +688,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261117-book-report-recovery';
+const APP_RELEASE='20261117-compact-paged-reports';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -7524,6 +7525,47 @@ function approveOrder(o){
 /* =====================================================================
  * PAGE: REPORTS
  * ===================================================================== */
+const REPORT_PAGE_SIZE=25;
+function reportPaginationHtml(stateKey,page,pages,total,renderFunction){
+  return `<div class="card-pad" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <span>Page ${page+1} of ${pages} · ${total} rows · 25 per page</span>
+    <button class="btn btn-sm btn-outline" ${page===0?'disabled':''} onclick="state.${stateKey}=${page-1};${renderFunction}()">Previous</button>
+    <button class="btn btn-sm btn-outline" ${page+1>=pages?'disabled':''} onclick="state.${stateKey}=${page+1};${renderFunction}()">Next</button>
+    <span class="muted">Excel exports all matching rows.</span>
+  </div>`;
+}
+function reportSelectorHtml(){
+  const selected=state._reportSection||'officer_performance';
+  const sections=[
+    ['officer_performance','Officer Performance'],
+    ['recruitment','Monthly Client Recruitment'],
+    ['product_sales','Monthly Product Sales'],
+    ['other_reports','Other Reports & Exports']
+  ];
+  return `<div class="page-head"><div><h1>Reports</h1><div class="desc">Select the report you want to view.</div></div></div>
+    <div class="card card-pad" style="margin-bottom:16px">
+      <div class="field" style="margin:0;max-width:460px"><label for="report-section-selector">Report</label>
+        <select id="report-section-selector" onchange="state._reportSection=this.value;pageReports()">
+          ${sections.map(([key,label])=>`<option value="${key}" ${selected===key?'selected':''}>${label}</option>`).join('')}
+        </select>
+      </div>
+    </div>`;
+}
+function pageReports(){
+  if(!financialFiguresReady())return;
+  const heading=reportSelectorHtml();
+  if(state._reportSection==='recruitment'){
+    $('page').innerHTML=heading+'<div id="recruitment-report-section">'+recruitmentReportHtml()+'</div>';
+    return;
+  }
+  if(state._reportSection==='product_sales'){
+    $('page').innerHTML=heading+'<div id="product-sales-report-section">'+productSalesReportHtml()+'</div>';
+    return;
+  }
+  pageOfficerPerformanceReport(state._reportSection==='other_reports');
+  $('page').innerHTML=heading+$('page').innerHTML;
+}
+
 function incentiveReportOfficers(){
   return [...state.data.staff].sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
 }
@@ -7565,9 +7607,9 @@ function renderProductSalesReport(){
 }
 function recruitmentReportHtml(){
   const report=buildRecruitmentReport();
-  const pages=Math.max(1,Math.ceil(report.rows.length/50));
-  const page=Math.min(Number(state._recruitmentPage||0),pages-1);
-  const visibleRows=report.rows.slice(page*50,(page+1)*50);
+  const pages=Math.max(1,Math.ceil(report.rows.length/REPORT_PAGE_SIZE));
+  const page=Math.max(0,Math.min(Number(state._recruitmentPage||0),pages-1));
+  const visibleRows=report.rows.slice(page*REPORT_PAGE_SIZE,(page+1)*REPORT_PAGE_SIZE);
   return `<div class="card" style="margin-bottom:18px">
     <div class="card-head"><h3>Monthly Client Recruitment</h3><button class="btn btn-primary btn-sm" onclick="exportRecruitmentReport()">Export Excel</button></div>
     <div class="card-pad"><div class="product-sales-filters">
@@ -7576,10 +7618,7 @@ function recruitmentReportHtml(){
     </div><p>${report.rows.length} approved clients registered in this month. Attribution uses the member’s recorded officer, with the current group officer as a fallback.</p></div>
     <div class="table-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Client</th><th>Phone</th><th>Group</th><th>Officer</th><th>Status</th></tr></thead>
     <tbody>${visibleRows.map(row=>`<tr><td>${fmtDate(row.RegistrationDate)}</td><td>${statementHtml(row.Client)}</td><td>${statementHtml(row.Phone)}</td><td>${statementHtml(row.Group)}</td><td>${statementHtml(row.Officer)}</td><td>${statementHtml(row.Status)}</td></tr>`).join('')||'<tr><td colspan="6">No approved recruits found for this selection.</td></tr>'}</tbody></table></div>
-    <div class="card-pad">Page ${page+1} of ${pages} · ${report.rows.length} clients · Excel includes all matching clients.
-      <button class="btn btn-sm btn-outline" ${page===0?'disabled':''} onclick="state._recruitmentPage=${page-1};renderRecruitmentReport()">Previous</button>
-      <button class="btn btn-sm btn-outline" ${page+1>=pages?'disabled':''} onclick="state._recruitmentPage=${page+1};renderRecruitmentReport()">Next</button>
-    </div>
+    ${reportPaginationHtml('_recruitmentPage',page,pages,report.rows.length,'renderRecruitmentReport')}
   </div>`;
 }
 function exportRecruitmentReport(){
@@ -7593,6 +7632,7 @@ function exportRecruitmentReport(){
 
 function productSalesMonth(){ return state._productSalesMonth||todayISO().slice(0,7); }
 function handleProductSalesSearch(input){
+  state._productSalesPage=0;
   rerenderSearchWithFocus(input,'_productSalesSearch','_productSalesSearchTimer',renderProductSalesReport,'product-sales-search');
 }
 function confirmedSaleLoans(){
@@ -7652,16 +7692,19 @@ function buildProductSalesReport(){
 }
 function productSalesReportHtml(){
   const report=buildProductSalesReport();
+  const pages=Math.max(1,Math.ceil(report.summary.length/REPORT_PAGE_SIZE));
+  const page=Math.max(0,Math.min(Number(state._productSalesPage||0),pages-1));
+  const visibleProducts=report.summary.slice(page*REPORT_PAGE_SIZE,(page+1)*REPORT_PAGE_SIZE);
   const qty=report.summary.reduce((s,r)=>s+r.quantity,0);
   const principal=report.summary.reduce((s,r)=>s+r.principal,0);
   return `<div class="card" style="margin-top:18px">
     <div class="card-head"><div><h3>Monthly Product Sales</h3><div class="sub">Confirmed product loans, using order date and the recorded loan officer for sales credit</div></div><button class="btn btn-sm btn-primary" onclick="exportProductSalesReport()">Export Excel</button></div>
     <div class="card-pad" style="padding-bottom:12px"><div class="product-sales-filters">
-      <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;renderProductSalesReport()"></div>
-      <div class="field"><label>Officer</label><select onchange="state._productSalesOfficer=this.value;renderProductSalesReport()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._productSalesOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Sales month</label><input type="month" value="${report.month}" onchange="state._productSalesMonth=this.value;state._productSalesPage=0;renderProductSalesReport()"></div>
+      <div class="field"><label>Officer</label><select onchange="state._productSalesOfficer=this.value;state._productSalesPage=0;renderProductSalesReport()"><option value="">All officers</option>${incentiveReportOfficers().map(officer=>`<option value="${officer.id}" ${String(state._productSalesOfficer||'')===String(officer.id)?'selected':''}>${statementHtml(officer.full_name)}</option>`).join('')}</select></div>
       <div class="field"><label>Product</label><input id="product-sales-search" value="${state._productSalesSearch||''}" placeholder="Type Plastic Chair, Sofa Set or another item" oninput="handleProductSalesSearch(this)"></div>
-      <button class="btn btn-outline" onclick="state._productSalesSearch='plastic chair';renderProductSalesReport()">Plastic chairs</button>
-      <button class="btn btn-outline" onclick="state._productSalesSearch='';renderProductSalesReport()">All products</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='plastic chair';state._productSalesPage=0;renderProductSalesReport()">Plastic chairs</button>
+      <button class="btn btn-outline" onclick="state._productSalesSearch='';state._productSalesPage=0;renderProductSalesReport()">All products</button>
     </div></div>
     <p class="helper" style="padding:0 18px">Each product’s quantity is counted for the selected officer and month. Legacy combined loans may have estimated item values, identified in the Excel details.</p>
     <div class="product-sales-metrics">
@@ -7670,8 +7713,9 @@ function productSalesReportHtml(){
       <div style="padding:12px 18px"><span class="muted" style="font-size:11px">Principal sales value</span><b style="display:block;margin-top:3px">${KES(principal)}</b></div>
     </div>
     <div style="overflow-x:auto"><table class="tbl" style="min-width:760px"><thead><tr><th>Product</th><th class="num">Units sold</th><th class="num">Client sales</th><th class="num">Groups</th><th class="num">Principal value</th><th class="num">Total payable value</th></tr></thead><tbody>
-      ${report.summary.map(r=>`<tr><td><b>${r.product}</b></td><td class="num">${r.quantity}</td><td class="num">${r.clientCount}</td><td class="num">${r.groupCount}</td><td class="num">${KES(r.principal)}</td><td class="num">${KES(r.payable)}</td></tr>`).join('')||`<tr><td colspan="6"><div class="empty"><h4>No confirmed product sales found</h4><p>Choose another month or clear the product search.</p></div></td></tr>`}
+      ${visibleProducts.map(r=>`<tr><td><b>${r.product}</b></td><td class="num">${r.quantity}</td><td class="num">${r.clientCount}</td><td class="num">${r.groupCount}</td><td class="num">${KES(r.principal)}</td><td class="num">${KES(r.payable)}</td></tr>`).join('')||`<tr><td colspan="6"><div class="empty"><h4>No confirmed product sales found</h4><p>Choose another month or clear the product search.</p></div></td></tr>`}
     </tbody></table></div>
+    ${reportPaginationHtml('_productSalesPage',page,pages,report.summary.length,'renderProductSalesReport')}
   </div>`;
 }
 function exportProductSalesReport(){
@@ -7692,10 +7736,10 @@ function exportProductSalesReport(){
   XLSX.writeFile(wb,`monthly_product_sales_${report.month}.xlsx`);
   toast('Monthly product sales report exported','success');
 }
-function pageReports(){
+function pageOfficerPerformanceReport(otherReports=false){
   if(!financialFiguresReady()) return;
-  const cashReady=ensureCashTotals(reportDateRange());
-  const bookReady=ensureBookActivity(reportDateRange(),{renderStatus:false});
+  const cashReady=otherReports || ensureCashTotals(reportDateRange());
+  const bookReady=!otherReports && ensureBookActivity(reportDateRange(),{renderStatus:false});
   if(!cashReady) return;
   const range = reportDateRange();
   const officers = staffLoanRoles();
@@ -7722,24 +7766,26 @@ function pageReports(){
     acc.groups += Number(row.GroupsCreated||0);
     return acc;
   },{activeLoans:0,arrearsAccounts:0,savings:0,collections:0,disbursed:0,outstandingPI:0,outstandingPrincipal:0,arrears:0,closedLoans:0,closedClients:0,clients:0,groups:0});
+  const officerPages=Math.max(1,Math.ceil(summaryRows.length/REPORT_PAGE_SIZE));
+  const officerPage=Math.max(0,Math.min(Number(state._reportOfficerPage||0),officerPages-1));
+  const visibleOfficers=summaryRows.slice(officerPage*REPORT_PAGE_SIZE,(officerPage+1)*REPORT_PAGE_SIZE);
   $('page').innerHTML = `
-    <div class="page-head"><div><h1>Reports</h1><div class="desc">One-branch management reports for Rongo Branch.</div></div></div>
     <div class="card card-pad" style="margin-bottom:16px">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
-        ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_reportFilter===k?'btn-primary':'btn-outline'}" onclick="_reportFilter='${k}';pageReports()">${l}</button>`).join('')}
+        ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_reportFilter===k?'btn-primary':'btn-outline'}" onclick="_reportFilter='${k}';state._reportOfficerPage=0;pageReports()">${l}</button>`).join('')}
         ${_reportFilter==='custom'?`
-          <input type="date" value="${_reportCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_reportCustomStart=this.value;pageReports()" />
+          <input type="date" value="${_reportCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_reportCustomStart=this.value;state._reportOfficerPage=0;pageReports()" />
           <span class="muted" style="font-size:12px">to</span>
-          <input type="date" value="${_reportCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_reportCustomEnd=this.value;pageReports()" />
+          <input type="date" value="${_reportCustomEnd}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_reportCustomEnd=this.value;state._reportOfficerPage=0;pageReports()" />
         `:''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
-        <div class="field"><label>Officer</label><select onchange="state._reportOfficerFilter=this.value;state._reportGroupFilter='';pageReports()"><option value="">All officers</option>${officers.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
-        <div class="field"><label>Group</label><select onchange="state._reportGroupFilter=this.value;pageReports()"><option value="">All groups</option>${groups.map(g=>`<option value="${g.id}" ${groupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
-        <div class="field"><label>Loan status</label><select onchange="state._reportLoanStatusFilter=this.value;pageReports()"><option value="">All statuses</option>${['active','completed','pending','rejected','cancelled'].map(s=>`<option value="${s}" ${statusFilter===s?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Officer</label><select onchange="state._reportOfficerFilter=this.value;state._reportGroupFilter='';state._reportOfficerPage=0;pageReports()"><option value="">All officers</option>${officers.map(o=>`<option value="${o.id}" ${offFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>
+        <div class="field"><label>Group</label><select onchange="state._reportGroupFilter=this.value;state._reportOfficerPage=0;pageReports()"><option value="">All groups</option>${groups.map(g=>`<option value="${g.id}" ${groupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}</select></div>
+        <div class="field"><label>Loan status</label><select onchange="state._reportLoanStatusFilter=this.value;state._reportOfficerPage=0;pageReports()"><option value="">All statuses</option>${['active','completed','pending','rejected','cancelled'].map(s=>`<option value="${s}" ${statusFilter===s?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
     </div>
-    ${bookReady ? `<p class="helper">Book collections and savings include approved client receipts for the officer's current book, whoever recorded them. Recorded-by totals show the officer's own entries. Activity period: ${fmtDate(range.start)} to ${fmtDate(range.end)}. Balances and arrears are as of ${fmtDate(todayISO())}.</p>
+    ${otherReports ? '' : bookReady ? `<p class="helper">Book collections and savings include approved client receipts for the officer's current book, whoever recorded them. Recorded-by totals show the officer's own entries. Activity period: ${fmtDate(range.start)} to ${fmtDate(range.end)}. Balances and arrears are as of ${fmtDate(todayISO())}.</p>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:16px">
       <div class="kpi"><div class="l">Active loans</div><div class="v">${totals.activeLoans}</div></div>
       <div class="kpi k-success"><div class="l">Collections</div><div class="v">${KES(totals.collections)}</div><div class="d">${range.label}</div></div>
@@ -7759,12 +7805,13 @@ function pageReports(){
       <div style="overflow-x:auto"><table class="tbl">
         <thead><tr><th>Officer</th><th class="num">Active loans</th><th class="num">Accounts in arrears</th><th class="num">PAR/Arrears</th><th class="num">Clients recruited</th><th class="num">Groups created</th><th class="num">Book savings</th><th class="num">Credit sales</th><th class="num">Loans closed</th><th class="num">Client accounts closed</th><th class="num">Book collections</th><th class="num">Savings recorded by officer</th><th class="num">Collections recorded by officer</th><th class="num">Principal OLB</th><th class="num">P+I OLB</th></tr></thead>
         <tbody>
-          ${summaryRows.map(r=>`<tr><td><b>${r.Officer}</b></td><td class="num">${r.ActiveLoans}</td><td class="num">${r.AccountsInArrears}</td><td class="num" style="color:${r.PARArrears>0?'var(--danger)':'inherit'}">${KES(r.PARArrears)}</td><td class="num">${r.ClientsRecruited}</td><td class="num">${r.GroupsCreated}</td><td class="num">${KES(r.SavingsMobilized)}</td><td class="num">${KES(r.LoansDisbursed)}</td><td class="num">${r.LoansClosed}</td><td class="num">${r.ClientAccountsClosed}</td><td class="num">${KES(r.Collections)}</td><td class="num">${KES(r.RecordedSavings)}</td><td class="num">${KES(r.RecordedCollections)}</td><td class="num">${KES(r.OutstandingPrincipal)}</td><td class="num">${KES(r.OutstandingPI)}</td></tr>`).join('') || `<tr><td colspan="15"><div class="empty"><h4>No officer data found</h4></div></td></tr>`}
+          ${visibleOfficers.map(r=>`<tr><td><b>${r.Officer}</b></td><td class="num">${r.ActiveLoans}</td><td class="num">${r.AccountsInArrears}</td><td class="num" style="color:${r.PARArrears>0?'var(--danger)':'inherit'}">${KES(r.PARArrears)}</td><td class="num">${r.ClientsRecruited}</td><td class="num">${r.GroupsCreated}</td><td class="num">${KES(r.SavingsMobilized)}</td><td class="num">${KES(r.LoansDisbursed)}</td><td class="num">${r.LoansClosed}</td><td class="num">${r.ClientAccountsClosed}</td><td class="num">${KES(r.Collections)}</td><td class="num">${KES(r.RecordedSavings)}</td><td class="num">${KES(r.RecordedCollections)}</td><td class="num">${KES(r.OutstandingPrincipal)}</td><td class="num">${KES(r.OutstandingPI)}</td></tr>`).join('') || `<tr><td colspan="15"><div class="empty"><h4>No officer data found</h4></div></td></tr>`}
         </tbody>
       </table></div>
+      ${reportPaginationHtml('_reportOfficerPage',officerPage,officerPages,summaryRows.length,'pageReports')}
     </div>
     ` : bookActivityStatusHtml(range)}
-    <div class="grid-3">
+    ${otherReports ? `<div class="grid-3">
       ${[
         ['Management summary','Officer performance, PAR, collections, savings and balances','management_summary'],
         ['Loan repayment history','Payments linked to each loan until closure','loan_repayment_history'],
@@ -7782,9 +7829,7 @@ function pageReports(){
           <button class="btn btn-primary" style="flex:1" onclick="exportReport('${k}')">Export Excel</button>
         </div>
       </div>`).join('')}
-    </div>
-    <div id="recruitment-report-section">${recruitmentReportHtml()}</div>
-    <div id="product-sales-report-section">${productSalesReportHtml()}</div>
+    </div>` : ''}
   `;
 }
 function buildReportRows(kind){
