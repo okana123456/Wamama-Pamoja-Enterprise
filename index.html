@@ -493,28 +493,78 @@ function periodBookActivity(range,officerId,groupId=''){
       interest:sum.interest+Number(row.interest||0),savings:sum.savings+Number(row.savings||0)}),
       {collections:0,interest:0,savings:0});
 }
-function ensureBookActivity(range){
-  const key=cashSnapshotKey(range),epoch=state._accountEpoch;
-  if(bookActivitySnapshots.has(key)) return true;
-  if(bookActivityErrors.has(key)){
-    $('page').innerHTML='<div class="card card-pad"><h3>Book totals are unavailable</h3><p>Please run the officer book reporting setup in Supabase, then retry.</p><button class="btn btn-primary" onclick="bookActivityErrors.clear();pageReports()">Retry book totals</button></div>';
-    return false;
+function bookActivityStatusHtml(range){
+  const error=bookActivityErrors.get(cashSnapshotKey(range));
+  if(!error){
+    return '<div class="card card-pad"><h3>Checking officer book totals…</h3><p>Management totals will appear after the latest collections and savings are confirmed. Other reports are available below.</p></div>';
   }
-  if(!bookActivityRequests.has(key)){
+  let message='The latest officer book totals could not be loaded. Check the connection and retry.';
+  if(['PGRST202','42883'].includes(error.code)){
+    message='The officer book reporting function needs to be installed or refreshed in Supabase.';
+  }else if(error.code==='57014' || /timeout|timed out|aborted/i.test(error.message)){
+    message='The book totals request took too long. Retry after the reporting query has been updated.';
+  }else if(error.code==='42501'){
+    message='This account could not access officer book totals. Reporting permissions need to be checked.';
+  }else if(['AUTH','PGRST301','401'].includes(error.code)){
+    message='Your staff session could not be verified. Sign in again, then retry.';
+  }
+  return `<div class="card card-pad"><h3>Management book totals are temporarily unavailable</h3>
+    <p>${statementHtml(message)}</p>
+    <button class="btn btn-primary" onclick="retryBookActivity()">Retry book totals</button>
+    <details style="margin-top:12px"><summary>Report error details</summary><p>${statementHtml(error.code||'REQUEST_FAILED')} · ${statementHtml(error.message)} · ${statementHtml(range.start)} to ${statementHtml(range.end)}</p></details>
+    <p>Client recruitment, product sales and the other reports remain available below.</p></div>`;
+}
+function retryBookActivity(){
+  const range=reportDateRange();
+  bookActivityErrors.delete(cashSnapshotKey(range));
+  pageReports();
+}
+async function fetchBookActivity(range){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),30000);
+  try{
+    let request=sb.rpc('pb_officer_book_activity',{p_start:range.start,p_end:range.end});
+    if(typeof request.abortSignal==='function') request=request.abortSignal(controller.signal);
+    const {data,error}=await request;
+    if(error) throw error;
+    if(data?.authorized!==true){
+      throw {code:'AUTH',message:'The officer book request did not confirm an active staff session.'};
+    }
+    if(data.version!==1 || !Array.isArray(data.rows)){
+      throw {code:'INVALID_RESPONSE',message:'The officer book report returned an unexpected response.'};
+    }
+    return data;
+  }finally{
+    clearTimeout(timer);
+  }
+}
+function ensureBookActivity(range,{renderStatus=true}={}){
+  const key=cashSnapshotKey(range),epoch=state._accountEpoch,staffId=state.staff?.id;
+  if(bookActivitySnapshots.has(key)) return true;
+  if(!bookActivityErrors.has(key) && !bookActivityRequests.has(key)){
     const request=(async()=>{
       try{
-        const {data,error}=await sb.rpc('pb_officer_book_activity',{p_start:range.start,p_end:range.end});
-        if(epoch!==state._accountEpoch) return;
-        if(error || data?.version!==1 || data.authorized!==true || !Array.isArray(data.rows)) bookActivityErrors.set(key,true);
-        else bookActivitySnapshots.set(key,data);
-      }catch{if(epoch===state._accountEpoch) bookActivityErrors.set(key,true);}
-      if(epoch===state._accountEpoch) scheduleRealtimeRender();
-    })().finally(()=>bookActivityRequests.delete(key));
+        const data=await fetchBookActivity(range);
+        if(epoch!==state._accountEpoch || staffId!==state.staff?.id) return;
+        bookActivitySnapshots.set(key,data);
+        bookActivityErrors.delete(key);
+      }catch(error){
+        if(epoch!==state._accountEpoch || staffId!==state.staff?.id) return;
+        bookActivityErrors.set(key,{
+          code:String(error.code||'REQUEST_FAILED'),
+          message:String(error.message||'The book totals request failed.')
+        });
+      }
+      if(epoch===state._accountEpoch && staffId===state.staff?.id) scheduleRealtimeRender();
+    })().finally(()=>{
+      if(bookActivityRequests.get(key)===request) bookActivityRequests.delete(key);
+    });
     bookActivityRequests.set(key,request);
   }
-  $('page').innerHTML='<div class="card card-pad"><h3>Checking officer book totals…</h3><p>Comparing collections and savings with current client assignments.</p></div>';
+  if(renderStatus) $('page').innerHTML=bookActivityStatusHtml(range);
   return false;
 }
+
 function cashSnapshotKey(range){return `${state.staff?.id}:${range.start}:${range.end}`;}
 function periodCashTotals(range,officerId=null,groupId=null){
   const snapshot=cashSnapshots.get(cashSnapshotKey(range));
@@ -637,7 +687,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261112-responsive-financial-reports';
+const APP_RELEASE='20261117-book-report-recovery';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1340,7 +1390,7 @@ async function resetAccountData(){
   state._financialSnapshot=null;
   state._financialSnapshotAvailable=false;
   cashSnapshots.clear();
-  bookActivitySnapshots.clear();bookActivityErrors.clear();
+  bookActivitySnapshots.clear();bookActivityErrors.clear();bookActivityRequests.clear();
   state._dashboardOfficerFilter='';
   state._reportOfficerFilter='';
   state._reportGroupFilter='';
@@ -7645,8 +7695,8 @@ function exportProductSalesReport(){
 function pageReports(){
   if(!financialFiguresReady()) return;
   const cashReady=ensureCashTotals(reportDateRange());
-  const bookReady=ensureBookActivity(reportDateRange());
-  if(!cashReady || !bookReady) return;
+  const bookReady=ensureBookActivity(reportDateRange(),{renderStatus:false});
+  if(!cashReady) return;
   const range = reportDateRange();
   const officers = staffLoanRoles();
   const groups = (state.data.groups||[]).filter(g=>g.status!=='inactive').sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
@@ -7656,7 +7706,7 @@ function pageReports(){
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','Last 7 Days'],['month','This Month'],['3months','Last 3 Months'],['all','All Time'],['custom','Custom']
   ];
-  const summaryRows = buildReportRows('management_summary');
+  const summaryRows = bookReady ? buildReportRows('management_summary') : [];
   const totals = summaryRows.reduce((acc,row)=>{
     acc.activeLoans += Number(row.ActiveLoans||0);
     acc.arrearsAccounts += Number(row.AccountsInArrears||0);
@@ -7689,7 +7739,7 @@ function pageReports(){
         <div class="field"><label>Loan status</label><select onchange="state._reportLoanStatusFilter=this.value;pageReports()"><option value="">All statuses</option>${['active','completed','pending','rejected','cancelled'].map(s=>`<option value="${s}" ${statusFilter===s?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
     </div>
-    <p class="helper">Book collections and savings include approved client receipts for the officer's current book, whoever recorded them. Recorded-by totals show the officer's own entries. Activity period: ${fmtDate(range.start)} to ${fmtDate(range.end)}. Balances and arrears are as of ${fmtDate(todayISO())}.</p>
+    ${bookReady ? `<p class="helper">Book collections and savings include approved client receipts for the officer's current book, whoever recorded them. Recorded-by totals show the officer's own entries. Activity period: ${fmtDate(range.start)} to ${fmtDate(range.end)}. Balances and arrears are as of ${fmtDate(todayISO())}.</p>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:16px">
       <div class="kpi"><div class="l">Active loans</div><div class="v">${totals.activeLoans}</div></div>
       <div class="kpi k-success"><div class="l">Collections</div><div class="v">${KES(totals.collections)}</div><div class="d">${range.label}</div></div>
@@ -7713,6 +7763,7 @@ function pageReports(){
         </tbody>
       </table></div>
     </div>
+    ` : bookActivityStatusHtml(range)}
     <div class="grid-3">
       ${[
         ['Management summary','Officer performance, PAR, collections, savings and balances','management_summary'],
