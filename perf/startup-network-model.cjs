@@ -1,11 +1,12 @@
-// Login data-load model: runs the real loadAllFinancialData() from an
+﻿// Login data-load model: runs the real loadAllFinancialData() from an
 // index.html against a fake Supabase with simulated round-trip latency, shared
 // bandwidth and server time. Same synthetic dataset for every version.
 // Usage: node perf/startup-network-model.cjs <index.html> [rttMs] [mbps] [snapshotDbMs] [cold|warm]
 const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const [file,rttArg,mbpsArg,snapArg,modeArg]=process.argv.slice(2);
 const RTT=Number(rttArg||250),MBPS=Number(mbpsArg||5),SNAPSHOT_DB_MS=Number(snapArg||800),MODE=modeArg||'cold';
-const SCALE=0.2; // run 5x faster than real time; reported times are real-time equivalents
+// Real time: browser CPU work (rendering, calculations) is not rescaled.
+const SCALE=Number(process.env.MODEL_SCALE||1);
 const BYTES_PER_MS=MBPS*1e6/8/1000, COMPRESSION=0.22, DB_MS=20;
 const html=fs.readFileSync(file,'utf8');
 const code=html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
@@ -64,15 +65,22 @@ const sb={auth:{onAuthStateChange(){},getSession:async()=>({data:{session:{user:
         await network(60000,SNAPSHOT_DB_MS);
         return {data:{version:1,authorized:true,asOfDate:vm.runInContext('todayISO()',sandbox),complete:true,checkedAt:new Date().toISOString(),rows:[],visibleLoanIds:data.pb_loans.map(r=>r.id)},error:null};
       }
+      if(name==='pb_cash_collection_totals'){
+        await network(4000,150);return {data:{authorized:true,rows:[]},error:null};
+      }
       await network(500,DB_MS);return {data:null,error:null};
     })();
     p.abortSignal=()=>p;return p;
   },
   channel(){return {on(){return this},subscribe(){}}},removeChannel(){}};
-const page={innerHTML:'',style:{},classList:{toggle(){},add(){},remove(){}}};
+const page={innerHTML:'',style:{},classList:{toggle(){},add(){},remove(){}}},elements=new Map();
 const sandbox={WamamaFinance:require('../financial-rules.js'),console,Intl,Date,URL,Map,Set,Promise,JSON,Math,
   crypto:require('node:crypto').webcrypto,window:{addEventListener(){}},
-  document:{addEventListener(){},getElementById(){return page},querySelector(){return null},documentElement:page},
+  document:{addEventListener(){},getElementById(id){
+    if(id==='page') return page;
+    if(!elements.has(id)) elements.set(id,{innerHTML:'',textContent:'',value:'',style:{},classList:{toggle(){},add(){},remove(){}}});
+    return elements.get(id);
+  },querySelector(){return null},documentElement:page},
   navigator:{onLine:true},localStorage:{getItem(){return null},setItem(){},removeItem(){},key(){},length:0},
   sessionStorage:{getItem(){return null},setItem(){},removeItem(){}},
   setTimeout,clearTimeout,setInterval(){},requestAnimationFrame(){},AbortController,supabase:{createClient(){return sb}}};
@@ -86,15 +94,25 @@ state.staff={id:'admin',role:'admin',app_role:'admin',business_id:'biz'};state.s
 readFinancialCache=async table=>__cached[table]||null;writeFinancialCache=async()=>{};persistPartialFinancialCache=async()=>{};
 loadInventoryReferencePrices=async()=>true;releaseDuePrepaymentsInBackground=()=>{};cacheDataKey=()=>{};
 refreshOfficerLoanDepositBalances=async()=>true;
-render=()=>{ if(state.loading===false) __mark(state._portfolioDataVerified?'verified':'firstUseful'); };
+render=()=>{
+  if(state.loading!==false) return;
+  __mark('firstUseful');
+  // Render the real dashboard and record what it actually shows.
+  try{ pageDashboard(); }catch(e){ __mark('renderError:'+e.message); }
+  const html=String(document.getElementById('page').innerHTML||'');
+  if(html.includes('provisional-figures-notice')) __mark('serverFigures');
+  else if(html.includes('Operational overview')) { __mark('serverFigures'); __mark('verified'); }
+};
 scheduleRealtimeRender=()=>render();
 `,sandbox);
 (async()=>{
   await vm.runInContext('loadAllFinancialData()',sandbox);
   sandbox.__mark('allTablesLoaded');
+  if(process.env.MODEL_DEBUG) console.error(String(page.innerHTML).replace(/\s+/g,' ').slice(0,300));
   if(!('verified' in marks) && vm.runInContext('state._portfolioDataVerified',sandbox)) marks.verified=marks.allTablesLoaded;
   console.log(JSON.stringify({file:path.basename(path.dirname(file))+'/'+path.basename(file),mode:MODE,rttMs:RTT,mbps:MBPS,snapshotDbMs:SNAPSHOT_DB_MS,
-    firstUsefulMs:marks.firstUseful??null,verifiedMs:marks.verified??null,allTablesMs:marks.allTablesLoaded,requests,
+    firstUsefulMs:marks.firstUseful??null,serverFiguresMs:marks.serverFigures??null,verifiedMs:marks.verified??null,
+    errors:Object.keys(marks).filter(k=>k.startsWith('renderError')),allTablesMs:marks.allTablesLoaded,requests,
     uncompressedMB:+(bytes/1e6).toFixed(1),approxTransferMB:+(bytes*COMPRESSION/1e6).toFixed(1)}));
   process.exit(0);
 })().catch(e=>{console.error(e);process.exit(1);});

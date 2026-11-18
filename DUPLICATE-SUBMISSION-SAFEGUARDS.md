@@ -61,14 +61,28 @@ other staff members are left untouched.
 - With a local cache, history deltas download alongside core tables, and the server
   financial snapshot is requested at the start of loading instead of after all history.
   On a first (cold) load, core tables still go first.
+- **Server-first dashboard.** As soon as the core tables (loans, groups, members, staff)
+  and the server snapshot + collection totals arrive, the admin and officer dashboards
+  show loan balances, arrears, collections, members, groups and loans issued, under a
+  notice saying they are server totals as of a time. Savings-based figures (savings
+  collected, loan eligibility, recent savings, per-group savings, pending approvals) show
+  *Verifying…* — never a number or zero — until the full ledger has loaded and been
+  reconciled. Server figures are not shown if any visible loan is missing locally, if the
+  snapshot is not for today, or after a failed request (the retry state is shown instead).
+  The same server sources feed the verified view, so those cards do not change on
+  verification. Other pages still wait for verified figures.
+  Modelled (`perf/startup-network-model.cjs`, real-time): first login on a new device,
+  5 Mbps / 250 ms → server figures 2.2 s (previously nothing until ~25 s);
+  20 Mbps / 120 ms → 1.1 s. Repeat logins: verified 1.9 s / 1.6 s.
 
 ## Tests
 ```
 set PGLITE_MODULE=<path to @electric-sql/pglite>
 node tests/financial-operation-idempotency-sql.cjs
 node tests/financial-outbox-client.cjs
+node tests/server-first-dashboard.cjs
 ```
-All `tests/*.cjs` (37) pass. Performance models: `perf/startup-network-model.cjs`,
+All `tests/*.cjs` (38) pass. Performance models: `perf/startup-network-model.cjs`,
 `perf/offset-vs-keyset-pglite.cjs`.
 
 ## Deployment order

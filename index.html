@@ -582,7 +582,14 @@ function periodCashTotals(range,officerId=null,groupId=null){
 }
 function ensureCashTotals(range){
   if(!state._financialSnapshotAvailable || cashSnapshots.has(cashSnapshotKey(range))) return true;
+  startCashTotalsRequest(range);
+  $('page').innerHTML='<div class="card" style="padding:32px;text-align:center"><h3>Updating collection totals…</h3><p class="muted">Please wait while recorded payments are checked.</p></div>';
+  return false;
+}
+// Shared by the dashboard and the login prefetch: one request per staff/range.
+function startCashTotalsRequest(range){
   const key=cashSnapshotKey(range),staffId=state.staff?.id,epoch=state._accountEpoch;
+  if(!staffId || cashSnapshots.has(key)) return;
   if(!cashSnapshotRequests.has(key)){
     const request=(async()=>{
       const {data,error}=await sb.rpc('pb_cash_collection_totals',{p_start:range.start,p_end:range.end});
@@ -594,8 +601,6 @@ function ensureCashTotals(range){
     })().finally(()=>cashSnapshotRequests.delete(key));
     cashSnapshotRequests.set(key,request);
   }
-  $('page').innerHTML='<div class="card" style="padding:32px;text-align:center"><h3>Updating collection totals…</h3><p class="muted">Please wait while recorded payments are checked.</p></div>';
-  return false;
 }
 let financialRefreshPromise=null,financialRefreshTimer=null,financialRefreshEpoch=-1;
 const pendingFinancialLoanIds=new Set();
@@ -607,6 +612,47 @@ function prefetchFinancialSnapshot(){
   const epoch=state._accountEpoch,staffId=state.staff.id;
   return {epoch,staffId,request:Promise.resolve(sb.rpc('pb_financial_snapshot',{p_loan_ids:null,p_since:null}))
     .catch(error=>({data:null,error:{message:String(error?.message||error)}}))};
+}
+// Server-first figures: once the core tables (loans, groups, members, staff)
+// are present, apply the server snapshot so loan balances, arrears and cash
+// collections can be shown before the savings/repayment history finishes.
+// Nothing here marks the portfolio verified; savings-based figures stay
+// "Verifying…" until the full ledger has loaded and been reconciled.
+function applyProvisionalFinancialSnapshot(data){
+  if(state._portfolioDataVerified===true) return false;
+  if(data?.version!==1 || data.authorized!==true || data.asOfDate!==todayISO() || !data.complete ||
+    !Array.isArray(data.rows) || !Array.isArray(data.visibleLoanIds)) return false;
+  const visibleIds=new Set(data.visibleLoanIds.map(String));
+  const localIds=new Set(state.data.loans.map(l=>String(l.id)));
+  // Every visible loan must be present locally, or totals would be incomplete.
+  if(data.visibleLoanIds.some(id=>!localIds.has(String(id)))) return false;
+  state.data.loans=state.data.loans.filter(l=>visibleIds.has(String(l.id)));
+  const loansById=new Map(state.data.loans.map(loan=>[String(loan.id),loan]));
+  const groupsById=new Map(state.data.groups.map(group=>[String(group.id),group]));
+  const byLoan=new Map();
+  data.rows.forEach(row=>{
+    byLoan.set(String(row.id),row);
+    const loan=loansById.get(String(row.id));
+    if(loan) ['status','start_date','weekly_installment','loan_value','total_payable'].forEach(key=>loan[key]=row[key]);
+    const group=groupsById.get(String(row.group_id));
+    if(group) group.officer_id=row.officer_id;
+  });
+  state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.checkedAt,byLoan};
+  state._financialSnapshotAvailable=true;
+  state._provisionalFigures=true;
+  invalidateCollectionComplianceCache();
+  return true;
+}
+function dashboardShowsProvisionalFigures(){
+  return !appUpdateAvailable && state._portfolioDataVerified===false && state._provisionalFigures===true &&
+    !state._portfolioRefreshFailed && state._financialSnapshot?.asOfDate===todayISO();
+}
+const VERIFYING_HTML='<span class="muted" style="font-size:14px;font-weight:500">Verifying…</span>';
+function provisionalFiguresNotice(){
+  const checked=state._financialSnapshot?.checkedAt;
+  return `<div class="notice notice-info" style="margin-bottom:14px" id="provisional-figures-notice">
+    Loan balances, arrears and collections below are server totals${checked?' as of '+statementHtml(fmtDateTime(checked)):''}.
+    Savings figures are being verified and appear shortly.</div>`;
 }
 async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetched=null}={}){
   if(!navigator.onLine || !state.staff) return false;
@@ -662,7 +708,11 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetch
       if(group) group.officer_id=row.officer_id;
     });
     state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.complete || since?data.checkedAt:(previous?.checkedAt||data.checkedAt),byLoan};
-    if(data.rows.length || data.complete){cashSnapshots.clear();bookActivitySnapshots.clear();bookActivityErrors.clear();}
+    // The same snapshot already shown provisionally keeps its cash totals, so
+    // the dashboard does not flash back to "Updating" when it is verified.
+    const sameAsProvisional=usePrefetch && previous?.checkedAt===data.checkedAt;
+    state._provisionalFigures=false;
+    if((data.rows.length || data.complete) && !sameAsProvisional){cashSnapshots.clear();bookActivitySnapshots.clear();bookActivityErrors.clear();}
     // Repair only loans whose cached ledger differs, rather than redownloading
     // every officer's complete repayment history. This also heals old caches.
     const mismatches=data.rows.filter(row=>{
@@ -1637,6 +1687,7 @@ async function resetAccountData(){
   state._portfolioDataVerified=false;
   state._financialSnapshot=null;
   state._financialSnapshotAvailable=false;
+  state._provisionalFigures=false;
   cashSnapshots.clear();
   bookActivitySnapshots.clear();bookActivityErrors.clear();bookActivityRequests.clear();
   state._dashboardOfficerFilter='';
@@ -1876,6 +1927,7 @@ async function loadAllFinancialData(){
   state._portfolioDataVerified = false;
   state._portfolioRefreshFailed = false;
   state._portfolioSyncSetupNeeded = false;
+  state._provisionalFigures = false;
   // getSession refreshes an expiring token without rotating a valid one.
   if(navigator.onLine){
     const { data: sessionData, error: sessionErr } = await sb.auth.getSession();
@@ -1917,6 +1969,12 @@ async function loadAllFinancialData(){
   startStage(0);
   if(cacheHits) startStage(1);
   const snapshotPrefetch=prefetchFinancialSnapshot();
+  // The dashboard's collection totals are server figures too: request them now
+  // (selected period, and today for officer dashboards) instead of after render.
+  if(snapshotPrefetch && state.view==='dashboard'){
+    startCashTotalsRequest(dashDateRange());
+    startCashTotalsRequest({start:todayISO(),end:todayISO()});
+  }
 
   for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
     const stageTables=stages[stageIndex];
@@ -1956,6 +2014,13 @@ async function loadAllFinancialData(){
       state.loading=false;
       if(cacheHits) scheduleRealtimeRender();
       else render();
+      // Show server balances as soon as both they and the core tables exist.
+      if(snapshotPrefetch && !failedPortfolioTables.size){
+        snapshotPrefetch.request.then(({data,error})=>{
+          if(error || epoch!==state._accountEpoch || state._portfolioDataVerified===true) return;
+          if(applyProvisionalFinancialSnapshot(data)) scheduleRealtimeRender();
+        });
+      }
     }
     if(stageIndex===1 && !jwtBroken){
       // Verify balances as soon as the core ledger is ready. Purchases and
@@ -3357,7 +3422,8 @@ function arrearDateRange(){
 }
 
 function pageDashboard(){
-  if(!financialFiguresReady()) return;
+  const provisional=dashboardShowsProvisionalFigures();
+  if(!provisional && !financialFiguresReady()) return;
   if(!ensureCashTotals(dashDateRange())) return;
   const r = state.staff?.app_role || state.staff?.role || 'officer';
   const isAdmin = state.staff.role === 'admin';
@@ -3420,7 +3486,8 @@ function pageDashboard(){
   if(state._financialSnapshotAvailable) officerStats.forEach((stat,id)=>{
     stat.repayments=periodCashTotals({start,end},id)?.amount||0;
   });
-  const officerPerf=[...officerStats.values()].sort((a,b)=>b.savings-a.savings);
+  const officerPerf=[...officerStats.values()].sort((a,b)=>provisional?b.repayments-a.repayments:b.savings-a.savings);
+  const savingsCell=value=>provisional?VERIFYING_HTML:KES(value);
 
   const filterBtns = [
     ['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This Month'],['3months','Last 3 months'],['custom','Custom']
@@ -3431,6 +3498,7 @@ function pageDashboard(){
       <div><h1>Operational overview</h1><div class="desc">Real-time portfolio status.</div></div>
     </div>
     ${dashboardOfficerSelector()}
+    ${provisional?provisionalFiguresNotice():''}
 
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;align-items:center">
       ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_dashFilter===k?'btn-primary':'btn-outline'}" onclick="_dashFilter='${k}';pageDashboard()">${l}</button>`).join('')}
@@ -3440,11 +3508,11 @@ function pageDashboard(){
     </div>
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-      <div class="kpi k-primary"><div class="l">Savings collected</div><div class="v">${KES(totalSavings)}</div><div class="d">${savings.length} entries</div></div>
+      <div class="kpi k-primary"><div class="l">Savings collected</div><div class="v">${savingsCell(totalSavings)}</div><div class="d">${provisional?'loading savings history':savings.length+' entries'}</div></div>
       <div class="kpi"><div class="l">Outstanding P + I</div><div class="v">${KES(outstandingBal)}</div><div class="d">${activeLoans.length} active loans</div></div>
       <div class="kpi"><div class="l">Outstanding principal</div><div class="v">${KES(outstandingPrincipal)}</div><div class="d">principal only</div></div>
       <div class="kpi k-success"><div class="l">Repayments received</div><div class="v">${KES(totalRepay)}</div><div class="d">Interest ${KES(interestEarned)}</div></div>
-      <div class="kpi k-warn"><div class="l">Members</div><div class="v">${state.data.members.length}</div><div class="d">${eligibleCount} loan-eligible</div></div>
+      <div class="kpi k-warn"><div class="l">Members</div><div class="v">${state.data.members.length}</div><div class="d">${provisional?'loan eligibility: verifying…':eligibleCount+' loan-eligible'}</div></div>
       <div class="kpi"><div class="l">Inventory value</div><div class="v">${KES(invValue)}</div><div class="d">${state.data.inventory.length} assets</div></div>
       <div class="kpi k-primary"><div class="l">Groups</div><div class="v">${state.data.groups.length}</div><div class="d">${state.data.groups.filter(g=>g.status==='active').length} active</div></div>
       <div class="kpi k-success"><div class="l">Loans closed</div><div class="v">${closedLoans}</div><div class="d">in selected period</div></div>
@@ -3455,12 +3523,12 @@ function pageDashboard(){
 
     <div style="display:flex;flex-direction:column;gap:16px;margin-top:4px">
       <div class="card" style="min-width:0">
-        <div class="card-head"><h3>Recent savings</h3><div class="sub">${savings.length} entries</div></div>
+        <div class="card-head"><h3>Recent savings</h3><div class="sub">${provisional?'Verifying…':savings.length+' entries'}</div></div>
         <div style="overflow-x:auto">
           <table class="tbl">
             <thead><tr><th>Date</th><th>Member</th><th>Group</th><th class="num">Amount</th></tr></thead>
             <tbody>
-              ${savings.slice(0,8).map(s => {
+              ${provisional?`<tr><td colspan="4"><div class="empty" style="padding:20px 0"><h4>Loading savings history…</h4></div></td></tr>`:savings.slice(0,8).map(s => {
                 const m = state.data.members.find(x=>x.id===s.member_id);
                 const g = state.data.groups.find(x=>x.id===s.group_id);
                 return `<tr><td style="white-space:nowrap">${fmtDate(s.meeting_date)}</td><td>${m?.full_name||'—'}</td><td>${g?.name||'—'}</td><td class="num">${KES(s.amount)}</td></tr>`;
@@ -3506,7 +3574,7 @@ function pageDashboard(){
           <tbody>
             ${officerPerf.map(o=>`<tr>
               <td><b>${o.name}</b></td>
-              <td class="num">${KES(o.savings)}</td>
+              <td class="num">${savingsCell(o.savings)}</td>
               <td class="num">${KES(o.repayments)}</td>
               <td class="num">${KES(o.loans)}</td>
               <td class="num" style="color:${o.ordersToday>0?'var(--primary)':'inherit'}">${o.ordersToday>0?o.ordersToday:'—'}</td>
@@ -3724,7 +3792,10 @@ function dashboardOfficerSelector(){
   return `<div class="field" style="max-width:360px;margin-bottom:16px"><label>Officer</label><select aria-label="Dashboard officer" onchange="state._dashboardOfficerFilter=this.value;pageDashboard()"><option value="">All officers</option>${staffLoanRoles().map(o=>`<option value="${o.id}" ${state._dashboardOfficerFilter===o.id?'selected':''}>${o.full_name}</option>`).join('')}</select></div>`;
 }
 function pageOfficerDashboard(officerId=null){
+  const provisional=dashboardShowsProvisionalFigures();
+  if(!provisional && !financialFiguresReady()) return;
   if(!ensureCashTotals({start:todayISO(),end:todayISO()})) return;
+  if(!ensureCashTotals(dashDateRange())) return;
   const managementView=!!officerId && canViewAllPortfolio();
   const me = managementView ? state.data.staff.find(s=>s.id===officerId) : state.staff;
   if(!me){state._dashboardOfficerFilter='';pageDashboard();return;}
@@ -3773,6 +3844,7 @@ function pageOfficerDashboard(officerId=null){
       <div><h1>${managementView ? `${me.full_name} — dashboard` : teamView ? `${state.staff.team_name || 'Team'} dashboard` : 'My dashboard'}</h1><div class="desc">${teamView ? `Performance and portfolio for ${state.staff.team_name || 'your assigned team'}.` : `Performance and portfolio for ${me.full_name}.`}</div></div>
     </div>
     ${managementView?dashboardOfficerSelector():''}
+    ${provisional?provisionalFiguresNotice():''}
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
       ${filterBtns.map(([k,l])=>`<button class="btn btn-sm ${_dashFilter===k?'btn-primary':'btn-outline'}" onclick="_dashFilter='${k}';pageDashboard()">${l}</button>`).join('')}
       ${_dashFilter==='custom'?`<input type="date" value="${_dashCustomStart}" style="padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)" onchange="_dashCustomStart=this.value;pageDashboard()" />
@@ -3781,13 +3853,13 @@ function pageOfficerDashboard(officerId=null){
     </div>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
       <div class="kpi k-primary"><div class="l">${teamView ? 'Team groups' : 'My groups'}</div><div class="v">${myGroups.length}</div></div>
-      <div class="kpi k-success"><div class="l">Savings recorded</div><div class="v">${KES(totalSv)}</div><div class="d">${mySavings.length} approved entries</div></div>
+      <div class="kpi k-success"><div class="l">Savings recorded</div><div class="v">${provisional?VERIFYING_HTML:KES(totalSv)}</div><div class="d">${provisional?'loading savings history':mySavings.length+' approved entries'}</div></div>
       <div class="kpi"><div class="l">Repayments recorded</div><div class="v">${KES(totalRp)}</div><div class="d">Interest ${KES(myInterestEarned)}</div></div>
       <div class="kpi k-warn"><div class="l">${teamView ? 'Team active loans' : 'Active loans I manage'}</div><div class="v">${myLoans.length}</div></div>
       <div class="kpi k-danger"><div class="l">Outstanding balance</div><div class="v">${KES(myOutstandingBal)}</div><div class="d">across my active loans</div></div>
       <div class="kpi k-danger"><div class="l">Accounts in arrears</div><div class="v">${myArrearsRows.length}</div><div class="d">${KES(myArrearsTotal)} overdue</div></div>
       <div class="kpi k-primary"><div class="l">Loans issued</div><div class="v">${KES(summary.issuedAmount)}</div><div class="d">selected activity period</div></div>
-      ${(myPendingSavings.length + myPendingRepayments.length) > 0 ? `
+      ${!provisional && (myPendingSavings.length + myPendingRepayments.length) > 0 ? `
       <div class="kpi" style="border-top:3px solid var(--warning);background:var(--warning-50)">
         <div class="l" style="color:var(--warning)">Pending Admin Approval</div>
         <div class="v" style="font-size:18px">${myPendingSavings.length + myPendingRepayments.length} <span style="font-size:13px;font-weight:500;color:var(--text-muted)">entries</span></div>
@@ -3811,8 +3883,8 @@ function pageOfficerDashboard(officerId=null){
             return `<tr>
               <td><b>${g.name}</b></td>
               <td class="num">${mc}</td>
-              <td class="num">${KES(savingsTotalByGroup.get(g.id)||0)}</td>
-              <td class="num" style="color:${savToday>0?'var(--success)':'var(--text-muted)'}"><b>${savToday>0?KES(savToday):'—'}</b></td>
+              <td class="num">${provisional?VERIFYING_HTML:KES(savingsTotalByGroup.get(g.id)||0)}</td>
+              <td class="num" style="color:${savToday>0?'var(--success)':'var(--text-muted)'}"><b>${provisional?VERIFYING_HTML:savToday>0?KES(savToday):'—'}</b></td>
               <td class="num" style="color:${repToday>0?'var(--primary)':'var(--text-muted)'}"><b>${repToday>0?KES(repToday):'—'}</b></td>
               <td>${g.meeting_day||'—'}</td>
             </tr>`;
