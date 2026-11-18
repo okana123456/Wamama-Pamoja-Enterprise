@@ -2023,14 +2023,27 @@ async function settleScheduledLoanDeposits(){
   scheduledDepositRelease=request;
   try{return await request;}finally{if(scheduledDepositRelease===request) scheduledDepositRelease=null;}
 }
+// Deposits fall due once a day, but this check used to run on every app load
+// from every device (up to 30 calls of ~0.9 s each). In the background it now
+// runs on a device's first load of the day and then at most every 3 hours;
+// exports and approvals still release due deposits immediately.
+const BACKGROUND_RELEASE_INTERVAL_MS=3*60*60*1000;
+function backgroundReleaseKey(){ return `pb_release_checked_${state.staff?.business_id||''}`; }
+function backgroundReleaseDue(){
+  try{
+    const last=JSON.parse(localStorage.getItem(backgroundReleaseKey())||'null');
+    return !last || last.day!==todayISO() || Date.now()-Number(last.at||0)>=BACKGROUND_RELEASE_INTERVAL_MS;
+  }catch{ return true; }
+}
 function releaseDuePrepaymentsInBackground(){
-  if(!navigator.onLine || !state.staff?.business_id) return;
+  if(!navigator.onLine || !state.staff?.business_id || !backgroundReleaseDue()) return;
   const epoch=state._accountEpoch;
   setTimeout(async()=>{
-    if(epoch!==state._accountEpoch) return;
+    if(epoch!==state._accountEpoch || !backgroundReleaseDue()) return;
     let releasedTotal=0;
     try{releasedTotal=await settleScheduledLoanDeposits();}
     catch(error){console.warn('Could not release due loan prepayments',error);return;}
+    try{ localStorage.setItem(backgroundReleaseKey(),JSON.stringify({day:todayISO(),at:Date.now()})); }catch{}
     if(releasedTotal>0 && epoch===state._accountEpoch){
       await refreshOfficerLoanDepositBalances({force:true,rerender:true});
       scheduleFinancialSnapshotRefresh();
