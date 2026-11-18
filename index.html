@@ -8,7 +8,7 @@
 <link rel="manifest" href='data:application/manifest+json;base64,eyJuYW1lIjogIldhbWFtYSBQYW1vamEgRW50ZXJwcmlzZSIsICJzaG9ydF9uYW1lIjogIldhbWFtYSBQYW1vamEiLCAic3RhcnRfdXJsIjogIi4iLCAic2NvcGUiOiAiLiIsICJkaXNwbGF5IjogInN0YW5kYWxvbmUiLCAiYmFja2dyb3VuZF9jb2xvciI6ICIjZmZmYWY1IiwgInRoZW1lX2NvbG9yIjogIiNlNjVjMDAiLCAiaWNvbnMiOiBbeyJzcmMiOiAiZGF0YTppbWFnZS9zdmcreG1sO3V0ZjgsPHN2ZyUyMHhtbG5zPSdodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyclMjB2aWV3Qm94PScwJTIwMCUyMDUxMiUyMDUxMic+PHJlY3QlMjB3aWR0aD0nMTAwJTI1JyUyMGhlaWdodD0nMTAwJTI1JyUyMGZpbGw9JyUyM2U2NWMwMCcvPjx0ZXh0JTIweD0nNTAlMjUnJTIweT0nNjIlMjUnJTIwZm9udC1zaXplPScyMjAnJTIwdGV4dC1hbmNob3I9J21pZGRsZSclMjBmaWxsPSclMjNmZmYnJTIwZm9udC1mYW1pbHk9J3NhbnMtc2VyaWYnJTIwZm9udC13ZWlnaHQ9JzcwMCc+V1A8L3RleHQ+PC9zdmc+IiwgInNpemVzIjogIjUxMng1MTIiLCAidHlwZSI6ICJpbWFnZS9zdmcreG1sIiwgInB1cnBvc2UiOiAiYW55IG1hc2thYmxlIn1dfQ==' />
 <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='100%25' height='100%25' rx='12' fill='%23e65c00'/><text x='50%25' y='62%25' font-size='30' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>WP</text></svg>" />
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <style>
 :root{
@@ -600,7 +600,15 @@ function ensureCashTotals(range){
 let financialRefreshPromise=null,financialRefreshTimer=null,financialRefreshEpoch=-1;
 const pendingFinancialLoanIds=new Set();
 let pendingFullFinancialRefresh=false;
-async function refreshFinancialSnapshot(loanIds=null,{incremental=false}={}){
+// Start the authoritative server snapshot while table downloads are still in
+// progress; it is applied only after the ledger it is compared with is loaded.
+function prefetchFinancialSnapshot(){
+  if(!navigator.onLine || !state.staff) return null;
+  const epoch=state._accountEpoch,staffId=state.staff.id;
+  return {epoch,staffId,request:Promise.resolve(sb.rpc('pb_financial_snapshot',{p_loan_ids:null,p_since:null}))
+    .catch(error=>({data:null,error:{message:String(error?.message||error)}}))};
+}
+async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetched=null}={}){
   if(!navigator.onLine || !state.staff) return false;
   if(financialRefreshPromise && financialRefreshEpoch===state._accountEpoch) return financialRefreshPromise;
   const staffId=state.staff.id,epoch=state._accountEpoch;
@@ -609,7 +617,9 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false}={}){
     const previous=state._financialSnapshot;
     const since=incremental && previous?.asOfDate===todayISO()
       ?new Date(Date.parse(previous.checkedAt)-INCREMENTAL_SYNC_OVERLAP_MS).toISOString():null;
-    const {data,error}=await sb.rpc('pb_financial_snapshot',{p_loan_ids:loanIds,p_since:since});
+    const usePrefetch=prefetched && !loanIds && !since && prefetched.epoch===epoch && prefetched.staffId===staffId;
+    const {data,error}=usePrefetch?await prefetched.request
+      :await sb.rpc('pb_financial_snapshot',{p_loan_ids:loanIds,p_since:since});
     if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
     if(error){
       // Keep the existing verified incremental-sync path during rollout.
@@ -695,12 +705,12 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261117-sticky-officer-column';
+const APP_RELEASE='20261118-idempotent-submissions';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
   return !state.session || (['dashboard','reports','arrears','loans','inventory','purchases','collection_compliance','memberProfile'].includes(state.view) &&
-    !document.getElementById('modal-root')?.hasChildNodes() && !lsGet('queue',[]).length);
+    !document.getElementById('modal-root')?.hasChildNodes() && !meetingSubmissionInFlight && !outboxFlushPromise);
 }
 function applyAvailableAppUpdate(){
   if(!appUpdateAvailable || appUpdateReloading || !canApplyAppUpdate()) return false;
@@ -843,36 +853,256 @@ function setBanner(msg, kind=''){
   b.className = `status-banner show ${kind}`;
   if(kind === 'online') setTimeout(()=>b.classList.remove('show'), 2200);
 }
-window.addEventListener('online', ()=>{ setBanner('Connection restored. Synchronising queued actions.', 'online'); flushQueue(); });
-window.addEventListener('offline', ()=>{ setBanner('You are offline. Changes will be queued and synchronised automatically.'); });
+window.addEventListener('online', ()=>{ setBanner('Connection restored. Sending saved meeting submissions.', 'online'); flushOutbox(); });
+window.addEventListener('offline', ()=>{ setBanner('You are offline. Meeting submissions are kept on this device and sent automatically.'); });
 
-/* ----- Offline write queue ----- */
-async function queuedInsert(table, row){
-  if(navigator.onLine){
-    const { data, error } = await sb.from(table).insert(row).select().single();
-    if(!error) return { ok:true, data };
-    const message=String(error.message||'');
-    const networkFailure=!navigator.onLine || /failed to fetch|network|load failed|fetch/i.test(message);
-    if(!networkFailure) return { ok:false, error };
-    // Only genuine connection failures belong in the offline queue.
-  }
-  const q = lsGet('queue', []);
-  q.push({ table, row, t: Date.now() });
-  lsSet('queue', q);
-  return { ok:true, queued:true };
+/* ----- Financial operation outbox -----
+ * Every financial submission receives stable operation IDs BEFORE its first
+ * request. The IDs are stored on this device with the submission, so a
+ * timeout, lost response, reload or reconnection re-sends the same IDs and
+ * the database returns the rows it already saved instead of inserting again.
+ * Entries are scoped to one business and one staff account. Only one tab at a
+ * time sends (Web Locks, with a storage lease fallback). Each entry is updated
+ * individually, so a send never overwrites entries written by another tab. */
+const OUTBOX_VERSION=1;
+const OUTBOX_RETRYABLE=/failed to fetch|network|load failed|timeout|timed out|aborted|fetch|503|502|504|ECONN|JWT|jwt|PGRST301/i;
+let outboxFlushPromise=null;
+function newOperationId(){
+  if(window.crypto?.randomUUID) return crypto.randomUUID();
+  const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;
+  const h=[...b].map(x=>x.toString(16).padStart(2,'0')).join('');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 }
-async function flushQueue(){
-  const q = lsGet('queue', []);
-  if(!q.length) return;
-  const remaining = [];
-  for(const item of q){
-    const { error } = await sb.from(item.table).insert(item.row);
-    if(error) remaining.push(item);
-  }
-  lsSet('queue', remaining);
-  if(q.length && !remaining.length) toast('Queued changes synchronised.', 'success');
+function outboxKey(staff=state.staff){
+  return staff?.id && staff?.business_id ? `pb_outbox_v${OUTBOX_VERSION}_${staff.business_id}_${staff.id}` : null;
 }
-setInterval(flushQueue, 60000);
+function readOutbox(){
+  const key=outboxKey(); if(!key) return [];
+  try{ const items=JSON.parse(localStorage.getItem(key)||'[]'); return Array.isArray(items)?items:[]; }catch{ return []; }
+}
+function writeOutbox(items){
+  const key=outboxKey(); if(!key) return false;
+  try{ items.length?localStorage.setItem(key,JSON.stringify(items)):localStorage.removeItem(key); return true; }
+  catch{ return false; }
+}
+// Read-modify-write of ONE entry against the latest stored list (synchronous,
+// so another tab's writes between awaits are never discarded).
+function updateOutboxEntry(id,change){
+  const items=readOutbox(),index=items.findIndex(item=>item.id===id);
+  if(index<0) return null;
+  const next=change({...items[index]});
+  if(next) items[index]=next; else items.splice(index,1);
+  writeOutbox(items);
+  return next;
+}
+function outboxSummary(){
+  const items=readOutbox();
+  return {
+    items,
+    waiting:items.filter(item=>item.status!=='needs_attention').length,
+    attention:items.filter(item=>item.status==='needs_attention').length
+  };
+}
+function outboxBusyForMeeting(groupId,date){
+  return readOutbox().find(item=>item.kind==='meeting' && item.payload.group_id===groupId && item.payload.meeting_date===date);
+}
+async function withOutboxLock(fn){
+  const key=outboxKey(); if(!key) return null;
+  if(navigator.locks?.request){
+    return navigator.locks.request('wamama-outbox:'+key,{mode:'exclusive'},()=>fn());
+  }
+  // Fallback for browsers without Web Locks: a short storage lease.
+  const leaseKey=key+'_lease',me=newOperationId(),deadline=Date.now()+20000;
+  while(true){
+    let lease=null; try{ lease=JSON.parse(localStorage.getItem(leaseKey)||'null'); }catch{}
+    if(!lease || lease.expires<Date.now()){
+      localStorage.setItem(leaseKey,JSON.stringify({owner:me,expires:Date.now()+90000}));
+      await new Promise(resolve=>setTimeout(resolve,40));
+      try{ lease=JSON.parse(localStorage.getItem(leaseKey)||'null'); }catch{}
+      if(lease?.owner===me) break;
+    }
+    if(Date.now()>deadline) return null;
+    await new Promise(resolve=>setTimeout(resolve,500));
+  }
+  try{ return await fn(); }
+  finally{ try{ const lease=JSON.parse(localStorage.getItem(leaseKey)||'null'); if(lease?.owner===me) localStorage.removeItem(leaseKey); }catch{} }
+}
+async function rpcWithTimeout(name,args,ms=45000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),ms);
+  try{
+    let request=sb.rpc(name,args);
+    if(typeof request.abortSignal==='function') request=request.abortSignal(controller.signal);
+    return await request;
+  }catch(error){ return {data:null,error:{message:String(error?.message||error||'Request failed'),code:'NETWORK'}}; }
+  finally{ clearTimeout(timer); }
+}
+function outboxErrorIsRetryable(error){
+  if(!navigator.onLine) return true;
+  const code=String(error?.code||''), message=String(error?.message||'');
+  return code==='NETWORK' || code==='PGRST202' || code==='57014' || code==='40001' || code==='40P01' || /^5/.test(String(error?.status||'')) || OUTBOX_RETRYABLE.test(message) || /could not find the function/i.test(message);
+}
+// Move the pre-idempotency queue (rows without operation IDs) into review.
+// Those rows may already be saved, so they are never sent automatically.
+function adoptLegacyQueue(){
+  if(!state.staff?.id) return 0;
+  const legacyKey=sk('queue'); let legacy=[];
+  try{ legacy=JSON.parse(localStorage.getItem(legacyKey)||'[]'); }catch{ legacy=[]; }
+  if(!Array.isArray(legacy) || !legacy.length) return 0;
+  const mine=legacy.filter(item=>String(item?.row?.recorded_by||'')===String(state.staff.id) && ['pb_savings','pb_repayments'].includes(item.table));
+  const others=legacy.filter(item=>!mine.includes(item));
+  if(!mine.length) return 0;
+  const meetings=new Map(),seen=new Set();
+  mine.forEach(item=>{
+    const row=item.row||{}, key=`${row.group_id}|${row.meeting_date}`;
+    // The old queue could hold many copies of one entry; keep one for review.
+    const copyKey=`${key}|${item.table}|${row.member_id}|${row.loan_id||''}|${Number(row.amount)||0}`;
+    if(seen.has(copyKey)) return;
+    seen.add(copyKey);
+    if(!meetings.has(key)) meetings.set(key,{operation_id:newOperationId(),group_id:row.group_id,meeting_date:row.meeting_date,savings:[],repayments:[]});
+    const payload=meetings.get(key);
+    if(item.table==='pb_savings') payload.savings.push({client_operation_id:newOperationId(),member_id:row.member_id,amount:Number(row.amount)||0,notes:row.notes||null});
+    else payload.repayments.push({client_operation_id:newOperationId(),loan_id:row.loan_id,amount:Number(row.amount)||0});
+  });
+  const items=readOutbox();
+  meetings.forEach(payload=>items.push({id:payload.operation_id,kind:'meeting',version:OUTBOX_VERSION,createdAt:Date.now(),
+    staffId:state.staff.id,businessId:state.staff.business_id,payload,results:{},attempts:0,status:'needs_attention',legacy:true,
+    lastError:'Unsent entries from the previous app version were found on this device. They may already be recorded: check the member statements, then send or discard them.'}));
+  if(!writeOutbox(items)) return 0;
+  try{ others.length?localStorage.setItem(legacyKey,JSON.stringify(others)):localStorage.removeItem(legacyKey); }catch{}
+  return mine.length;
+}
+function applySavedOperationRows(response){
+  const savedRepayments=[];
+  (response?.savings||[]).forEach(result=>{
+    const row=result.row; if(!row?.id) return;
+    const index=state.data.savings.findIndex(item=>item.id===row.id);
+    if(index>=0) state.data.savings[index]=row; else state.data.savings.unshift(row);
+  });
+  (response?.repayments||[]).forEach(result=>{
+    const row=result.row; if(!row?.id) return;
+    const index=state.data.repayments.findIndex(item=>item.id===row.id);
+    if(index>=0) state.data.repayments[index]=row; else state.data.repayments.unshift(row);
+    if(result.state==='created') savedRepayments.push(row);
+  });
+  const meeting=response?.meeting?.row;
+  if(meeting?.id && !state.data.meetings.some(item=>item.id===meeting.id)) state.data.meetings.unshift(meeting);
+  return savedRepayments;
+}
+// Send one meeting entry. Only entries not yet confirmed are sent; confirmed
+// ones are never repeated. Returns the updated entry (null once complete).
+async function sendMeetingOutboxEntry(entryId){
+  const entry=readOutbox().find(item=>item.id===entryId);
+  if(!entry) return {entry:null};
+  const done=state=>state==='created'||state==='existing';
+  const results=entry.results||{};
+  const payload={...entry.payload,
+    savings:entry.payload.savings.filter(item=>!done(results[item.client_operation_id]?.state)),
+    repayments:entry.payload.repayments.filter(item=>!done(results[item.client_operation_id]?.state))};
+  updateOutboxEntry(entryId,item=>({...item,status:'sending',attempts:(item.attempts||0)+1,lastAttemptAt:Date.now()}));
+  const {data,error}=await rpcWithTimeout('pb_submit_meeting',{p_payload:payload});
+  if(error || data?.version!==1){
+    const failure=error||{message:'The server returned an unexpected response.'};
+    const retryable=!error || outboxErrorIsRetryable(failure);
+    const setupMissing=/could not find the function|PGRST202/i.test(`${failure.code} ${failure.message}`);
+    const updated=updateOutboxEntry(entryId,item=>({...item,status:retryable?'pending':'needs_attention',
+      lastError:setupMissing?'The server needs the meeting submission update before this can be sent. It is kept safely on this device.':String(failure.message||'Request failed')}));
+    return {entry:updated,error:failure,retryable};
+  }
+  const merged={...results};
+  [...(data.savings||[]),...(data.repayments||[])].forEach(result=>{
+    if(result.client_operation_id) merged[result.client_operation_id]={state:result.state,message:result.message||null,code:result.code||null};
+  });
+  const savedRepayments=applySavedOperationRows(data);
+  const all=[...entry.payload.savings,...entry.payload.repayments];
+  const failed=all.filter(item=>!done(merged[item.client_operation_id]?.state));
+  const updated=updateOutboxEntry(entryId,item=>failed.length?{...item,results:merged,status:'needs_attention',
+    lastError:merged[failed[0].client_operation_id]?.message||'Some entries were not saved.'}:null);
+  return {entry:updated,response:data,savedRepayments,failedCount:failed.length};
+}
+async function afterFinancialWrite({loanIds=[],repaymentIds=[]}={}){
+  cashSnapshots.clear();bookActivitySnapshots.clear();bookActivityErrors.clear();
+  invalidateCollectionComplianceCache();
+  if(repaymentIds.length){
+    try{ await refreshExcessRelatedData({repaymentIds,loanIds}); }catch(error){ console.warn('Could not refresh repayment allocation data',error); }
+    await closeFullyPaidLoans(loanIds,{silent:true});
+  }
+  [...new Set(loanIds.map(String))].forEach(id=>scheduleFinancialSnapshotRefresh(id));
+  persistPartialFinancialCache('pb_savings',state.data.savings);
+  persistPartialFinancialCache('pb_repayments',state.data.repayments);
+}
+async function flushOutbox({only=null,quiet=false}={}){
+  if(!state.staff || !navigator.onLine) return null;
+  if(outboxFlushPromise && !only) return outboxFlushPromise;
+  const epoch=state._accountEpoch;
+  const run=withOutboxLock(async()=>{
+    const outcomes=[];
+    const ids=readOutbox().filter(item=>only?item.id===only:item.status!=='needs_attention').map(item=>item.id);
+    for(const id of ids){
+      if(epoch!==state._accountEpoch || !navigator.onLine) break;
+      const outcome=await sendMeetingOutboxEntry(id);
+      outcomes.push(outcome);
+      if(outcome.savedRepayments?.length || outcome.response){
+        await afterFinancialWrite({repaymentIds:(outcome.savedRepayments||[]).map(row=>row.id),loanIds:(outcome.savedRepayments||[]).map(row=>row.loan_id)});
+      }
+      if(outcome.error && outcome.retryable) break; // connection trouble: stop and retry later
+    }
+    return outcomes;
+  });
+  if(!only) outboxFlushPromise=run;
+  try{
+    const outcomes=await run;
+    if(!quiet && outcomes?.length && !only){
+      const sent=outcomes.filter(o=>o.response && !o.failedCount).length;
+      if(sent) toast(`${sent} saved meeting submission${sent===1?'':'s'} sent.`,'success');
+    }
+    renderOutboxStatus();
+    return outcomes;
+  }finally{ if(outboxFlushPromise===run) outboxFlushPromise=null; }
+}
+setInterval(()=>{ if(readOutbox().some(item=>item.status!=='needs_attention')) flushOutbox({quiet:true}); },60000);
+window.addEventListener('storage',event=>{ if(event.key && event.key===outboxKey()) renderOutboxStatus(); });
+function renderOutboxStatus(){
+  const host=document.getElementById('outbox-status');
+  if(!host) return;
+  const {items}=outboxSummary();
+  if(!items.length){ host.innerHTML=''; return; }
+  const groupName=id=>state.data.groups.find(g=>String(g.id)===String(id))?.name||'Group';
+  host.innerHTML=items.map(item=>{
+    const results=item.results||{},all=[...item.payload.savings,...item.payload.repayments];
+    const saved=all.filter(x=>['created','existing'].includes(results[x.client_operation_id]?.state)).length;
+    const label=item.status==='sending'?'Sending…':item.status==='needs_attention'?'Needs attention':'Waiting to send';
+    const cls=item.status==='needs_attention'?'notice-warn':'notice-info';
+    return `<div class="notice ${cls}" style="margin-bottom:10px">
+      <b>${statementHtml(groupName(item.payload.group_id))} · ${statementHtml(fmtDate(item.payload.meeting_date))}</b> — ${label}.
+      ${saved} of ${all.length} entries confirmed saved.
+      ${item.lastError?`<div style="font-size:12px;margin-top:4px">${statementHtml(item.lastError)}</div>`:''}
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm btn-primary" onclick="retryOutboxEntry('${item.id}')" ${item.status==='sending'?'disabled':''}>${item.legacy?'Send with duplicate protection':'Retry now'}</button>
+        ${item.status==='needs_attention'?`<button class="btn btn-sm btn-outline" onclick="discardOutboxEntry('${item.id}')">Discard unsent entries</button>`:''}
+      </div></div>`;
+  }).join('');
+}
+async function retryOutboxEntry(id){
+  if(!navigator.onLine) return toast('Connect to the internet to send this submission.','warn');
+  if(!(await ensureFreshToken())) return;
+  updateOutboxEntry(id,item=>({...item,status:'pending',legacy:false}));
+  renderOutboxStatus();
+  const outcomes=await flushOutbox({only:id});
+  const outcome=outcomes?.[0];
+  if(outcome?.response && !outcome.failedCount) toast('Meeting submission saved.','success');
+  else if(outcome?.error) toast(`Not sent yet: ${outcome.error.message}`,'warn');
+  else if(outcome?.failedCount) toast(`${outcome.failedCount} entr${outcome.failedCount===1?'y needs':'ies need'} attention.`,'warn');
+  renderOutboxStatus();
+  if(state.view==='meeting') renderMeetList();
+}
+function discardOutboxEntry(id){
+  confirmDialog('Discard the entries that were NOT confirmed as saved? Entries already saved are kept in the records.',()=>{
+    updateOutboxEntry(id,()=>null);
+    renderOutboxStatus();
+    toast('Unsent entries discarded. Saved entries are unchanged.','info');
+  },{title:'Discard unsent entries',danger:true});
+}
 
 /* ----- Session timeout ----- */
 let lastActivity = Date.now();
@@ -1371,12 +1601,21 @@ async function afterLogin(offline){
   state.view = 'dashboard';
   if(!offline) await smartLoadAll();
   await audit('login', 'auth', state.staff.id);
-  flushQueue();
+  startOutboxAfterLogin();
   setupRealtime();
   render();
 }
+function startOutboxAfterLogin(){
+  const adopted=adoptLegacyQueue();
+  const {waiting,attention}=outboxSummary();
+  if(adopted) setBanner(`${adopted} unsent entr${adopted===1?'y':'ies'} from the previous app version need review on the Weekly meeting page before sending.`);
+  else if(attention) setBanner(`${attention} meeting submission${attention===1?' needs':'s need'} attention on the Weekly meeting page.`);
+  if(waiting) flushOutbox();
+}
 
 async function signOut(){
+  const {items}=outboxSummary();
+  if(items.length) toast(`${items.length} meeting submission${items.length===1?' is':'s are'} kept on this device and will be sent the next time this account signs in here.`,'warn');
   await audit('logout', 'auth', state.staff?.id);
   await sb.auth.signOut();
   await resetAccountData();
@@ -1385,6 +1624,7 @@ async function signOut(){
 }
 async function resetAccountData(){
   state._accountEpoch++;
+  state._meet=null; // a meeting draft never carries over to another account
   state._dataTablesLoading=null;state._dataTableErrors=null;
   state._officerLoanDepositRows=[];
   state._officerLoanDepositsReady=false;
@@ -1419,39 +1659,46 @@ async function loadSettings(){
   lsSet('settings', state.settings);
 }
 
+// Keyset pagination: each page continues after the last id instead of using
+// OFFSET, so the database never rescans earlier pages and rows inserted during
+// a long download cannot shift a page boundary and be skipped. A history
+// larger than the safety limit is reported as an error, never shown partially.
+const FULL_SYNC_PAGE_SIZE=1000,FULL_SYNC_MAX_ROWS=500000;
 async function fetchBusinessTableRows(table){
   const businessId=state.staff?.business_id;
-  const pageSize = 1000;
-  const maxRows = 50000;
   const rows = [];
-  for(let from = 0; from < maxRows; from += pageSize){
-    let query = sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').range(from, from + pageSize - 1);
-    if (businessId) {
-      query = query.eq('business_id', businessId);
-    }
+  let lastId=null;
+  while(rows.length<FULL_SYNC_MAX_ROWS){
+    let query = sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').limit(FULL_SYNC_PAGE_SIZE);
+    if (businessId) query = query.eq('business_id', businessId);
+    if (lastId!==null) query = query.gt('id', lastId);
     const { data, error } = await query;
     if(error) return { data: rows, error };
     rows.push(...(data || []));
-    if(!data || data.length < pageSize) break;
+    if(!data || data.length < FULL_SYNC_PAGE_SIZE) return { data: rows, error: null };
+    lastId=data[data.length-1].id;
   }
-  return { data: rows, error: null };
+  return { data: rows, error: { message: `${table} is larger than this browser can verify (${FULL_SYNC_MAX_ROWS} rows). Use server reports.` } };
 }
 
 async function fetchPagedBusinessRows(table, configureQuery){
   const businessId=state.staff?.business_id;
-  const pageSize=1000;
-  const maxRows=50000;
   const rows=[];
-  for(let from=0;from<maxRows;from+=pageSize){
-    let query=sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').range(from,from+pageSize-1);
+  let lastId=null;
+  while(rows.length<FULL_SYNC_MAX_ROWS){
+    // Ordered by id first so keyset continuation is exact; filters from
+    // configureQuery (changed-since, pending, id lists) are unchanged.
+    let query=sb.from(table).select(table==='pb_inventory'?SAFE_INVENTORY_COLUMNS:'*').order('id').limit(FULL_SYNC_PAGE_SIZE);
     if(businessId) query=query.eq('business_id',businessId);
+    if(lastId!==null) query=query.gt('id',lastId);
     query=configureQuery(query);
     const {data,error}=await query;
     if(error) return {data:rows,error};
     rows.push(...(data||[]));
-    if(!data || data.length<pageSize) break;
+    if(!data || data.length<FULL_SYNC_PAGE_SIZE) return {data:rows,error:null};
+    lastId=data[data.length-1].id;
   }
-  return {data:rows,error:null};
+  return {data:rows,error:{message:`${table} returned more rows than this browser can verify.`}};
 }
 
 async function fetchIncrementalRows(table,cached){
@@ -1658,10 +1905,22 @@ async function loadAllFinancialData(){
   ];
   const failedPortfolioTables = new Set();
   const portfolioTables = new Set(['pb_groups','pb_members','pb_staff','pb_loans','pb_repayments','pb_savings']);
+  // With a local cache the history requests are small deltas, so they run
+  // alongside the core tables. On a first (cold) load the large history
+  // download would compete for bandwidth, so core tables go first. Results are
+  // always applied in the same order: totals verify only with the full ledger.
+  const stageRequests=[];
+  const startStage=index=>{
+    if(!stageRequests[index]) stageRequests[index]=loadOptimizedTablesWithLimit(stages[index],index===1?3:4);
+    return stageRequests[index];
+  };
+  startStage(0);
+  if(cacheHits) startStage(1);
+  const snapshotPrefetch=prefetchFinancialSnapshot();
 
   for(let stageIndex=0;stageIndex<stages.length && !jwtBroken;stageIndex++){
     const stageTables=stages[stageIndex];
-    const results=await loadOptimizedTablesWithLimit(stageTables,4);
+    const results=await startStage(stageIndex);
     if(epoch!==state._accountEpoch) return;
     results.forEach((r,i)=>{
       const table=stageTables[i];
@@ -1706,7 +1965,7 @@ async function loadAllFinancialData(){
       state._portfolioRefreshFailed=failedPortfolioTables.size>0;
       await Promise.all([
         refreshOfficerLoanDepositBalances({force:true}),
-        state._portfolioDataVerified?refreshFinancialSnapshot():Promise.resolve(false)
+        state._portfolioDataVerified?refreshFinancialSnapshot(null,{prefetched:snapshotPrefetch}):Promise.resolve(false)
       ]);
       if(epoch!==state._accountEpoch) return;
       scheduleRealtimeRender();
@@ -5430,8 +5689,10 @@ function pageMeeting(){
       </div>
     </div>
 
+    <div id="outbox-status" style="margin-top:16px"></div>
     <div id="meet-list" style="margin-top:16px"></div>
   `;
+  renderOutboxStatus();
   $('m-group').addEventListener('change', e => { m.groupId = e.target.value; m.entries = {}; pageMeeting(); });
   $('m-date').addEventListener('change', e => { m.date = e.target.value; pageMeeting(); });
   renderMeetList();
@@ -5446,7 +5707,7 @@ function renderMeetList(){
   host.innerHTML = `
     <div class="card-head" style="border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--surface);border:1px solid var(--border);border-bottom:none">
       <h3>${members.length} members</h3>
-      <button class="btn btn-primary" onclick="submitMeeting()">Submit meeting</button>
+      <button class="btn btn-primary" id="meet-submit" onclick="submitMeeting()" ${meetingSubmissionInFlight?'disabled':''}>${meetingSubmissionInFlight?'Saving…':'Submit meeting'}</button>
     </div>
     <div style="background:var(--surface);border:1px solid var(--border);border-top:none;padding:14px;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
       ${members.map(mem => {
@@ -5544,100 +5805,90 @@ function renderMeetList(){
     });
   });
 }
+let meetingSubmissionInFlight=false;
+function setMeetingSubmitBusy(busy){
+  const button=document.getElementById('meet-submit');
+  if(button){ button.disabled=busy; button.textContent=busy?'Saving…':'Submit meeting'; }
+}
 async function submitMeeting(){
+  if(meetingSubmissionInFlight) return toast('The meeting is already being saved. Please wait.','warn');
+  meetingSubmissionInFlight=true;
+  setMeetingSubmitBusy(true);
+  try { return await submitMeetingOnce(); }
+  finally { meetingSubmissionInFlight=false; setMeetingSubmitBusy(false); }
+}
+function storeOutboxEntry(entry){
+  const items=readOutbox(); items.push(entry);
+  if(writeOutbox(items)) return true;
+  // Free re-downloadable cached lists, never financial submissions, then retry.
+  CACHEABLE_DATA_KEYS.forEach(key=>{ try{ localStorage.removeItem(sk(key)); }catch{} });
+  return writeOutbox(items);
+}
+async function submitMeetingOnce(){
   const m = state._meet;
   if(!m.groupId || !m.date) return toast('Group and date are required.', 'error');
-  const members = state.data.members.filter(x=>x.group_id===m.groupId && x.status==='active');
-
-  let meetingId = null;
-  const existing = state.data.meetings.find(x=>x.group_id===m.groupId && x.meeting_date===m.date);
-  if(existing){ meetingId = existing.id; }
-  else {
-    const { data, error } = await sb.from('pb_meetings').insert({
-      business_id: state.staff.business_id || null,
-      group_id: m.groupId, meeting_date: m.date, recorded_by: state.staff.id
-    }).select().single();
-    if(error) return toast(error.message, 'error');
-    meetingId = data.id; state.data.meetings.unshift(data);
+  const waiting=outboxBusyForMeeting(m.groupId,m.date);
+  if(waiting){
+    renderOutboxStatus();
+    return toast('This meeting already has a submission on this device. Retry or discard it in the status box before submitting again.','warn');
   }
-
-  const savRows = []; const repRows = [];
+  const members = state.data.members.filter(x=>x.group_id===m.groupId && x.status==='active');
+  const seenMembers=new Set(),seenLoans=new Set();
+  const savings=[],repayments=[];
   for(const mem of members){
+    if(seenMembers.has(String(mem.id))) continue; // never two entries for one member
+    seenMembers.add(String(mem.id));
     const e = m.entries[mem.id] || {};
-    if(e.absent){ continue; }
-    const sav = Number(e.savings)||0;
-
-    if(sav>0){
-      // Only CEO, Administrator, and Branch Manager can auto-approve on entry;
-      // Loan officers submit as 'pending' for supervisor/admin to approve.
-      const savStatus = can('approve_savings') ? 'approved' : 'pending';
-      savRows.push({ business_id: state.staff.business_id || null, member_id: mem.id, group_id: m.groupId, meeting_id: meetingId, meeting_date: m.date, amount: sav, recorded_by: state.staff.id, notes: e.notes||null, status: savStatus });
-    }
-
-    if (e.repayments) {
-      for (const [loanId, repAmount] of Object.entries(e.repayments)) {
-        const rep = Number(repAmount)||0;
-        const ln = state.data.loans.find(l => l.id === loanId);
-        if(rep > 0 && ln){
-          const ir = Number(ln.total_payable) ? (Number(ln.total_payable)-Number(ln.loan_value))/Number(ln.total_payable) : 0;
-          const interest = +(rep*ir).toFixed(2);
-          const principal = +(rep-interest).toFixed(2);
-          const repStatus = can('approve_repayment') ? 'approved' : 'pending';
-          repRows.push({ business_id: state.staff.business_id || null, loan_id: ln.id, member_id: mem.id, group_id: m.groupId, meeting_id: meetingId, meeting_date: m.date, amount: rep, principal, interest, recorded_by: state.staff.id, status: repStatus });
-        }
+    if(e.absent) continue;
+    const sav = Math.round((Number(e.savings)||0)*100)/100;
+    if(sav>0) savings.push({client_operation_id:newOperationId(),member_id:mem.id,amount:sav,notes:e.notes||null});
+    for(const [loanId,repAmount] of Object.entries(e.repayments||{})){
+      const rep=Math.round((Number(repAmount)||0)*100)/100;
+      const ln=state.data.loans.find(l=>l.id===loanId);
+      if(rep>0 && ln && !seenLoans.has(String(ln.id))){
+        seenLoans.add(String(ln.id));
+        repayments.push({client_operation_id:newOperationId(),loan_id:ln.id,amount:rep});
       }
     }
   }
+  if(!savings.length && !repayments.length) return toast('Enter at least one saving or repayment before submitting.','warn');
 
-  let okSav=0, okRep=0, fail=0;
-  const savedRepayments=[];
-  for(const r of savRows){
-    const res = await queuedInsert('pb_savings', r);
-    if(res.ok){
-      okSav++;
-      if(!res.queued && res.data) state.data.savings.unshift(res.data);
-    }else{
-      fail++;
-      toast(`Savings entry failed: ${res.error?.message||'Database rejected the entry.'}`,'error');
-    }
+  // The operation IDs are stored BEFORE the first request.
+  const entry={id:newOperationId(),kind:'meeting',version:OUTBOX_VERSION,createdAt:Date.now(),
+    staffId:state.staff.id,businessId:state.staff.business_id,
+    payload:{group_id:m.groupId,meeting_date:m.date,savings,repayments},
+    results:{},attempts:0,status:'pending'};
+  entry.payload.operation_id=entry.id;
+  if(!storeOutboxEntry(entry)){
+    return toast('This device could not store the submission safely (browser storage is full). Nothing was sent. Free up storage and try again.','error');
   }
-  if(repRows.length && navigator.onLine){
-    const {data,error}=await sb.rpc('pb_record_repayments_batch',{p_rows:repRows});
-    if(error){
-      fail+=repRows.length;
-      toast(`Repayments were not saved: ${error.message}. Run the new repayment reliability SQL if it has not been deployed.`,'error');
-    }else{
-      const saved=Array.isArray(data?.rows)?data.rows:[];
-      const failures=Array.isArray(data?.failures)?data.failures:[];
-      saved.forEach(row=>{
-        if(row?.id && !state.data.repayments.some(existing=>existing.id===row.id)) state.data.repayments.unshift(row);
-        if(row?.id) savedRepayments.push(row);
-      });
-      okRep+=saved.length;
-      fail+=failures.length;
-      if(failures.length) toast(`${failures.length} repayment entr${failures.length===1?'y':'ies'} could not be saved: ${failures[0].message}`,'warn');
-    }
-  }else{
-    for(const r of repRows){
-      const res=await queuedInsert('pb_repayments',r);
-      if(res.ok) okRep++;
-      else fail++;
-    }
-  }
-  if(savedRepayments.length){
-    try{
-      await refreshExcessRelatedData({
-        repaymentIds:savedRepayments.map(row=>row.id),
-        loanIds:savedRepayments.map(row=>row.loan_id)
-      });
-    }catch(error){ console.warn('Could not refresh repayment allocation data',error); }
-  }
-  audit('meeting_submit', 'pb_meetings', meetingId, null, { savings: okSav, repayments: okRep });
-
-  await closeFullyPaidLoans(savedRepayments.map(r=>r.loan_id), { silent:true });
-
-  toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${fail?' Failed: '+fail:''}`, fail?'warn':'success');
+  // From here the device copy is the source of truth; clear the form so the
+  // same money cannot be entered and submitted a second time.
   state._meet = { groupId:'', date: todayISO(), entries:{} };
+
+  if(!navigator.onLine){
+    toast('Saved on this device. It will be sent automatically when the connection returns.','info');
+    return render();
+  }
+  if(!(await ensureFreshToken())){ return; }
+  const outcome=(await flushOutbox({only:entry.id,quiet:true}))?.[0];
+  if(outcome?.response){
+    const saved=state=>['created','existing'].includes(state);
+    const okSav=(outcome.response.savings||[]).filter(r=>saved(r.state)).length;
+    const okRep=(outcome.response.repayments||[]).filter(r=>saved(r.state)).length;
+    audit('meeting_submit','pb_meetings',outcome.response.meeting?.row?.id||null,null,
+      {savings:okSav,repayments:okRep,failed:outcome.failedCount||0,operation_id:entry.id});
+    toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${outcome.failedCount?` Not saved: ${outcome.failedCount} (see the status box).`:''}`,
+      outcome.failedCount?'warn':'success');
+  }else if(outcome?.error){
+    toast(outcome.retryable
+      ?'Not confirmed yet. The submission is kept on this device and will be re-sent with the same IDs, so it cannot be recorded twice.'
+      :`Not saved: ${outcome.error.message}`, outcome.retryable?'warn':'error');
+  }else if(outcome && !outcome.entry){
+    toast('Meeting saved.','success'); // another tab finished sending it first
+  }else{
+    toast('Kept on this device. It will be sent automatically.','info');
+  }
   render();
 }
 
@@ -11087,6 +11338,16 @@ async function refreshPendingSavingsApprovals(){
   return pendingRows;
 }
 
+// Approval requests never overlap within a tab. The database also only moves
+// rows that are still pending, so a repeat from another tab changes nothing.
+let approvalRequestInFlight=null;
+function exclusiveApproval(fn){
+  return async function(...args){
+    if(approvalRequestInFlight) return {approvedRows:[],failures:[{message:'Another approval is still being processed. Please wait for it to finish.'}]};
+    approvalRequestInFlight=fn.apply(this,args);
+    try{ return await approvalRequestInFlight; }finally{ approvalRequestInFlight=null; }
+  };
+}
 async function approveSavingsBatch(ids){
   const uniqueIds=[...new Set((ids||[]).filter(Boolean).map(String))];
   if(!uniqueIds.length) return {approvedRows:[],failures:[]};
@@ -12400,6 +12661,10 @@ function openStandaloneRepayment(loanId, memberId){
   const paid = loanPaid(ln.id);
   const outstanding = loanFinancialMetrics(ln).outstandingPI;
   const ir = Number(ln.total_payable) ? (Number(ln.total_payable) - Number(ln.loan_value)) / Number(ln.total_payable) : 0;
+  // One operation per dialog: retries after a timeout reuse it, so the
+  // database returns the saved receipt instead of recording a second one.
+  const operationId=newOperationId();
+  let saving=false,lastSent=null;
 
   modal({
     title: `Record Repayment — ${ln.asset_name}`,
@@ -12432,10 +12697,16 @@ function openStandaloneRepayment(loanId, memberId){
     actions: [
       { label: 'Cancel', cls: 'btn-outline', onClick: closeModal },
       { label: 'Save Repayment', cls: 'btn-primary', onClick: async () => {
-        if(!(await ensureFreshToken())) return;
-        const amount = Number(document.getElementById('sr-amount')?.value) || 0;
+        if(saving) return toast('This repayment is already being saved. Please wait.','warn');
+        const amount = Math.round((Number(document.getElementById('sr-amount')?.value) || 0)*100)/100;
         const date = document.getElementById('sr-date')?.value || todayISO();
         if(!amount || amount <= 0) return toast('Please enter a valid amount.', 'error');
+        if(lastSent && (lastSent.amount!==amount || lastSent.date!==date)){
+          return toast('An earlier attempt with different details may already be saved. Close this window, refresh the loan statement, then record again if needed.','warn');
+        }
+        saving=true;
+        try{
+        if(!(await ensureFreshToken())) return;
 
         const interest = +(amount * ir).toFixed(2);
         const principal = +(amount - interest).toFixed(2);
@@ -12448,11 +12719,15 @@ function openStandaloneRepayment(loanId, memberId){
           meeting_date: date,
           amount, principal, interest,
           recorded_by: state.staff.id,
-          status: can('approve_repayment') ? 'approved' : 'pending'
+          status: can('approve_repayment') ? 'approved' : 'pending',
+          client_operation_id: operationId
         };
 
-        const { data:result, error } = await sb.rpc('pb_record_repayments_batch',{p_rows:[row]});
-        if(error) return toast(`Repayment was not saved: ${error.message}. Run the new repayment reliability SQL if it has not been deployed.`, 'error');
+        lastSent={amount,date};
+        const { data:result, error } = await rpcWithTimeout('pb_record_repayments_batch',{p_rows:[row]});
+        if(error) return toast(outboxErrorIsRetryable(error)
+          ? 'The repayment was not confirmed. Press Save again: it will be checked, not recorded twice.'
+          : `Repayment was not saved: ${error.message}`, 'error');
         const data=Array.isArray(result?.rows)?result.rows[0]:null;
         const failure=Array.isArray(result?.failures)?result.failures[0]:null;
         if(!data) return toast(failure?.message||'The database did not save this repayment.', 'error');
@@ -12470,8 +12745,10 @@ function openStandaloneRepayment(loanId, memberId){
         } else {
           toast('Repayment recorded successfully.', 'success');
         }
+        await afterFinancialWrite({loanIds:[ln.id]});
         closeModal();
         refreshVisiblePage(renderPage);
+        }finally{ saving=false; }
       }}
     ]
   });
@@ -12751,6 +13028,7 @@ function indexedFinancialAction(fn){
  pageReports,pageMeeting,pageSavings,pageRepayments,pageRepaymentApprovals,pageSavingsApprovals,pageCollectionCompliance,
  pageMemberProfile,pageAccounting,buildArrearsRows,buildCollectionCompliance,collectionFieldSheetRows,buildReportRows]
  .map(indexedFinancialAction);
+[approveSavingsBatch,approveRepaymentBatch]=[approveSavingsBatch,approveRepaymentBatch].map(exclusiveApproval);
 [downloadCollectionSheet,downloadInventoryTemplate,exportAccountingReport,exportArrearsCollectionSheet,
  exportCollectionCompliance,exportInventory,exportProductSalesReport,exportRecruitmentReport,exportRepaymentsFiltered,exportReport,
  exportSavingsFiltered,exportSoldItemsExcel,importInventory]
@@ -12775,7 +13053,7 @@ function indexedFinancialAction(fn){
     if(isSubscriptionLocked()){ render(); return; }
     await smartLoadAll();
     setupRealtime();
-    flushQueue();
+    startOutboxAfterLogin();
   }
   render();
   // Restore view position after a page refresh

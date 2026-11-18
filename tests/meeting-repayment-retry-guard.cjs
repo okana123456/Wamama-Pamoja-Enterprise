@@ -1,0 +1,17 @@
+const fs=require('fs'),assert=require('node:assert/strict');
+const {PGlite}=require(process.env.PGLITE_MODULE);
+(async()=>{const db=new PGlite();await db.exec(`create role anon;create role authenticated;
+create table pb_repayments(id text,business_id text,meeting_id text,loan_id text,member_id text,recorded_by text,meeting_date date,voided_at timestamptz,notes text,edit_notes text,status text,amount numeric);
+create table pb_excess_payments(id text,original_repayment_id text,business_id text,source text,status text,original_payment_amount numeric);`);
+await db.exec(fs.readFileSync('wamama-meeting-repayment-retry-guard.sql','utf8'));
+const ins=(id,amount=340,meeting='m',loan='l')=>db.query(`insert into pb_repayments(id,business_id,meeting_id,loan_id,member_id,recorded_by,meeting_date,status,amount) values($1,'b',$2,$3,'person','staff','2026-11-17','pending',$4)`,[id,meeting,loan,amount]);
+await ins('first'); await assert.rejects(ins('repeat'),/already recorded/);
+await db.exec(`update pb_repayments set status='approved',amount=305 where id='first';insert into pb_excess_payments values('dep','first','b','scheduled_prepayment','pending',340);`);
+await assert.rejects(ins('approved-retry'),/already recorded/);
+await db.exec(`update pb_repayments set status='rejected',edit_notes='Full amount held in loan prepayment account until scheduled instalments become due.' where id='first'`);
+await assert.rejects(ins('held-retry'),/already recorded/);
+await ins('different-amount',20);await ins('another-loan',340,'m','l2');await ins('manual',340,null);
+await db.exec(`update pb_repayments set voided_at=now() where id='first'`);await ins('replacement');
+assert.equal((await db.query('select count(*)::int n from pb_repayments')).rows[0].n,5);
+const html=fs.readFileSync('index.html','utf8');for(const m of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g))if(m[1].trim())new Function(m[1]);
+console.log('PASS: pending, approved/partially allocated, held, voided, separate loan, manual entry, script syntax');await db.close();})().catch(e=>{console.error(e);process.exit(1)});

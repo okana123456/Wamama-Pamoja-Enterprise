@@ -160,9 +160,13 @@ run(`state.view='inventory';`);assert.equal(run(`canApplyAppUpdate()`),true);
 run(`state.view='purchases';`);assert.equal(run(`canApplyAppUpdate()`),true);
 modal.hasChildNodes=()=>true;assert.equal(run(`canApplyAppUpdate()`),false);
 modal.hasChildNodes=()=>false;run(`state.view='meeting';`);assert.equal(run(`canApplyAppUpdate()`),false);
-run(`state.view='purchases';lsGet=()=>[{table:'pb_repayments',row:{}}];`);
-assert.equal(run(`canApplyAppUpdate()`),false,'queued cash entries must finish before an update');
-run(`lsGet=(key,fallback)=>fallback;`);
+// Saved submissions keep their operation IDs across a reload, but a request
+// that is being sent must finish before the page reloads for an update.
+run(`state.view='purchases';meetingSubmissionInFlight=true;`);
+assert.equal(run(`canApplyAppUpdate()`),false,'cash entries being sent must finish before an update');
+run(`meetingSubmissionInFlight=false;outboxFlushPromise=Promise.resolve();`);
+assert.equal(run(`canApplyAppUpdate()`),false,'an outbox send must finish before an update');
+run(`outboxFlushPromise=null;`);
 run(`state.view='dashboard';appUpdateAvailable=true;applyAvailableAppUpdate();`);
 assert.equal(sandbox.reloads,1);assert.equal(run(`applyAvailableAppUpdate()`),false);
 const release=JSON.parse(fs.readFileSync(path.join(__dirname,'../release.json'),'utf8'));
