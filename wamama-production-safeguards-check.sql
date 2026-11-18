@@ -16,7 +16,7 @@ fn as (
     'pb_record_repayments_batch','pb_submit_meeting','pb_record_repayment_operation','pb_record_saving_operation',
     'pb_block_rapid_duplicate_pending_repayment','pb_guard_repeated_meeting_receipt','pb_guard_repeated_meeting_saving',
     'pb_capture_repayment_excess','pb_release_due_prepayments','pb_approve_savings','pb_financial_snapshot',
-    'pb_officer_book_activity')
+    'pb_officer_book_activity','pb_financial_snapshot_v2')
 ),
 trg as (
   -- Postgres fires BEFORE triggers on one table in name order.
@@ -27,6 +27,18 @@ trg as (
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'public' and not t.tgisinternal
     and c.relname in ('pb_repayments','pb_savings','pb_meetings','pb_excess_payments','pb_prepayment_releases')
+),
+sync_ready as (
+  -- Changed-rows sync needs updated_at kept current on every synced table.
+  select tbl as table_name,
+         exists(select 1 from information_schema.columns col where col.table_schema='public'
+           and col.table_name=tbl and col.column_name='updated_at') as has_updated_at,
+         exists(select 1 from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace
+           where n.nspname='public' and c.relname=tbl and t.tgname='pb_touch_updated_at_trigger' and t.tgenabled<>'D') as touch_trigger_enabled
+  from unnest(array['pb_groups','pb_members','pb_guarantors','pb_staff','pb_inventory','pb_loans','pb_orders',
+    'pb_savings','pb_repayments','pb_excess_payments','pb_meetings','pb_suppliers','pb_purchases',
+    'pb_purchase_lines','pb_reconciliations','pb_expenses']) tbl
+  where to_regclass('public.'||tbl) is not null
 ),
 idx as (
   select tablename, indexname, indexdef ilike '%unique%' as is_unique, indexdef
@@ -73,6 +85,8 @@ select jsonb_pretty(jsonb_build_object(
   'server_version', current_setting('server_version'),
   'functions', (select coalesce(jsonb_agg(to_jsonb(fn) order by proname), '[]') from fn),
   'triggers', (select coalesce(jsonb_agg(to_jsonb(trg) order by table_name, timing, trigger_name), '[]') from trg),
+  'sync_tables_not_ready', (select coalesce(jsonb_agg(to_jsonb(s) order by table_name), '[]') from sync_ready s
+    where not (s.has_updated_at and s.touch_trigger_enabled)),
   'indexes', (select coalesce(jsonb_agg(to_jsonb(idx) order by tablename, indexname), '[]') from idx),
   'columns', (select coalesce(jsonb_agg(to_jsonb(cols) order by table_name, column_name), '[]') from cols),
   'table_sizes', (select coalesce(jsonb_agg(to_jsonb(sizes) order by total_bytes desc), '[]') from sizes),

@@ -38,6 +38,12 @@ function openTab(staff){
     rpc(name,args){
       const run=async()=>{
         if(name!=='pb_submit_meeting') return {data:null,error:{message:'unexpected '+name}};
+        const size=args.p_payload.savings.length+args.p_payload.repayments.length;
+        if(server.maxItems && size>server.maxItems){
+          // Statement timeout: the whole request is rolled back.
+          server.requests++;server.timeouts=(server.timeouts||0)+1;
+          return {data:null,error:{code:'57014',message:'canceling statement due to statement timeout'}};
+        }
         try{ return {data:await server.submit(staff,args.p_payload),error:null}; }
         catch(e){ return {data:null,error:{message:e.message}}; }
       };
@@ -137,5 +143,27 @@ const A={id:'staffA',business_id:'biz1'},B={id:'staffB',business_id:'biz1'};
   assert.equal(server.requests,0,'legacy entries need a person to confirm');
   assert.equal(store.has('pb_pb_default_queue'),false);
 
-  console.log('PASS: double clicks, lost response, reload, overlapping flushes, two tabs, partial batch, offline, account switch, legacy queue');
+  // 9. Large meeting under the 8-second database limit: batches shrink after a
+  //    timeout, progress is kept per batch, a lost response mid-way resends
+  //    nothing that was saved, and every entry is recorded exactly once.
+  const big=openTab({id:'staffC',business_id:'biz1'});
+  big.run(`state.data.members=Array.from({length:30},(_,i)=>({id:'bm'+i,group_id:'g1',status:'active'}));
+    state.data.loans=Array.from({length:30},(_,i)=>({id:'bl'+i,member_id:'bm'+i,status:'active'}));
+    state._meet={groupId:'g1',date:'2026-11-24',entries:Object.fromEntries(Array.from({length:30},(_,i)=>['bm'+i,{savings:'20',repayments:{['bl'+i]:150}}]))};`);
+  server.rows.clear();server.requests=0;server.timeouts=0;server.maxItems=4;
+  let lost=0;const realSubmit=server.submit.bind(server);
+  server.submit=async(staff,p)=>{const out=await realSubmit(staff,p);if(++lost===3) throw new TypeError('Failed to fetch');return out;};
+  await big.run('submitMeeting()');
+  assert.ok(server.timeouts>=1,'oversized batch timed out');
+  assert.equal(big.run('readOutbox().length'),1,'lost response keeps the rest on the device');
+  const confirmedBefore=Object.values(big.run('readOutbox()[0].results')).filter(r=>['created','existing'].includes(r.state)).length;
+  assert.ok(confirmedBefore>0,'batches before the lost response are recorded as confirmed');
+  assert.ok(big.run('readOutbox()[0].batchSize')<=4,'smaller batch size remembered');
+  server.submit=realSubmit;
+  await big.run('flushOutbox()');
+  assert.equal(big.run('readOutbox().length'),0);
+  assert.equal(server.rows.size,60,'30 savings + 30 repayments, each exactly once');
+  server.maxItems=0;
+
+  console.log('PASS: double clicks, lost response, reload, overlapping flushes, two tabs, partial batch, offline, account switch, legacy queue, 8-second batching');
 })().catch(e=>{console.error(e);process.exit(1);});

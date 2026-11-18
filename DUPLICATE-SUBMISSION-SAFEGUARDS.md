@@ -75,6 +75,36 @@ other staff members are left untouched.
   5 Mbps / 250 ms → server figures 2.2 s (previously nothing until ~25 s);
   20 Mbps / 120 ms → 1.1 s. Repeat logins: verified 1.9 s / 1.6 s.
 
+### Egress (Supabase data transfer) — target below 4 GB/month
+- Core tables (loans, members, orders, inventory…) download changed rows only, with a
+  weekly full re-check instead of every 2 hours. Requires `pb_touch_updated_at_trigger`
+  on every synced table: `wamama-production-safeguards-check.sql` lists any table that is
+  not ready under `sync_tables_not_ready` (must be empty).
+- Deleted rows are removed from device caches with an id-only list (~47 bytes/row):
+  loans every 6 h; members, orders, guarantors, inventory, meetings and loan deposits daily.
+- The financial snapshot is saved on the device and refreshed with "changed since" on
+  later logins the same day.
+- `pb_financial_snapshot_v2` (`wamama-financial-snapshot-egress.sql`) omits the full
+  visible-loan list (≈140 KB) when the device already has it, using a fingerprint. Small
+  refreshes after each live payment drop from ≈142 KB to <1 KB. Until it is installed the
+  app uses the original function.
+- Meetings are sent in batches of up to 10 entries (halved after a timeout) to stay under
+  the 8-second database limit.
+
+Modelled bytes per login (production row counts, `perf/startup-network-model.cjs`):
+
+| Login | Before | After |
+|---|---|---|
+| Reload within the hour | 2.4 MB | 0.70 MB |
+| Return after 3 h | 8.1 MB | 0.70 MB |
+| First login of the day | 8.1 MB | 2.6 MB |
+| New device (once) | 55.6 MB | 57.2 MB |
+
+Monthly estimate (15 staff × 26 days, each day 1 first login + 2 returns + 3 reloads;
+4 management screens × 300 live-update refreshes/day; 2 new devices; uncompressed):
+before ≈ 17 GB, after ≈ 2.9 GB. Assumptions must be checked against the Supabase
+Usage → Egress page.
+
 ## Tests
 ```
 set PGLITE_MODULE=<path to @electric-sql/pglite>
@@ -87,7 +117,8 @@ All `tests/*.cjs` (38) pass. Performance models: `perf/startup-network-model.cjs
 
 ## Deployment order
 1. Owner runs `wamama-production-safeguards-check.sql` (read-only) and keeps the JSON.
-2. Owner runs `wamama-financial-operation-idempotency.sql`. Existing browsers keep working.
+2. Owner runs `wamama-financial-operation-idempotency.sql`, then
+   `wamama-financial-snapshot-egress.sql`. Existing browsers keep working.
 3. Owner re-runs the check: `pb_submit_meeting` present, `authenticated_can_execute`
    true / `anon_can_execute` false, three `*_business_operation_uidx` indexes present,
    `constraint_violations` = 0.

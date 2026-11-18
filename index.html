@@ -352,10 +352,23 @@ const PENDING_SYNC_TABLES = new Set(['pb_savings','pb_repayments']);
 const FINANCIAL_CACHE_VERSION = 5;
 const SAFE_INVENTORY_COLUMNS = 'id,business_id,name,category,stock,loan_price,reorder_level,cost_method,cost_adjustment';
 const INCREMENTAL_FULL_SYNC_MS = 30 * 24 * 60 * 60 * 1000;
-const CORE_PORTFOLIO_FULL_SYNC_MS = 2 * 60 * 60 * 1000;
+// Every synced table has updated_at maintained by pb_touch_updated_at_trigger,
+// and the server snapshot decides which loans each staff member sees, so core
+// tables sync changed rows only and are fully re-verified weekly (was every
+// 2 hours: ~7 MB per device each time).
+const CORE_PORTFOLIO_FULL_SYNC_MS = 7 * 24 * 60 * 60 * 1000;
 const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
-const DELETION_RECONCILE_TABLES = new Set(['pb_loans']);
-const DELETION_RECONCILE_MS = 6 * 60 * 60 * 1000;
+// Rows deleted on the server are removed from device caches by comparing an
+// id-only list (about 45 bytes per row) instead of re-downloading the table.
+const DELETION_RECONCILE_TABLES = new Map([
+  ['pb_loans', 6 * 60 * 60 * 1000],
+  ['pb_members', 24 * 60 * 60 * 1000],
+  ['pb_orders', 24 * 60 * 60 * 1000],
+  ['pb_guarantors', 24 * 60 * 60 * 1000],
+  ['pb_inventory', 24 * 60 * 60 * 1000],
+  ['pb_meetings', 24 * 60 * 60 * 1000],
+  ['pb_excess_payments', 24 * 60 * 60 * 1000]
+]);
 const CORE_PORTFOLIO_TABLES = new Set([
   'pb_groups','pb_members','pb_staff','pb_loans','pb_orders','pb_inventory'
 ]);
@@ -607,37 +620,92 @@ const pendingFinancialLoanIds=new Set();
 let pendingFullFinancialRefresh=false;
 // Start the authoritative server snapshot while table downloads are still in
 // progress; it is applied only after the ledger it is compared with is loaded.
-function prefetchFinancialSnapshot(){
+function prefetchFinancialSnapshot(base=null){
   if(!navigator.onLine || !state.staff) return null;
   const epoch=state._accountEpoch,staffId=state.staff.id;
-  return {epoch,staffId,request:Promise.resolve(sb.rpc('pb_financial_snapshot',{p_loan_ids:null,p_since:null}))
+  // A snapshot saved on this device earlier today is brought up to date with
+  // only the loans that changed since, instead of downloading every loan again.
+  const usable=base?.asOfDate===todayISO()?base:null;
+  const since=usable?new Date(Date.parse(usable.checkedAt)-INCREMENTAL_SYNC_OVERLAP_MS).toISOString():null;
+  return {epoch,staffId,since,base:usable,request:Promise.resolve(requestFinancialSnapshot(null,since,usable))
     .catch(error=>({data:null,error:{message:String(error?.message||error)}}))};
+}
+// pb_financial_snapshot_v2 leaves out the visible-loan list (≈140 KB) when the
+// device already holds a list with the same fingerprint. Falls back to the
+// original function until the v2 SQL is installed.
+let financialSnapshotV2=true;
+async function requestFinancialSnapshot(loanIds,since,known){
+  const canOmit=!!known?.visibleHash && Array.isArray(known.visibleIds);
+  if(financialSnapshotV2){
+    let res=await sb.rpc('pb_financial_snapshot_v2',{p_loan_ids:loanIds,p_since:since,p_include_ids:!canOmit});
+    if(res?.error && /could not find the function|PGRST202|does not exist/i.test(`${res.error.code||''} ${res.error.message||''}`)){
+      financialSnapshotV2=false;
+    }else{
+      if(!res?.error && res?.data?.includesVisibleLoanIds===false){
+        if(res.data.visibleLoanIdsHash===known.visibleHash) res={...res,data:{...res.data,visibleLoanIds:known.visibleIds}};
+        else res=await sb.rpc('pb_financial_snapshot_v2',{p_loan_ids:loanIds,p_since:since,p_include_ids:true});
+      }
+      return res;
+    }
+  }
+  return sb.rpc('pb_financial_snapshot',{p_loan_ids:loanIds,p_since:since});
+}
+function snapshotCacheKey(){ return financialCacheKey('pb_financial_snapshot'); }
+async function readSnapshotCache(){
+  try{
+    const db=await openFinancialCache(),key=snapshotCacheKey();
+    const record=await new Promise((resolve,reject)=>{
+      const request=db.transaction('tables','readonly').objectStore('tables').get(key);
+      request.onsuccess=()=>resolve(request.result||null);request.onerror=()=>reject(request.error);
+    });
+    if(!record || record.asOfDate!==todayISO() || !Array.isArray(record.rows)) return null;
+    return {asOfDate:record.asOfDate,checkedAt:record.checkedAt,visibleIds:record.visibleIds||null,visibleHash:record.visibleHash||null,
+      byLoan:new Map(record.rows.map(row=>[String(row.id),row]))};
+  }catch{return null;}
+}
+async function writeSnapshotCache(snapshot){
+  if(!snapshot?.byLoan) return;
+  try{
+    const db=await openFinancialCache(),key=snapshotCacheKey();
+    await new Promise((resolve,reject)=>{
+      const request=db.transaction('tables','readwrite').objectStore('tables').put({key,asOfDate:snapshot.asOfDate,
+        checkedAt:snapshot.checkedAt,visibleIds:snapshot.visibleIds||null,visibleHash:snapshot.visibleHash||null,rows:[...snapshot.byLoan.values()]});
+      request.onsuccess=()=>resolve();request.onerror=()=>reject(request.error);
+    });
+  }catch{}
 }
 // Server-first figures: once the core tables (loans, groups, members, staff)
 // are present, apply the server snapshot so loan balances, arrears and cash
 // collections can be shown before the savings/repayment history finishes.
 // Nothing here marks the portfolio verified; savings-based figures stay
 // "Verifying…" until the full ledger has loaded and been reconciled.
-function applyProvisionalFinancialSnapshot(data){
+function applyProvisionalFinancialSnapshot(data,base=null){
   if(state._portfolioDataVerified===true) return false;
-  if(data?.version!==1 || data.authorized!==true || data.asOfDate!==todayISO() || !data.complete ||
+  if(data?.version!==1 || data.authorized!==true || data.asOfDate!==todayISO() ||
     !Array.isArray(data.rows) || !Array.isArray(data.visibleLoanIds)) return false;
+  // A changes-only snapshot is applied on top of today's saved snapshot.
+  if(!data.complete && base?.asOfDate!==data.asOfDate) return false;
   const visibleIds=new Set(data.visibleLoanIds.map(String));
   const localIds=new Set(state.data.loans.map(l=>String(l.id)));
   // Every visible loan must be present locally, or totals would be incomplete.
   if(data.visibleLoanIds.some(id=>!localIds.has(String(id)))) return false;
+  const byLoan=data.complete?new Map():new Map(base.byLoan);
+  data.rows.forEach(row=>byLoan.set(String(row.id),row));
+  // ...and every visible loan must have a server row.
+  if(data.visibleLoanIds.some(id=>!byLoan.has(String(id)))) return false;
+  for(const id of [...byLoan.keys()]) if(!visibleIds.has(id)) byLoan.delete(id);
   state.data.loans=state.data.loans.filter(l=>visibleIds.has(String(l.id)));
   const loansById=new Map(state.data.loans.map(loan=>[String(loan.id),loan]));
   const groupsById=new Map(state.data.groups.map(group=>[String(group.id),group]));
-  const byLoan=new Map();
-  data.rows.forEach(row=>{
+  byLoan.forEach(row=>{
     byLoan.set(String(row.id),row);
     const loan=loansById.get(String(row.id));
     if(loan) ['status','start_date','weekly_installment','loan_value','total_payable'].forEach(key=>loan[key]=row[key]);
     const group=groupsById.get(String(row.group_id));
     if(group) group.officer_id=row.officer_id;
   });
-  state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.checkedAt,byLoan};
+  state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.checkedAt,byLoan,
+    visibleIds:data.visibleLoanIds.map(String),visibleHash:data.visibleLoanIdsHash||null};
   state._financialSnapshotAvailable=true;
   state._provisionalFigures=true;
   invalidateCollectionComplianceCache();
@@ -661,12 +729,19 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetch
   financialRefreshEpoch=epoch;
   const promise=(async()=>{
     const previous=state._financialSnapshot;
-    const since=incremental && previous?.asOfDate===todayISO()
-      ?new Date(Date.parse(previous.checkedAt)-INCREMENTAL_SYNC_OVERLAP_MS).toISOString():null;
-    const usePrefetch=prefetched && !loanIds && !since && prefetched.epoch===epoch && prefetched.staffId===staffId;
-    const {data,error}=usePrefetch?await prefetched.request
-      :await sb.rpc('pb_financial_snapshot',{p_loan_ids:loanIds,p_since:since});
+    const usePrefetch=!!prefetched && !loanIds && prefetched.epoch===epoch && prefetched.staffId===staffId;
+    const since=usePrefetch?prefetched.since:(incremental && previous?.asOfDate===todayISO()
+      ?new Date(Date.parse(previous.checkedAt)-INCREMENTAL_SYNC_OVERLAP_MS).toISOString():null);
+    const known=previous?.asOfDate===todayISO()?previous:(usePrefetch?prefetched.base:null);
+    let {data,error}=usePrefetch?await prefetched.request
+      :await requestFinancialSnapshot(loanIds,since,known);
     if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+    // A changes-only answer needs today's snapshot to merge into.
+    const mergeBase=previous?.asOfDate===data?.asOfDate?previous:(usePrefetch && prefetched.base?.asOfDate===data?.asOfDate?prefetched.base:null);
+    if(!error && data && !data.complete && !mergeBase){
+      ({data,error}=await requestFinancialSnapshot(null,null,null));
+      if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+    }
     if(error){
       // Keep the existing verified incremental-sync path during rollout.
       if(/could not find the function|does not exist/i.test(error.message||'')) return false;
@@ -678,10 +753,22 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetch
       state._portfolioDataVerified=false;
       return false;
     }
-    const byLoan=!data.complete && state._financialSnapshot?.asOfDate===data.asOfDate
-      ?new Map(state._financialSnapshot.byLoan):new Map();
+    const base=!data.complete?(previous?.asOfDate===data.asOfDate?previous:(usePrefetch?prefetched.base:null)):null;
+    const byLoan=base?new Map(base.byLoan):new Map();
     const visibleIds=new Set(data.visibleLoanIds.map(String));
-    for(const id of byLoan.keys()) if(!visibleIds.has(id)) byLoan.delete(id);
+    for(const id of [...byLoan.keys()]) if(!visibleIds.has(id)) byLoan.delete(id);
+    // Loans that became visible without changing (e.g. a team reassignment)
+    // are fetched by id, so every visible loan always has a server row.
+    if(!data.complete){
+      const changed=new Set(data.rows.map(row=>String(row.id)));
+      const gaps=data.visibleLoanIds.map(String).filter(id=>!byLoan.has(id) && !changed.has(id));
+      for(let start=0;start<gaps.length;start+=200){
+        const fill=await requestFinancialSnapshot(gaps.slice(start,start+200),null,{visibleHash:data.visibleLoanIdsHash,visibleIds:data.visibleLoanIds});
+        if(state.staff?.id!==staffId || state._accountEpoch!==epoch) return false;
+        if(fill.error || !Array.isArray(fill.data?.rows)){state._portfolioDataVerified=false;return false;}
+        data.rows.push(...fill.data.rows);
+      }
+    }
     state.data.loans=state.data.loans.filter(l=>visibleIds.has(String(l.id)));
     const localIds=new Set(state.data.loans.map(l=>String(l.id)));
     const missingIds=data.visibleLoanIds.filter(id=>!localIds.has(String(id)));
@@ -707,7 +794,8 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetch
       const group=groupsById.get(String(row.group_id));
       if(group) group.officer_id=row.officer_id;
     });
-    state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.complete || since?data.checkedAt:(previous?.checkedAt||data.checkedAt),byLoan};
+    state._financialSnapshot={asOfDate:data.asOfDate,checkedAt:data.complete || since?data.checkedAt:(previous?.checkedAt||data.checkedAt),byLoan,
+      visibleIds:data.visibleLoanIds.map(String),visibleHash:data.visibleLoanIdsHash||null};
     // The same snapshot already shown provisionally keeps its cash totals, so
     // the dashboard does not flash back to "Updating" when it is verified.
     const sameAsProvisional=usePrefetch && previous?.checkedAt===data.checkedAt;
@@ -738,6 +826,7 @@ async function refreshFinancialSnapshot(loanIds=null,{incremental=false,prefetch
     if(mismatches.length) await persistPartialFinancialCache('pb_repayments',state.data.repayments);
     state._financialSnapshotAvailable=true;
     invalidateCollectionComplianceCache();
+    writeSnapshotCache(state._financialSnapshot);
     return true;
   })();
   financialRefreshPromise=promise;
@@ -1041,35 +1130,66 @@ function applySavedOperationRows(response){
 }
 // Send one meeting entry. Only entries not yet confirmed are sent; confirmed
 // ones are never repeated. Returns the updated entry (null once complete).
+// The database cancels any request after 8 seconds (authenticated role
+// statement_timeout). Each approved repayment runs deposit triggers, so a
+// meeting is sent in small batches; a batch that times out is rolled back as a
+// whole and re-sent in smaller batches with the same IDs.
+const MEETING_BATCH_SIZE=10;
+function requestTimedOut(error){
+  return String(error?.code||'')==='57014' || /statement timeout|canceling statement/i.test(String(error?.message||''));
+}
 async function sendMeetingOutboxEntry(entryId){
   const entry=readOutbox().find(item=>item.id===entryId);
   if(!entry) return {entry:null};
   const done=state=>state==='created'||state==='existing';
-  const results=entry.results||{};
-  const payload={...entry.payload,
-    savings:entry.payload.savings.filter(item=>!done(results[item.client_operation_id]?.state)),
-    repayments:entry.payload.repayments.filter(item=>!done(results[item.client_operation_id]?.state))};
+  const merged={...(entry.results||{})};
+  const pending=[
+    ...entry.payload.savings.map(item=>({kind:'savings',item})),
+    ...entry.payload.repayments.map(item=>({kind:'repayments',item}))
+  ].filter(({item})=>!done(merged[item.client_operation_id]?.state));
   updateOutboxEntry(entryId,item=>({...item,status:'sending',attempts:(item.attempts||0)+1,lastAttemptAt:Date.now()}));
-  const {data,error}=await rpcWithTimeout('pb_submit_meeting',{p_payload:payload});
-  if(error || data?.version!==1){
-    const failure=error||{message:'The server returned an unexpected response.'};
-    const retryable=!error || outboxErrorIsRetryable(failure);
-    const setupMissing=/could not find the function|PGRST202/i.test(`${failure.code} ${failure.message}`);
-    const updated=updateOutboxEntry(entryId,item=>({...item,status:retryable?'pending':'needs_attention',
-      lastError:setupMissing?'The server needs the meeting submission update before this can be sent. It is kept safely on this device.':String(failure.message||'Request failed')}));
-    return {entry:updated,error:failure,retryable};
+  let size=Math.max(1,Math.min(MEETING_BATCH_SIZE,Number(entry.batchSize)||MEETING_BATCH_SIZE));
+  const combined={version:1,operation_id:entry.payload.operation_id,meeting:null,savings:[],repayments:[]};
+  const savedRepayments=[];
+  let failure=null,index=0,anySuccess=false;
+  while(index<pending.length){
+    const batch=pending.slice(index,index+size);
+    const payload={operation_id:entry.payload.operation_id,group_id:entry.payload.group_id,meeting_date:entry.payload.meeting_date,
+      savings:batch.filter(x=>x.kind==='savings').map(x=>x.item),
+      repayments:batch.filter(x=>x.kind==='repayments').map(x=>x.item)};
+    const {data,error}=await rpcWithTimeout('pb_submit_meeting',{p_payload:payload});
+    if(error || data?.version!==1){
+      const problem=error||{message:'The server returned an unexpected response.'};
+      if(requestTimedOut(problem) && size>1){ size=Math.max(1,Math.floor(size/2)); continue; }
+      failure=problem; break;
+    }
+    anySuccess=true;
+    combined.meeting=combined.meeting||data.meeting;
+    combined.savings.push(...(data.savings||[]));combined.repayments.push(...(data.repayments||[]));
+    [...(data.savings||[]),...(data.repayments||[])].forEach(result=>{
+      if(result.client_operation_id) merged[result.client_operation_id]={state:result.state,message:result.message||null,code:result.code||null};
+    });
+    savedRepayments.push(...applySavedOperationRows(data));
+    // Record progress after every batch, so a closed tab never resends it.
+    updateOutboxEntry(entryId,item=>({...item,results:{...merged},batchSize:size}));
+    index+=batch.length;
   }
-  const merged={...results};
-  [...(data.savings||[]),...(data.repayments||[])].forEach(result=>{
-    if(result.client_operation_id) merged[result.client_operation_id]={state:result.state,message:result.message||null,code:result.code||null};
-  });
-  const savedRepayments=applySavedOperationRows(data);
   const all=[...entry.payload.savings,...entry.payload.repayments];
-  const failed=all.filter(item=>!done(merged[item.client_operation_id]?.state));
-  const updated=updateOutboxEntry(entryId,item=>failed.length?{...item,results:merged,status:'needs_attention',
-    lastError:merged[failed[0].client_operation_id]?.message||'Some entries were not saved.'}:null);
-  return {entry:updated,response:data,savedRepayments,failedCount:failed.length};
+  const notSaved=all.filter(item=>!done(merged[item.client_operation_id]?.state));
+  if(failure){
+    const retryable=outboxErrorIsRetryable(failure) || unexpectedServerResponse(failure);
+    const setupMissing=/could not find the function|PGRST202/i.test(`${failure.code} ${failure.message}`);
+    const updated=updateOutboxEntry(entryId,item=>({...item,results:{...merged},batchSize:size,status:retryable?'pending':'needs_attention',
+      lastError:setupMissing?'The server needs the meeting submission update before this can be sent. It is kept safely on this device.'
+        :requestTimedOut(failure)?'The server took too long. The remaining entries are kept on this device and will be retried.'
+        :String(failure.message||'Request failed')}));
+    return {entry:updated,error:failure,retryable,response:anySuccess?combined:null,savedRepayments,failedCount:notSaved.length};
+  }
+  const updated=updateOutboxEntry(entryId,item=>notSaved.length?{...item,results:merged,batchSize:size,status:'needs_attention',
+    lastError:merged[notSaved[0].client_operation_id]?.message||'Some entries were not saved.'}:null);
+  return {entry:updated,response:combined,savedRepayments,failedCount:notSaved.length};
 }
+function unexpectedServerResponse(failure){ return /unexpected response/i.test(String(failure?.message||'')); }
 async function afterFinancialWrite({loanIds=[],repaymentIds=[]}={}){
   cashSnapshots.clear();bookActivitySnapshots.clear();bookActivityErrors.clear();
   invalidateCollectionComplianceCache();
@@ -1784,17 +1904,21 @@ async function fetchIncrementalRows(table,cached){
 
 async function removeDeletedCachedRows(table,rows){
   const cachedRows=Array.isArray(rows)?rows:[];
-  const ids=cachedRows.map(row=>row?.id).filter(Boolean);
-  if(!ids.length) return {data:cachedRows,error:null};
+  if(!cachedRows.length) return {data:cachedRows,error:null};
+  // One id-only keyset pass (1,000 ids per request) instead of 200-id lookups.
   const existingIds=new Set();
-  for(let start=0;start<ids.length;start+=200){
-    let query=sb.from(table).select('id').in('id',ids.slice(start,start+200));
+  let lastId=null;
+  while(existingIds.size<FULL_SYNC_MAX_ROWS){
+    let query=sb.from(table).select('id').order('id').limit(FULL_SYNC_PAGE_SIZE);
     if(state.staff?.business_id) query=query.eq('business_id',state.staff.business_id);
+    if(lastId!==null) query=query.gt('id',lastId);
     const {data,error}=await query;
     if(error) return {data:cachedRows,error};
-    (data||[]).forEach(row=>existingIds.add(row.id));
+    (data||[]).forEach(row=>existingIds.add(String(row.id)));
+    if(!data || data.length<FULL_SYNC_PAGE_SIZE) break;
+    lastId=data[data.length-1].id;
   }
-  return {data:cachedRows.filter(row=>existingIds.has(row.id)),error:null};
+  return {data:cachedRows.filter(row=>existingIds.has(String(row.id))),error:null};
 }
 
 async function loadBusinessTableOptimized(table){
@@ -1825,7 +1949,7 @@ async function loadBusinessTableOptimized(table){
     return {data:cached.rows,error:null,fromCache:true,stale:true,syncSetupNeeded:!!result.syncSetupNeeded};
   }
   let reconciledAt=Number(cached.reconciledAt||0);
-  if(!result.error && DELETION_RECONCILE_TABLES.has(table) && Date.now()-reconciledAt>=DELETION_RECONCILE_MS){
+  if(!result.error && DELETION_RECONCILE_TABLES.has(table) && Date.now()-reconciledAt>=DELETION_RECONCILE_TABLES.get(table)){
     const reconciled=await removeDeletedCachedRows(table,result.data);
     if(!reconciled.error){
       result.data=reconciled.data;
@@ -1968,7 +2092,7 @@ async function loadAllFinancialData(){
   };
   startStage(0);
   if(cacheHits) startStage(1);
-  const snapshotPrefetch=prefetchFinancialSnapshot();
+  const snapshotPrefetch=prefetchFinancialSnapshot(await readSnapshotCache());
   // The dashboard's collection totals are server figures too: request them now
   // (selected period, and today for officer dashboards) instead of after render.
   if(snapshotPrefetch && state.view==='dashboard'){
@@ -2018,7 +2142,7 @@ async function loadAllFinancialData(){
       if(snapshotPrefetch && !failedPortfolioTables.size){
         snapshotPrefetch.request.then(({data,error})=>{
           if(error || epoch!==state._accountEpoch || state._portfolioDataVerified===true) return;
-          if(applyProvisionalFinancialSnapshot(data)) scheduleRealtimeRender();
+          if(applyProvisionalFinancialSnapshot(data,snapshotPrefetch.base)) scheduleRealtimeRender();
         });
       }
     }
@@ -5950,8 +6074,10 @@ async function submitMeetingOnce(){
     const okRep=(outcome.response.repayments||[]).filter(r=>saved(r.state)).length;
     audit('meeting_submit','pb_meetings',outcome.response.meeting?.row?.id||null,null,
       {savings:okSav,repayments:okRep,failed:outcome.failedCount||0,operation_id:entry.id});
-    toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${outcome.failedCount?` Not saved: ${outcome.failedCount} (see the status box).`:''}`,
-      outcome.failedCount?'warn':'success');
+    const rest=outcome.error&&outcome.retryable
+      ?` ${outcome.failedCount} not confirmed yet: kept on this device and re-sent automatically.`
+      :outcome.failedCount?` Not saved: ${outcome.failedCount} (see the status box).`:'';
+    toast(`Meeting saved. Savings entries: ${okSav}. Repayments: ${okRep}.${rest}`,outcome.failedCount?'warn':'success');
   }else if(outcome?.error){
     toast(outcome.retryable
       ?'Not confirmed yet. The submission is kept on this device and will be re-sent with the same IDs, so it cannot be recorded twice.'

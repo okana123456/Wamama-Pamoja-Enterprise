@@ -39,9 +39,8 @@ create unique index if not exists pb_repayments_business_operation_uidx
   on public.pb_repayments (business_id, client_operation_id)
   where client_operation_id is not null;
 
--- Lookups used by the meeting function and by the repeated-meeting guards.
-create index if not exists pb_meetings_business_group_date_idx
-  on public.pb_meetings (business_id, group_id, meeting_date);
+-- Lookups used by the repeated-meeting guards. (pb_meetings already has
+-- idx_pb_meetings_business_group_date in production.)
 create index if not exists pb_savings_business_meeting_member_idx
   on public.pb_savings (business_id, meeting_id, member_id);
 create index if not exists pb_repayments_business_meeting_loan_idx

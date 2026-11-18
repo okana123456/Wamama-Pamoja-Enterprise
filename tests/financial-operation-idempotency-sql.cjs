@@ -12,15 +12,15 @@ await db.exec(`
 create role anon; create role authenticated;
 create schema auth;
 create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('test.uid',true),'')::uuid $$;
-create table pb_staff(id uuid primary key,auth_user_id uuid,business_id uuid,role text,status text default 'active',full_name text);
+create table pb_staff(id uuid primary key,auth_user_id uuid,business_id text,role text,status text default 'active',full_name text);
 create table pb_permissions(staff_id uuid,can_record_repayments boolean default false);
-create table pb_groups(id uuid primary key,business_id uuid,name text,officer_id uuid);
-create table pb_members(id uuid primary key,business_id uuid,group_id uuid,status text default 'active');
-create table pb_loans(id uuid primary key,business_id uuid,member_id uuid,group_id uuid,status text,total_payable numeric,loan_value numeric,weekly_installment numeric);
-create table pb_meetings(id uuid primary key default gen_random_uuid(),business_id uuid,group_id uuid,meeting_date date,recorded_by uuid,created_at timestamptz default now());
-create table pb_savings(id uuid primary key default gen_random_uuid(),business_id uuid,member_id uuid,group_id uuid,meeting_id uuid,meeting_date date,amount numeric,recorded_by uuid,notes text,status text,created_at timestamptz default now(),updated_at timestamptz default now());
-create table pb_repayments(id uuid primary key default gen_random_uuid(),business_id uuid,loan_id uuid,member_id uuid,group_id uuid,meeting_id uuid,meeting_date date,amount numeric,principal numeric,interest numeric,recorded_by uuid,status text,notes text,edit_notes text,voided_at timestamptz,created_at timestamptz default now(),updated_at timestamptz default now());
-create table pb_excess_payments(id uuid primary key default gen_random_uuid(),business_id uuid,original_repayment_id uuid,source text,status text,original_payment_amount numeric,excess_amount numeric);
+create table pb_groups(id uuid primary key,business_id text,name text,officer_id uuid);
+create table pb_members(id uuid primary key,business_id text,group_id uuid,status text default 'active');
+create table pb_loans(id uuid primary key,business_id text,member_id uuid,group_id uuid,status text,total_payable numeric,loan_value numeric,weekly_installment numeric);
+create table pb_meetings(id uuid primary key default gen_random_uuid(),business_id text,group_id uuid,meeting_date date,recorded_by uuid,created_at timestamptz default now());
+create table pb_savings(id uuid primary key default gen_random_uuid(),business_id text,member_id uuid,group_id uuid,meeting_id uuid,meeting_date date,amount numeric,recorded_by uuid,notes text,status text,created_at timestamptz default now(),updated_at timestamptz default now());
+create table pb_repayments(id uuid primary key default gen_random_uuid(),business_id text,loan_id uuid,member_id uuid,group_id uuid,meeting_id uuid,meeting_date date,amount numeric,principal numeric,interest numeric,recorded_by uuid,status text,notes text,edit_notes text,voided_at timestamptz,created_at timestamptz default now(),updated_at timestamptz default now());
+create table pb_excess_payments(id uuid primary key default gen_random_uuid(),business_id text,original_repayment_id uuid,source text,status text,original_payment_amount numeric,excess_amount numeric);
 create unique index pb_excess_payments_original_repayment_uidx on pb_excess_payments(original_repayment_id) where original_repayment_id is not null;
 -- Stand-in for pb_capture_repayment_excess: an approved payment above the
 -- weekly instalment is held as one scheduled deposit.
