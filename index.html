@@ -859,7 +859,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261125-startup-recovery';
+const APP_RELEASE='20261125-member-identity-review';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -2586,9 +2586,9 @@ function renderSubscriptionLock(){
 }
 
 /* Gold notice is a fixed, dated announcement; it never changes payment collection. */
-const GOLD_PACKAGE_NOTICE={businessId:'b3462eea-1c92-4411-9507-fb6c0b31ba28',starts:'2026-11-25',ends:'2026-11-30',effectiveLabel:'1 December 2026'};
+const GOLD_PACKAGE_NOTICE={enabled:false,businessId:'b3462eea-1c92-4411-9507-fb6c0b31ba28',starts:'2026-11-25',ends:'2026-11-30',effectiveLabel:'1 December 2026'};
 function shouldShowGoldPackageNotice(){
-  if(!isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId || state.view!=='dashboard' || state._goldPackageNoticeDismissed) return false;
+  if(!GOLD_PACKAGE_NOTICE.enabled || !isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId || state.view!=='dashboard' || state._goldPackageNoticeDismissed) return false;
   const d=billingTodayParts(),date=`${d.year}-${d.month}-${String(d.day).padStart(2,'0')}`;
   return date>=GOLD_PACKAGE_NOTICE.starts && date<=GOLD_PACKAGE_NOTICE.ends;
 }
@@ -2609,7 +2609,7 @@ function renderGoldPackageNotice(){
   </aside>`;
 }
 function showGoldPackageDetails(){
-  if(!isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId) return;
+  if(!GOLD_PACKAGE_NOTICE.enabled || !isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId) return;
   modal({title:'Gold Support Package',body:`
     <div style="border-top:4px solid #c49627;padding-top:15px">
       <span class="gold-package-badge">GOLD</span>
@@ -4792,15 +4792,15 @@ function saveWizardStep(){
     d.phone = normalisePhone(d.phone);
     if(!d.full_name || !d.national_id || !d.phone){ toast('Full name, National ID and phone are required.','error'); return false; }
 
-    // Only check against active/pending members — inactive members (from deleted or
-    // inactive groups) should not block a fresh registration in a new group.
+    // A returning client must reuse the existing profile, including inactive accounts.
+    // Phone checks remain limited to active/pending accounts; the database protects ID uniqueness.
     const activeMembers = state.data.members.filter(m => m.status !== 'inactive');
 
-    // ── Duplicate: same National ID (active/pending members only) ────────
-    const dupById = activeMembers.find(m => m.national_id && m.national_id.trim() === d.national_id.trim());
+    // ── Duplicate: same National ID (including inactive accounts) ────────
+    const dupById = state.data.members.find(m => cleanMemberText(m.national_id) && cleanMemberText(m.national_id) === cleanMemberText(d.national_id));
     if(dupById){
       const dupGroup = state.data.groups.find(g => g.id === dupById.group_id);
-      toast(`A client with National ID ${d.national_id} is already registered as "${dupById.full_name}"${dupGroup?' in group '+dupGroup.name:''}. Cannot register twice.`, 'error');
+      toast(`This client is already registered as "${dupById.full_name}"${dupGroup?' in group '+dupGroup.name:''}. ${dupById.status==='inactive'?'Ask an authorized manager to reactivate the existing account or arrange a group transfer.':'Use the existing account instead of registering again.'}`, 'error');
       return false;
     }
     // ── Duplicate: same phone number (active/pending members only) ────────
