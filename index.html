@@ -859,7 +859,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261126-member-reconciliation';
+const APP_RELEASE='20261126-member-review-count';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -4472,7 +4472,7 @@ function pageMembers(){
         <option value="pending" ${filterStatus==='pending'?'selected':''}>Pending approval</option>
         <option value="inactive" ${filterStatus==='inactive'?'selected':''}>Inactive</option>
       </select>
-      <button class="btn ${state._memberDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="toggleMemberDuplicatesOnly()">Duplicates only${duplicateCount?` (${duplicateCount})`:''}</button>
+      <button class="btn ${state._memberDuplicatesOnly?'btn-primary':'btn-outline'}" onclick="toggleMemberDuplicatesOnly()">Duplicates only (${duplicateCount})</button>
       ${canManageMemberDuplicates() && removableDuplicateCount ? `<button class="btn btn-outline" onclick="removeEmptyDuplicateMembers()">Remove empty duplicates (${removableDuplicateCount})</button>` : ''}
     </div>
     <div class="table-wrap">
@@ -4512,7 +4512,7 @@ function pageMembers(){
               <td>${activeMemberLoanCount?`<span class="badge b-blue">${activeMemberLoanCount} active loan${activeMemberLoanCount!==1?'s':''}</span>`:'<span class="badge b-grey">None</span>'}</td>
               <td onclick="event.stopPropagation()"><button class="act-btn" onclick="memberActions(event,'${m.id}')">···</button></td>
             </tr>`;
-          }).join('') || `<tr><td colspan="7"><div class="empty"><h4>No members found</h4><p>${filterStatus==='pending'?'No clients awaiting approval.':'Register a member to one of your active groups.'}</p></div></td></tr>`}
+          }).join('') || `<tr><td colspan="7"><div class="empty"><h4>${state._memberDuplicatesOnly?'No duplicate matches found':'No members found'}</h4><p>${state._memberDuplicatesOnly?'No potential duplicates match the selected filters.':filterStatus==='pending'?'No clients awaiting approval.':'Register a member to one of your active groups.'}</p></div></td></tr>`}
         </tbody>
       </table>
     </div>
