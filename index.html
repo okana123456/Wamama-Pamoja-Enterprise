@@ -275,6 +275,21 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 @media(max-width:900px){.compliance-filters{grid-template-columns:1fr 1fr}.compliance-group .group-metrics{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:700px){.product-sales-filters{grid-template-columns:1fr}.product-sales-filters .btn{width:100%}.product-sales-metrics{grid-template-columns:1fr}}
 @media(max-width:560px){.compliance-filters{grid-template-columns:1fr}.compliance-group .group-metrics{grid-template-columns:repeat(2,1fr)}.compliance-filters .btn{width:100%}}
+
+/* Administrator-only, time-limited support package announcement. */
+.gold-package-notice{position:fixed;top:84px;right:24px;z-index:65;width:min(390px,calc(100vw - 32px));box-sizing:border-box;padding:22px;border:1px solid #d4af55;border-top:4px solid #c49627;border-radius:16px;background:linear-gradient(135deg,#fffdf4,#fff7dc);color:#493817;box-shadow:0 12px 36px #5b430f26;animation:gold-package-glow 1.8s ease-in-out 2}
+.gold-package-badge{display:inline-block;background:#6d5017;color:#fff4cc;padding:5px 10px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:1.4px}
+.gold-package-notice h2{font-size:20px;line-height:1.3;margin:14px 25px 8px 0;color:#493817}
+.gold-package-notice p{font-size:14px;line-height:1.6;margin:8px 0;color:#66512c}
+.gold-package-price{font-size:26px;font-weight:800;color:#493817;margin-top:14px}
+.gold-package-price small{font-size:13px;font-weight:500}
+.gold-package-close{position:absolute;right:12px;top:12px;border:0;background:transparent;color:#66512c;cursor:pointer;font-size:25px;width:34px;height:34px;border-radius:50%}
+.gold-package-close:hover{background:#ead7a5}
+.gold-package-view{margin-top:16px;padding:10px 15px;border:1px solid #bd963e;border-radius:8px;background:#6d5017;color:#fff9e8;font-weight:700;cursor:pointer}
+@keyframes gold-package-glow{50%{box-shadow:0 12px 36px #5b430f26,0 0 0 5px #dfbd5729}}
+@media(prefers-reduced-motion:reduce){.gold-package-notice{animation:none}}
+@media(max-width:600px){.gold-package-notice{top:76px;right:16px;padding:18px}}
+
 </style>
 </head>
 <body>
@@ -844,7 +859,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261118-idempotent-submissions';
+const APP_RELEASE='20261125-gold-package-notice';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1758,6 +1773,7 @@ async function ensureFreshToken(){
 }
 
 async function afterLogin(offline){
+  state._goldPackageNoticeDismissed=false;
   if(offline){
     state._portfolioDataVerified = false;
     state._portfolioRefreshFailed = true;
@@ -1794,6 +1810,7 @@ async function signOut(){
 }
 async function resetAccountData(){
   state._accountEpoch++;
+  state._goldPackageNoticeDismissed=false;
   state._meet=null; // a meeting draft never carries over to another account
   state._dataTablesLoading=null;state._dataTableErrors=null;
   state._officerLoanDepositRows=[];
@@ -2567,10 +2584,50 @@ function renderSubscriptionLock(){
   app.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:var(--bg);padding:24px"><div class="card card-pad" style="width:100%;max-width:520px;border-top:4px solid var(--danger)"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="width:38px;height:38px;border-radius:8px;background:var(--danger-50);color:var(--danger);display:grid;place-items:center;font-weight:800">!</div><div><h2 style="margin:0;font-size:20px">Admin access locked</h2><div class="muted" style="font-size:12px">Wamama Pamoja Enterprise</div></div></div><p class="muted" style="line-height:1.6;margin-top:0">${billingMessage()}</p><div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:14px 0"><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Amount due</span><strong>${MONTHLY_SUBSCRIPTION_LABEL}</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Paybill</span><strong>4024241</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span class="muted">Reference</span><strong>RUDDERDATA</strong></div></div>${renderBillingPaymentForm({ locked:true })}</div></div>`;
   attachBillingPaymentForm();
 }
+
+/* Gold notice is a fixed, dated announcement; it never changes payment collection. */
+const GOLD_PACKAGE_NOTICE={businessId:'b3462eea-1c92-4411-9507-fb6c0b31ba28',starts:'2026-11-25',ends:'2026-11-30',effectiveLabel:'1 December 2026'};
+function shouldShowGoldPackageNotice(){
+  if(!isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId || state.view!=='dashboard' || state._goldPackageNoticeDismissed) return false;
+  const d=billingTodayParts(),date=`${d.year}-${d.month}-${String(d.day).padStart(2,'0')}`;
+  return date>=GOLD_PACKAGE_NOTICE.starts && date<=GOLD_PACKAGE_NOTICE.ends;
+}
+function dismissGoldPackageNotice(){
+  state._goldPackageNoticeDismissed=true;
+  document.getElementById('gold-package-notice')?.remove();
+}
+function renderGoldPackageNotice(){
+  if(!shouldShowGoldPackageNotice()) return '';
+  return `<aside id="gold-package-notice" class="gold-package-notice" role="region" aria-labelledby="gold-package-title">
+    <button type="button" class="gold-package-close" onclick="dismissGoldPackageNotice()" aria-label="Dismiss package notice until your next login">×</button>
+    <span class="gold-package-badge">GOLD SUPPORT PACKAGE</span>
+    <h2 id="gold-package-title">Your business has grown</h2>
+    <p>Your account now holds over <strong>2,000 client records.</strong></p>
+    <div class="gold-package-price">KES 10,000<small> / month</small></div>
+    <p>Effective <strong>${GOLD_PACKAGE_NOTICE.effectiveLabel}</strong>.<br>Payable at the beginning of each month.</p>
+    <button type="button" class="gold-package-view" onclick="showGoldPackageDetails()">View package →</button>
+  </aside>`;
+}
+function showGoldPackageDetails(){
+  if(!isAdminBillingUser() || String(state.staff.business_id)!==GOLD_PACKAGE_NOTICE.businessId) return;
+  modal({title:'Gold Support Package',body:`
+    <div style="border-top:4px solid #c49627;padding-top:15px">
+      <span class="gold-package-badge">GOLD</span>
+      <div class="gold-package-price">KES 10,000<small> / month</small></div>
+      <p style="line-height:1.6">For growing operations with heavier usage and multiple departments.</p>
+      <ul style="padding-left:20px;line-height:1.9"><li>Up to 5,000 retained client records</li><li>Support for teams of 20–40 users</li><li>Ongoing system maintenance and database optimization</li><li>Advanced reporting support</li><li>Priority assistance and a monthly performance report</li></ul>
+      <p style="line-height:1.6"><strong>Effective:</strong> ${GOLD_PACKAGE_NOTICE.effectiveLabel}<br><strong>Payment:</strong> Beginning of each month</p>
+    </div>`,actions:[{label:'Close',cls:'btn-outline',onClick:closeModal}]});
+}
+
 function render(){
   if(!state.session){ renderAuth(); return; }
   if(isSubscriptionLocked()){ renderSubscriptionLock(); return; }
   renderShell();
+  if(!shouldShowBillingReminder()){
+    const notice=renderGoldPackageNotice();
+    if(notice) $('app')?.insertAdjacentHTML('beforeend',notice);
+  }
   if(shouldShowBillingReminder()){
     const app = $('app');
     if(app){ app.insertAdjacentHTML('beforeend', renderBillingReminder()); attachBillingPaymentForm(); }
