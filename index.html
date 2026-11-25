@@ -377,7 +377,7 @@ const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 // id-only list (about 45 bytes per row) instead of re-downloading the table.
 const DELETION_RECONCILE_TABLES = new Map([
   ['pb_loans', 6 * 60 * 60 * 1000],
-  ['pb_members', 24 * 60 * 60 * 1000],
+  ['pb_members', 0], // Verify archived/deleted profiles on every login or explicit data refresh.
   ['pb_orders', 24 * 60 * 60 * 1000],
   ['pb_guarantors', 24 * 60 * 60 * 1000],
   ['pb_inventory', 24 * 60 * 60 * 1000],
@@ -859,7 +859,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261125-member-identity-review';
+const APP_RELEASE='20261126-member-reconciliation';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -1810,6 +1810,7 @@ async function signOut(){
 }
 async function resetAccountData(){
   state._accountEpoch++;
+  state._memberMatchResolutions=[];
   state._goldPackageNoticeDismissed=false;
   state._meet=null; // a meeting draft never carries over to another account
   state._dataTablesLoading=null;state._dataTableErrors=null;
@@ -1921,7 +1922,7 @@ async function fetchIncrementalRows(table,cached){
 
 async function removeDeletedCachedRows(table,rows){
   const cachedRows=Array.isArray(rows)?rows:[];
-  if(!cachedRows.length) return {data:cachedRows,error:null};
+  if(!cachedRows.length && table!=='pb_members') return {data:cachedRows,error:null};
   // One id-only keyset pass (1,000 ids per request) instead of 200-id lookups.
   const existingIds=new Set();
   let lastId=null;
@@ -1935,7 +1936,19 @@ async function removeDeletedCachedRows(table,rows){
     if(!data || data.length<FULL_SYNC_PAGE_SIZE) break;
     lastId=data[data.length-1].id;
   }
-  return {data:cachedRows.filter(row=>existingIds.has(String(row.id))),error:null};
+  if(existingIds.size>=FULL_SYNC_MAX_ROWS) return {data:cachedRows,error:{message:`${table} has too many IDs to verify safely.`}};
+  const kept=cachedRows.filter(row=>existingIds.has(String(row.id)));
+  if(table==='pb_members'){
+    const known=new Set(kept.map(row=>String(row.id)));
+    const missing=[...existingIds].filter(id=>!known.has(id));
+    if(missing.length>200) return fetchBusinessTableRows(table);
+    if(missing.length){
+      const extra=await fetchPagedBusinessRows(table,q=>q.in('id',missing));
+      if(extra.error) return {data:cachedRows,error:extra.error};
+      kept.push(...(extra.data||[]));
+    }
+  }
+  return {data:kept,error:null};
 }
 
 async function loadBusinessTableOptimized(table){
@@ -1971,7 +1984,10 @@ async function loadBusinessTableOptimized(table){
     if(!reconciled.error){
       result.data=reconciled.data;
       reconciledAt=Date.now();
+    }else if(table==='pb_members'){
+      return {data:cached.rows,error:reconciled.error,fromCache:true,stale:true};
     }
+    if(cancelled()) return cancelledResult();
   }
   if(!result.error && !cancelled()) await writeFinancialCache(table,result.data,cached.fullSyncAt,reconciledAt,syncStartedAt);
   return result;
@@ -2159,7 +2175,7 @@ async function loadAllFinancialData(){
     // On a new device, make the operational screens usable before the much
     // larger savings and repayment histories finish their first local sync.
     if(stageIndex===0 && !jwtBroken){
-      await loadInventoryReferencePrices();
+      await Promise.all([loadInventoryReferencePrices(),loadMemberMatchResolutions()]);
       if(epoch!==state._accountEpoch) return;
       state.data.purchases.forEach(p=>{
         p.items=state.data.purchaseLines.filter(line=>line.purchase_id===p.id);
@@ -2316,25 +2332,42 @@ function buildBalanceIndexes(){
   if(financialReadScope) financialReadScope.set('balances',result);
   return result;
 }
+async function loadMemberMatchResolutions(){
+  const epoch=state._accountEpoch,staffId=state.staff?.id;
+  const result=await fetchBusinessTableRows('pb_member_match_resolutions');
+  if(epoch!==state._accountEpoch || staffId!==state.staff?.id) return;
+  state._memberMatchResolutions=result.error?[]:(result.data||[]);
+  _memberPageIndexes=null;
+}
+function isVerifiedDistinctMemberPair(a,b){
+  // A confirmed distinction never overrides a newly matching national ID.
+  const idA=cleanMemberText(a.national_id),idB=cleanMemberText(b.national_id);
+  if(idA && idB && idA===idB) return false;
+  return (state._memberMatchResolutions||[]).some(r=>{
+    if(r.business_id!==state.staff?.business_id || r.disposition!=='distinct_people') return false;
+    const first=String(a.id)===String(r.member_a)?a:b;
+    const second=first===a?b:a;
+    return String(first.id)===String(r.member_a) && String(second.id)===String(r.member_b)
+      && !!first.updated_at && !!second.updated_at
+      && String(first.updated_at)===String(r.member_a_updated_at)
+      && String(second.updated_at)===String(r.member_b_updated_at);
+  });
+}
 function buildDuplicateMemberIds(members){
-  const ids=new Map(), phones=new Map(), namesInGroup=new Map();
-  const bump=(map,key)=>{ if(key) map.set(key,(map.get(key)||0)+1); };
+  const ids=new Map(),phones=new Map(),namesInGroup=new Map(),flagged=new Set();
+  const add=(map,key,member)=>{if(key){if(!map.has(key))map.set(key,[]);map.get(key).push(member);}};
   for(const member of members||[]){
-    const id=cleanMemberText(member.national_id);
-    const phone=normalisePhone(member.phone||'');
-    const name=cleanMemberText(member.full_name);
-    bump(ids,id);
-    bump(phones,phone.length>=9?phone:'');
-    bump(namesInGroup,name?`${name}|${member.group_id||''}`:'');
+    const id=cleanMemberText(member.national_id),phone=normalisePhone(member.phone||''),name=cleanMemberText(member.full_name);
+    add(ids,id,member);add(phones,phone.length>=9?phone:'',member);
+    add(namesInGroup,name?`${name}|${member.group_id||''}`:'',member);
   }
-  return new Set((members||[]).filter(member=>{
-    const id=cleanMemberText(member.national_id);
-    const phone=normalisePhone(member.phone||'');
-    const name=cleanMemberText(member.full_name);
-    return (id&&(ids.get(id)||0)>1)
-      || (phone.length>=9&&(phones.get(phone)||0)>1)
-      || (name&&(namesInGroup.get(`${name}|${member.group_id||''}`)||0)>1);
-  }).map(member=>String(member.id)));
+  for(const group of ids.values())if(group.length>1)group.forEach(m=>flagged.add(String(m.id)));
+  for(const map of [phones,namesInGroup])for(const group of map.values())if(group.length>1){
+    for(let i=0;i<group.length;i++)for(let j=i+1;j<group.length;j++){
+      if(!isVerifiedDistinctMemberPair(group[i],group[j])){flagged.add(String(group[i].id));flagged.add(String(group[j].id));}
+    }
+  }
+  return flagged;
 }
 function memberLoan(memberId){
   return state.data.loans.find(l=>l.member_id===memberId && l.status==='active');
@@ -2369,7 +2402,7 @@ function memberDuplicateMatches(member){
     const sameId = id && cleanMemberText(other.national_id) === id;
     const samePhone = phone && phone.length >= 9 && normalisePhone(other.phone||'') === phone;
     const sameNameInGroup = name && cleanMemberText(other.full_name) === name && other.group_id === member.group_id;
-    return sameId || samePhone || sameNameInGroup;
+    return sameId || ((samePhone || sameNameInGroup) && !isVerifiedDistinctMemberPair(member,other));
   });
 }
 function isDuplicateMember(member){
@@ -3650,7 +3683,7 @@ function pageDashboard(){
   const outstandingPrincipal = activeLoanBalances.reduce((a,l)=>a+l.outstandingPrincipal,0);
   const interestEarned = periodCashTotals({start,end})?.interest ?? repayments.reduce((a,r)=>a+repaymentAppliedInterest(r),0);
   const savingsThreshold=Number(state.settings?.savings_threshold||400);
-  const eligibleCount = state.data.members.filter(m=>(savingsByMember.get(m.id)||0)>=savingsThreshold).length;
+  const eligibleCount = state.data.members.filter(m=>m.status==='active' && (savingsByMember.get(m.id)||0)>=savingsThreshold).length;
   const invValue = state.data.inventory.reduce((a,i)=>a+Number(i.buying_price||0)*Number(i.stock||0),0);
   const closedLoans = state.data.loans.filter(l=>l.status==='completed' && inRangeFallback(l.updated_at||l.expected_end_date||l.start_date,l.updated_at)).length;
   const closedClients = state.data.members.filter(m=>{
@@ -3706,7 +3739,7 @@ function pageDashboard(){
       <div class="kpi"><div class="l">Outstanding P + I</div><div class="v">${KES(outstandingBal)}</div><div class="d">${activeLoans.length} active loans</div></div>
       <div class="kpi"><div class="l">Outstanding principal</div><div class="v">${KES(outstandingPrincipal)}</div><div class="d">principal only</div></div>
       <div class="kpi k-success"><div class="l">Repayments received</div><div class="v">${KES(totalRepay)}</div><div class="d">Interest ${KES(interestEarned)}</div></div>
-      <div class="kpi k-warn"><div class="l">Members</div><div class="v">${state.data.members.length}</div><div class="d">${provisional?'loan eligibility: verifying…':eligibleCount+' loan-eligible'}</div></div>
+      <div class="kpi k-warn"><div class="l">Members</div><div class="v">${state._dataTablesLoading?.has('pb_members')||state._dataTableErrors?.has('pb_members')?VERIFYING_HTML:state.data.members.length}</div><div class="d">${provisional?'loan eligibility: verifying…':eligibleCount+' loan-eligible'}</div></div>
       <div class="kpi"><div class="l">Inventory value</div><div class="v">${KES(invValue)}</div><div class="d">${state.data.inventory.length} assets</div></div>
       <div class="kpi k-primary"><div class="l">Groups</div><div class="v">${state.data.groups.length}</div><div class="d">${state.data.groups.filter(g=>g.status==='active').length} active</div></div>
       <div class="kpi k-success"><div class="l">Loans closed</div><div class="v">${closedLoans}</div><div class="d">in selected period</div></div>
@@ -4360,6 +4393,7 @@ function pageMembers(){
   const sourceKeys=['members','savings','repayments','loans','orders','guarantors'];
   const reuseIndexes=document.activeElement?.id==='mem-search' &&
     _memberPageIndexes?.epoch===state._accountEpoch &&
+    _memberPageIndexes.matchResolutions===state._memberMatchResolutions &&
     sourceKeys.every(key=>_memberPageIndexes.sources[key]===state.data[key] &&
       _memberPageIndexes.lengths[key]===(state.data[key]||[]).length);
   let savingsByMember,duplicateMemberIds,linkedMemberIds,activeLoanCountByMember;
@@ -4382,7 +4416,7 @@ function pageMembers(){
         activeLoanCountByMember.set(loan.member_id,(activeLoanCountByMember.get(loan.member_id)||0)+1);
       }
     });
-    _memberPageIndexes={epoch:state._accountEpoch,
+    _memberPageIndexes={epoch:state._accountEpoch,matchResolutions:state._memberMatchResolutions,
       sources:Object.fromEntries(sourceKeys.map(key=>[key,state.data[key]])),
       lengths:Object.fromEntries(sourceKeys.map(key=>[key,(state.data[key]||[]).length])),
       savingsByMember,duplicateMemberIds,linkedMemberIds,activeLoanCountByMember};

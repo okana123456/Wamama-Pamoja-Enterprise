@@ -1,0 +1,22 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict'),path=require('path');
+const html=fs.readFileSync(path.join(__dirname,'../index.html'),'utf8'),code=html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
+const node={style:{},classList:{toggle(){},add(){},remove(){}}};const box={WamamaFinance:require('../financial-rules.js'),console,Intl,Date,URL,Map,Set,Promise,AbortController,window:{addEventListener(){}},document:{addEventListener(){},getElementById(){return node},querySelector(){return null},documentElement:node},navigator:{onLine:true},localStorage:{getItem(){return null},setItem(){},removeItem(){}},sessionStorage:{getItem(){return null},setItem(){},removeItem(){}},setInterval(){},setTimeout(){return 1},clearTimeout(){},requestAnimationFrame(){},supabase:{createClient(){return {auth:{onAuthStateChange(){}}}}}};
+vm.createContext(box);vm.runInContext(code.slice(0,code.indexOf('(async function boot(){')),box);const run=s=>vm.runInContext(s,box);
+run('globalThis.originalRemoval=removeDeletedCachedRows');
+(async()=>{run(`state.staff={id:'admin',business_id:'biz',role:'admin'};state._memberMatchResolutions=[];globalThis.a={id:'a',business_id:'biz',full_name:'Molly',group_id:'g',national_id:'111',phone:'0700000001',updated_at:'2026-11-26T00:00:00+00:00'};globalThis.b={...a,id:'b',national_id:'222',phone:'0700000002'};state.data.members=[a,b];`);
+assert.equal(run('buildDuplicateMemberIds([a,b]).size'),2);
+run(`state._memberMatchResolutions=[{business_id:'biz',member_a:'a',member_b:'b',member_a_updated_at:a.updated_at,member_b_updated_at:b.updated_at,disposition:'distinct_people'}]`);
+assert.equal(run('buildDuplicateMemberIds([a,b]).size'),0);assert.equal(run('memberDuplicateMatches(a).length'),0);
+run("b.national_id='111'");assert.equal(run('buildDuplicateMemberIds([a,b]).size'),2,'same national ID always remains flagged');
+run("b.national_id='222';b.updated_at='2026-11-26T00:00:01+00:00'");assert.equal(run('buildDuplicateMemberIds([a,b]).size'),2,'edited profiles require renewed review');
+run("b.updated_at=a.updated_at;state._memberMatchResolutions[0].business_id='other'");assert.equal(run('buildDuplicateMemberIds([a,b]).size'),2,'other business resolutions do not apply');
+assert.equal(run("DELETION_RECONCILE_TABLES.get('pb_members')"),0);
+run(`sb.from=()=>({select(){return this},order(){return this},limit(){return this},eq(){return this},then(resolve){resolve({data:[{id:'a'},{id:'new'}],error:null})}});fetchPagedBusinessRows=async()=>({data:[{id:'new',full_name:'New member'}],error:null})`);
+const reconciled=await run('originalRemoval("pb_members",[a,b])');assert.deepEqual(Array.from(reconciled.data,x=>x.id),['a','new'],'archived ID removed and missing server member fetched');
+
+run(`globalThis.reconciles=0;globalThis.cacheWrites=0;readFinancialCache=async()=>({rows:[a,b],savedAt:Date.now(),fullSyncAt:Date.now(),reconciledAt:Date.now()});fetchIncrementalRows=async()=>({data:[a,b],error:null});removeDeletedCachedRows=async()=>{reconciles++;return {data:[a],error:null}};writeFinancialCache=async()=>{cacheWrites++}`);
+const result=await run("loadBusinessTableOptimized('pb_members')");assert.equal(result.data.length,1);assert.equal(box.reconciles,1);assert.equal(box.cacheWrites,1);
+run("removeDeletedCachedRows=async()=>({data:[a,b],error:{message:'Network unavailable'}})");const failed=await run("loadBusinessTableOptimized('pb_members')");assert.equal(failed.stale,true);assert.match(failed.error.message,/Network/);assert.equal(box.cacheWrites,1,'unverified count must not be cached as fresh');
+assert.match(html,/const eligibleCount = state.data.members.filter\(m=>m.status==='active'/);
+assert.match(html,/state\._dataTablesLoading\?\.has\('pb_members'\).*VERIFYING_HTML:state\.data\.members\.length/);
+console.log('PASS: explicit distinct-person resolution, unchanged-ID safety, edit invalidation, business scope, archived-profile reconciliation on every refresh, and failure does not verify a stale member count');})().catch(e=>{console.error(e);process.exit(1)});
