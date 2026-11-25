@@ -7,8 +7,7 @@
 <title>Wamama Pamoja Enterprise</title>
 <link rel="manifest" href='data:application/manifest+json;base64,eyJuYW1lIjogIldhbWFtYSBQYW1vamEgRW50ZXJwcmlzZSIsICJzaG9ydF9uYW1lIjogIldhbWFtYSBQYW1vamEiLCAic3RhcnRfdXJsIjogIi4iLCAic2NvcGUiOiAiLiIsICJkaXNwbGF5IjogInN0YW5kYWxvbmUiLCAiYmFja2dyb3VuZF9jb2xvciI6ICIjZmZmYWY1IiwgInRoZW1lX2NvbG9yIjogIiNlNjVjMDAiLCAiaWNvbnMiOiBbeyJzcmMiOiAiZGF0YTppbWFnZS9zdmcreG1sO3V0ZjgsPHN2ZyUyMHhtbG5zPSdodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyclMjB2aWV3Qm94PScwJTIwMCUyMDUxMiUyMDUxMic+PHJlY3QlMjB3aWR0aD0nMTAwJTI1JyUyMGhlaWdodD0nMTAwJTI1JyUyMGZpbGw9JyUyM2U2NWMwMCcvPjx0ZXh0JTIweD0nNTAlMjUnJTIweT0nNjIlMjUnJTIwZm9udC1zaXplPScyMjAnJTIwdGV4dC1hbmNob3I9J21pZGRsZSclMjBmaWxsPSclMjNmZmYnJTIwZm9udC1mYW1pbHk9J3NhbnMtc2VyaWYnJTIwZm9udC13ZWlnaHQ9JzcwMCc+V1A8L3RleHQ+PC9zdmc+IiwgInNpemVzIjogIjUxMng1MTIiLCAidHlwZSI6ICJpbWFnZS9zdmcreG1sIiwgInB1cnBvc2UiOiAiYW55IG1hc2thYmxlIn1dfQ==' />
 <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='100%25' height='100%25' rx='12' fill='%23e65c00'/><text x='50%25' y='62%25' font-size='30' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>WP</text></svg>" />
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/dist/umd/supabase.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <style>
 :root{
@@ -296,10 +295,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
 
 <div id="status-banner" class="status-banner"></div>
 <div id="toast-stack" class="toast-stack"></div>
-<div id="app"></div>
+<div id="app"><main id="startup-loading" style="min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box"><section class="card card-pad" style="max-width:440px;width:100%;box-sizing:border-box" aria-live="polite"><div style="font-weight:800;color:var(--primary);margin-bottom:12px">Wamama Pamoja Enterprise</div><h1 style="font-size:22px">Opening your secure workspace</h1><p class="muted">Checking your sign-in. Please wait.</p><button type="button" class="btn btn-outline" onclick="window.location.reload()">Taking longer? Reload page</button></section></main></div>
 <div id="modal-root"></div>
 <div id="actmenu-root"></div>
 
+<script src="vendor/supabase-2.119.0.js"></script>
 <script src="financial-rules.js?v=20261004-inventory-cost-and-search"></script>
 <script>
 /* =====================================================================
@@ -859,7 +859,7 @@ window.addEventListener('focus',refreshFinancialFiguresIfStale);
 document.addEventListener('visibilitychange',refreshFinancialFiguresIfStale);
 setInterval(refreshFinancialFiguresIfStale,5*60*1000);
 // This tiny static check uses website hosting, never a Supabase data request.
-const APP_RELEASE='20261125-gold-package-notice';
+const APP_RELEASE='20261125-startup-recovery';
 let appUpdateAvailable=false,appUpdateReloading=false,appUpdateCheckAt=0,appUpdateRequest=null;
 let appUpdateTargetVersion=null;
 function canApplyAppUpdate(){
@@ -13307,17 +13307,29 @@ function indexedFinancialAction(fn){
  = [downloadCollectionFieldSheetPdf,downloadWamamaRepaymentStatementPdf,downloadWamamaSavingsStatementPdf]
  .map(fn=>deferredExportAction(fn,'pdf'));
 
+async function startupWithTimeout(promise,timeoutMs=15000){
+  let timer;
+  try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Secure startup timed out.')),timeoutMs);})]);}
+  finally{clearTimeout(timer);}
+}
+function renderStartupFailure(){
+  const app=document.getElementById('app');
+  if(!app) return;
+  app.innerHTML=`<main style="min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box"><section class="card card-pad" style="max-width:440px;width:100%;box-sizing:border-box" role="alert"><h1 style="font-size:22px">Connection interrupted</h1><p class="muted">We could not finish checking your sign-in. Check your connection and reload to try again.</p><button type="button" class="btn btn-primary" onclick="window.location.reload()">Reload and try again</button></section></main>`;
+}
+
 (async function boot(){
   applyTheme();
-  await checkAppRelease();
+  void checkAppRelease();
   if(appUpdateReloading) return;
   // Restore session
-  const { data } = await sb.auth.getSession();
+  const { data,error } = await startupWithTimeout(sb.auth.getSession());
+  if(error) throw error;
   if(data.session){
     state.session = data.session;
-    const ok = await loadStaff();
+    const ok = await startupWithTimeout(loadStaff());
     if(!ok){ await sb.auth.signOut(); state.session=null; render(); return; }
-    await Promise.all([loadSettings(),loadBillingStatus({ silent:true })]);
+    await startupWithTimeout(Promise.all([loadSettings(),loadBillingStatus({ silent:true })]));
     if(isSubscriptionLocked()){ render(); return; }
     await smartLoadAll();
     setupRealtime();
@@ -13335,7 +13347,7 @@ function indexedFinancialAction(fn){
     render();
   }
   if(!navigator.onLine) setBanner('You are offline. Cached data shown. Changes will be queued.');
-})();
+})().catch(error=>{console.error('Secure startup failed',error);renderStartupFailure();});
 
 </script>
 </body>
